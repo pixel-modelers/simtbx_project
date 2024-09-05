@@ -1980,9 +1980,6 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
       .def("raw_pixels_unsigned_short_as_python_bytes",&raw_pixels_unsigned_short_as_python_bytes,
         (arg_("intfile_scale")=0,arg_("debug_x")=-1,arg("debug_y")=-1),
         "get the unsigned short raw pixels as a Python bytes object.  Intfile_scale is applied before rounding off to integral pixel values")
-      .def("to_smv_format_streambuf",&nanoBragg::to_smv_format_streambuf,
-        (arg_("output"),arg_("intfile_scale")=0,arg_("debug_x")=-1,arg("debug_y")=-1),
-        "provide the integer buffer only to be used in Python for SMV-format output.  Intfile_scale is applied before rounding off to integral pixel values")
     ;
     // end of nanoBragg class definition
 
