@@ -20,7 +20,7 @@
 #include <boost/math/special_functions/erf.hpp>
 #include <boost/math/special_functions/fpclassify.hpp>
 // #include <omptbx/omp_or_stubs.h>
-#include "nanotypes.h"
+#include <simtbx/nanoBragg/nanotypes.h>
 
 using boost::math::erf;
 using boost::math::isnan;
