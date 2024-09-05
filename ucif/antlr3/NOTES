@@ -1,6 +1,0 @@
-This is v3.5.2 of antlr3 from https://github.com/antlr/antlr3
-
-The include and src directories are copies of runtime/C/include and
-runtime/C/src, respectively.
-
-The antlr3.patch was applied to improve compatibility.

@@ -1,6 +1,0 @@
-Import("env_cctbx_boost_python_ext")
-env = env_cctbx_boost_python_ext.Clone()
-env.Prepend(LIBS=["cctbx"])
-env.SharedLibrary(
-  target="#lib/cctbx_multipolar_ext",
-  source=["aspherical_ext.cpp"])

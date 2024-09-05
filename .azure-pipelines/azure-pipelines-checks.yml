@@ -1,7 +1,0 @@
-# Basic checks
-
-stages:
-- stage: Checks
-  displayName: Check
-  jobs:
-    - template: ./syntax.yml

@@ -1,5 +1,0 @@
-{
-  "modules_required_for_use": ["iotbx"],
-  "modules_required_for_build": ["annlib","dxtbx","spotfinder"],
-  "optional_modules": ["annlib"]
-}
