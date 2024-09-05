@@ -4,7 +4,10 @@ try:
     from collections.abc import Iterable
 except ModuleNotFoundError:
     from collections import Iterable
-from simtbx.diffBragg import diffBragg
+try:
+  from simtbx.diffBragg import diffBragg
+except:
+  diffBragg = None
 from scitbx.array_family import flex
 import numpy as np
 from simtbx.nanoBragg.anisotropic_mosaicity import AnisoUmats
