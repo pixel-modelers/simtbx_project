@@ -12,9 +12,6 @@
 
 #include <simtbx/nanoBragg/nanoBragg.h>
 
-#if PY_MAJOR_VERSION >= 3
-#define IS_PY3K
-#endif
 
 
 using namespace boost::python;
@@ -1306,11 +1303,7 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
             ++i;
         }
     }
-  #ifdef IS_PY3K
-    return PyBytes_FromStringAndSize(os.str().c_str(), os.str().size());
-  #else
-    return PyString_FromStringAndSize(os.str().c_str(), os.str().size());
-  #endif
+  return PyBytes_FromStringAndSize(os.str().c_str(), os.str().size());
   }
 
 
@@ -1935,10 +1928,6 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
       /* actual run of the spot simulation */
       .def("add_nanoBragg_spots",&nanoBragg::add_nanoBragg_spots,
        "actually run the spot simulation, going pixel-by-pixel over the region-of-interst")
-
-      /* actual run of the spot simulation, restricted implementation plus OpenMP */
-      .def("add_nanoBragg_spots_nks",&nanoBragg::add_nanoBragg_spots_nks,
-       "actually run the spot simulation, going pixel-by-pixel over the region-of-interest, restricted options, plus OpenMP")
 
       .add_property("device_Id",
                      make_getter(&nanoBragg::device_Id,rbv()),

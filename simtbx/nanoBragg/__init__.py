@@ -16,7 +16,10 @@ from dxtbx.model import CrystalFactory
 from dxtbx.model import BeamFactory
 from dxtbx.model import DetectorFactory
 from dxtbx.format.Format import Format
-from dxtbx.format import cbf_writer, nxmx_writer
+from dxtbx.format import cbf_writer
+try: from dxtbx.format import nxmx_writer
+except:
+    nxmx_writer = None
 from cctbx import sgtbx
 from cctbx.sgtbx.literal_description import literal_description
 import numpy as np
@@ -343,6 +346,7 @@ class _():
          intfile_scale = 1 (default): do not apply a factor
          intfile_scale = 0 : compute a reasonable scale factor to set max pixel to 55000; given by get_intfile_scale()"""
 
+    assert nxmx_writer is not None
     if intfile_scale != 1.0:
       cache_pixels = self.raw_pixels
       if intfile_scale > 0: self.raw_pixels = self.raw_pixels * intfile_scale
@@ -375,6 +379,7 @@ class _():
       # print("switch back to cached")
 
 def nexus_factory(nxmx_filename):
+    assert nxmx_writer is not None
     params = nxmx_writer.phil_scope.fetch(parse("""
     output_file=%s
     nexus_details {
