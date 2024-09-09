@@ -2380,6 +2380,7 @@ nanoBragg::show_params()
     if(xtal_shape == SQUARE) printf("parallelpiped");
     if(xtal_shape == GAUSS ) printf("gaussian");
     if(xtal_shape == GAUSS_ARGCHK ) printf("gaussian_argchk");
+    if(xtal_shape == GAUSS_STAR ) printf("gaussian_star");
     if(xtal_shape == TOPHAT) printf("tophat-spot");
     printf(" xtal: %.1fx%.1fx%.1f cells\n",Na,Nb,Nc);
     printf("Unit Cell: %g %g %g %g %g %g\n", a_A[0],b_A[0],c_A[0],alpha*RTD,beta*RTD,gamma*RTD);
@@ -2672,6 +2673,15 @@ nanoBragg::add_nanoBragg_spots()
                                         double my_arg = hrad_sqr / 0.63 * fudge; // pre-calculate to check for no Bragg signal
                                         if (my_arg<35.){ F_latt = Na * Nb * Nc * exp(-(my_arg));}
                                         else { F_latt = 0.; } // not expected to give performance gain on optimized C++, only on GPU
+                                    }
+                                    if (xtal_shape == GAUSS_STAR){
+                                        double xtal_size_sq = pow(Na*Nb*Nc*V_cell, double(2)/double(3));
+                                        vec3 delta_H {h-h0, k-k0, l-l0};
+                                        mat3 At(a[1], a[2], a[3], b[1], b[2], b[3], c[1], c[2], c[3]);
+                                        mat3 Ainverse =  (1e10*At).inverse();
+                                        vec3 delta_Q = Ainverse*delta_H;
+                                        double rad_star_sqr = (delta_Q*delta_Q)*xtal_size_sq; // dot product
+                                        F_latt = Na*Nb*Nc*exp(-( rad_star_sqr*1.75*fudge ));
                                     }
 
                                     if(xtal_shape == TOPHAT)
@@ -3884,6 +3894,70 @@ double nanoBragg::get_intfile_scale(double intfile_scale) const {
     return intfile_scale;
 }
 
+void
+nanoBragg::to_smv_format_streambuf(boost_adaptbx::python::streambuf & output,
+    double intfile_scale, int const&debug_x, int const& debug_y) const {
+    boost_adaptbx::python::streambuf::ostream os(output);
+    const double* floatimage = raw_pixels.begin();
+    double max_value = (double)std::numeric_limits<unsigned short int>::max();
+    double saturation = floor(max_value - 1 );
+    /* output as ints */
+
+    unsigned short int intimage;
+    double max_I = this-> max_I;
+    double max_I_x = this-> max_I_x;
+    double max_I_y = this-> max_I_y;
+    if(intfile_scale <= 0.0){
+        /* need to auto-scale */
+        int i=0;
+        for(int spixel=0;spixel<spixels;++spixel)
+        {
+            for(int fpixel=0;fpixel<fpixels;++fpixel)
+            {
+                if(fpixel==debug_x && spixel==debug_y) printf("DEBUG: pixel # %d at (%d,%d) has value %g\n",i,fpixel,spixel,floatimage[i]);
+                if(i==0 || max_I < floatimage[i])
+                {
+                    max_I = floatimage[i];
+                    max_I_x = fpixel;
+                    max_I_y = spixel;
+                }
+                ++i;
+            }
+        }
+        if(verbose) printf("providing default scaling: max_I = %g @ (%g %g)\n",max_I,max_I_x,max_I_y);
+        intfile_scale = 1.0;
+        if(max_I>0.0) intfile_scale = 55000.0/(max_I);
+    }
+    if(verbose) printf("scaling data by: intfile_scale = %g\n",intfile_scale);
+
+    double sum = 0.0;
+    max_I = 0.0;
+    int i = 0;
+    for(int spixel=0;spixel<spixels;++spixel)
+    {
+        for(int fpixel=0;fpixel<fpixels;++fpixel)
+        {
+            /* no noise, just use intfile_scale */
+
+            intimage = (unsigned short int) (std::min(saturation, floatimage[i]*intfile_scale ));
+            os.write((char *) &intimage, sizeof(unsigned short int));
+
+            if(verbose>90) printf("DEBUG #%d %g -> %g -> %d\n",i,floatimage[i],floatimage[i]*intfile_scale,intimage);
+
+            if((double) intimage > max_I || i==0) {
+                max_I = (double) intimage;
+                max_I_x = fpixel;
+                max_I_y = spixel;
+            }
+            if(fpixel==debug_x && spixel==debug_y) printf("DEBUG: pixel # %d at (%d,%d) has int value %d\n",i,fpixel,spixel,intimage);
+
+            sum += intimage;
+            ++i;
+        }
+    }
+    // os << "Hello world";
+
+}
 
 void
 nanoBragg::to_smv_format(

@@ -4,10 +4,7 @@ try:
     from collections.abc import Iterable
 except ModuleNotFoundError:
     from collections import Iterable
-try:
-  from simtbx.diffBragg import diffBragg
-except:
-  diffBragg = None
+from simtbx.diffBragg import diffBragg
 from scitbx.array_family import flex
 import numpy as np
 from simtbx.nanoBragg.anisotropic_mosaicity import AnisoUmats
@@ -355,18 +352,27 @@ class SimData:
     self._include_noise = val
 
   def get_detector_corner_res(self):
+    s0 = self.beam.unit_s0
+    wave, _ = zip(*self.beam.spectrum)
+    wave = min(wave)
+    s0 = s0[0] / wave, s0[1] / wave, s0[2] / wave
     dmin = np.inf
     for p in self.detector:
-      panel_corner_res = p.get_max_resolution_at_corners(self.beam.nanoBragg_constructor_beam.get_s0())
+      panel_corner_res = p.get_max_resolution_at_corners(s0)
       dmin = np.min([dmin, panel_corner_res])
     return dmin
 
-  def update_Fhkl_tuple(self):
+  def update_Fhkl_tuple(self, d_min=None, d_max=None):
     if self.crystal.miller_array is not None:
       if np.all(self.crystal.miller_array.data().as_numpy_array()==0):
         raise ValueError("Seems all miller indices are 0")
-      d_max, _ = self.crystal.miller_array.resolution_range()
-      d_min = self.get_detector_corner_res()
+      if d_max is None:
+        d_max, _ = self.crystal.miller_array.resolution_range()
+        if d_max == -1:
+          d_max = 999
+      if d_min is None:
+        # note, not the best solution here... maybe best to assert that a d_min and a d_max are supplied..
+        d_min = self.get_detector_corner_res()
       ma_on_detector = self.crystal.miller_array.resolution_filter(d_min=d_min, d_max=d_max)
       if self.using_diffBragg_spots and self.crystal.miller_is_complex:
         Freal, Fimag = zip(*[(val.real, val.imag) for val in ma_on_detector.data()])
@@ -374,9 +380,11 @@ class SimData:
         Fimag = flex.double(Fimag)
         self.D.Fhkl_tuple = ma_on_detector.indices(), Freal, Fimag
       elif self.using_diffBragg_spots:
-        self.D.Fhkl_tuple = ma_on_detector.indices(), ma_on_detector.data(), None
+        inds = ma_on_detector.indices()
+        dat = ma_on_detector.data()
+        self.D.Fhkl_tuple = inds, dat, None
       else:
-        self.D.Fhkl_tuple = self.crystal.miller_array.indices(), self.crystal.miller_array.data(), None
+        self.D.Fhkl_tuple = ma_on_detector.indices(), ma_on_detector.data(), None
 
   def set_dspace_binning(self, nbins, verbose=False):
     dsp = self.D.Fhkl.d_spacings().data().as_numpy_array()
@@ -409,10 +417,13 @@ class SimData:
       self.D.Omatrix = self.crystal.Omatrix
       self.D.Bmatrix = self.crystal.dxtbx_crystal.get_B() #
       self.D.Umatrix = self.crystal.dxtbx_crystal.get_U()
-    self.update_Fhkl_tuple()
-    self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
 
     if self.using_diffBragg_spots:
+      shape = str(self.crystal.xtal_shape)
+      if shape not in ["Gauss", "Gauss_star", "Square"]:
+        raise ValueError("nanoBragg_crystal xtal_shape should be square, gauss or gauss_star")
+      self.update_Fhkl_tuple()
+      self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
       # init mosaic domain size:
       if self.crystal.isotropic_ncells:
         self.D.Ncells_abc = self.crystal.Ncells_abc[0]
