@@ -1,10 +1,10 @@
 from __future__ import division
 
 import numpy as np
-from dials.algorithms.image.filter import convolve
 import math
+
 from scipy.signal import convolve2d
-from dials.array_family import flex
+from scitbx.array_family import flex
 
 
 
@@ -34,6 +34,7 @@ def makeMoffat_integPSF(fwhm_pixel, sizeX, sizeY):
 
 
 def convolve_padded_img(img, psf, sz=5):
+    from dials.algorithms.image.filter import convolve
     img = np.array(img)
     iY, iX = img.shape
     pY, pX = psf.focus()
@@ -64,6 +65,7 @@ def convolve_padded_img(img, psf, sz=5):
 def convolve_with_psf(image_data, fwhm=27.0, pixel_size=177.8, psf_radius=7, sz=5, psf=None, use_scipy=True):
     ''' Given a 2D numpy array of image data, convolve with a PSF. '''
     # Currently only supporting fiber PSF i.e power law form as proposed in Holton et. al 2012, Journal of Synchotron Radiation
+    from dials.algorithms.image.filter import convolve
     if psf is None:
         xpsf=2*psf_radius+1
         ypsf=2*psf_radius+1

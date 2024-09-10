@@ -2,9 +2,8 @@ from __future__ import absolute_import, division, print_function
 import time
 import os
 import json
-from dials.algorithms.shoebox import MaskCode
 from copy import deepcopy
-from dials.model.data import Shoebox
+import pandas
 
 from simtbx.diffBragg import hopper_io
 import numpy as np
@@ -128,6 +127,7 @@ class DataModeler:
 
     def __init__(self, params):
         """ params is a simtbx.diffBragg.hopper phil"""
+        self.roiScalesPerPix = 1
         self.Fhkl_channel_ids = None # this should be a list the same length as the spectrum. specifies which Fhkl to refine, depending on the energy (for eg. two color experiment)
         self.no_rlp_info = False  # whether rlps are stored in the refls table
         self.params = params  # phil params (see diffBragg/phil.py)
@@ -177,7 +177,37 @@ class DataModeler:
         self.saves = ["all_data", "all_background", "all_trusted", "best_model", "nominal_sigma_rdout",
                       "rois", "pids", "tilt_abc", "selection_flags", "refls_idx", "pan_fast_slow",
                       "Hi", "Hi_asu", "roi_id", "params", "all_pid", "all_fast", "all_slow", "best_model_includes_background",
-                      "all_q_perpix", "all_sigma_rdout"]
+                      "all_q_perpix", "all_sigma_rdout", "all_zscore", "roiScalesPerPix"]
+
+    def filter_bad_scores(self, checker):
+        assert self.params.roi.filter_scores.enable
+        assert checker is not None
+        if self.best_model is None:
+            raise ValueError("cannot get the best model, there is no best_model attribute")
+
+        ave_good = num_good = 0
+        for i_roi, roi_id in enumerate(self.roi_id_unique):
+            roi_slc = self.roi_id_slices[roi_id][0]
+            x1, x2, y1, y2 = self.rois[roi_id]
+            roi_sh = y2-y1, x2-x1
+            #roi_sel = self.roi_id==i_roi
+            mod = self.best_model[roi_slc].reshape(roi_sh)
+            if not self.best_model_includes_background:
+                bg = self.all_background[roi_slc].reshape(roi_sh)
+                mod += bg
+            dat = self.all_data[roi_slc].reshape(roi_sh)
+            score = checker.score(dat, mod)
+            if score < self.params.roi.filter_scores.cutoff:
+                self.all_trusted[roi_slc] = False
+            else:
+                num_good += 1
+                ave_good += score
+        if num_good > 0:
+            ave_good = ave_good / num_good
+            MAIN_LOGGER.info("Found %d good roi fits (average good score = %.2f)" % (num_good, ave_good))
+        else:
+            MAIN_LOGGER.info("Score filter removed all spots, bad fit overall!")
+        return num_good
 
     def filter_pixels(self, thresh):
         assert self.roi_id is not None
@@ -392,6 +422,8 @@ class DataModeler:
         else:
             # assert is a reflection table. ..
             refls = ref
+        if self.params.roi.strong_only and "is_strong" in list(refls.keys()):
+            refls = refls.select(refls["is_strong"])
         return refls
 
     def is_duplicate_hkl(self, refls):
@@ -447,8 +479,8 @@ class DataModeler:
             img_data[pid,   dat_sliceY, dat_sliceX] = sb.data.as_numpy_array()[0,sb_sliceY,sb_sliceX]
             sb_bkgrnd = sb.background.as_numpy_array()[0,sb_sliceY,sb_sliceX]
             background[pid, dat_sliceY, dat_sliceX] = sb_bkgrnd
-            fg_code = MaskCode.Valid + MaskCode.Foreground  # 5
-            bg_code = MaskCode.Valid + MaskCode.Background + MaskCode.BackgroundUsed  # 19
+            fg_code = 5 # dials.algorithms.MaskCode.Valid + MaskCode.Foreground ) # 5
+            bg_code = 19 # MaskCode.Valid + MaskCode.Background + MaskCode.BackgroundUsed  # 19
             mask = sb.mask.as_numpy_array()[0,sb_sliceY,sb_sliceX]
             if self.params.refiner.refldata_trusted=="allValid":
                 sb_trust = mask > 0
@@ -505,7 +537,7 @@ class DataModeler:
             MAIN_LOGGER.warning("no refls loaded!")
             return False
 
-        if "rlp" not in list(refls[0].keys()):
+        if "rlp" not in list(refls.keys()):
             try:
                 utils.add_rlp_column(refls, self.E)
                 assert "rlp" in list(refls[0].keys())
@@ -578,11 +610,12 @@ class DataModeler:
         self.tilt_abc = [abc for i_roi, abc in enumerate(self.tilt_abc) if self.selection_flags[i_roi]]
         self.pids = [pid for i_roi, pid in enumerate(self.pids) if self.selection_flags[i_roi]]
         self.tilt_cov = [cov for i_roi, cov in enumerate(self.tilt_cov) if self.selection_flags[i_roi]]
-        self.Hi =[hi for i_roi, hi in enumerate(self.Hi) if self.selection_flags[i_roi]]
-        self.Hi_asu =[hi_asu for i_roi, hi_asu in enumerate(self.Hi_asu) if self.selection_flags[i_roi]]
+        if self.Hi is not None:
+            self.Hi =[hi for i_roi, hi in enumerate(self.Hi) if self.selection_flags[i_roi]]
+            self.Hi_asu =[hi_asu for i_roi, hi_asu in enumerate(self.Hi_asu) if self.selection_flags[i_roi]]
 
         if not self.no_rlp_info:
-            self.Q = [np.linalg.norm(refls[i_roi]["rlp"]) for i_roi in range(len(refls)) if self.selection_flags[i_roi]]
+            self.Q = [np.linalg.norm(rlp_vec) for i_roi, rlp_vec in enumerate(refls["rlp"]) if self.selection_flags[i_roi]]
 
         self.data_to_one_dim(img_data, is_trusted, background)
         return True
@@ -612,6 +645,7 @@ class DataModeler:
         if self.params.try_strong_mask_only:
             strong_mask_img = utils.strong_spot_mask(self.refls, self.E.detector)
 
+        roi_datamax = []
         for i_roi in range(len(self.rois)):
             pid = self.pids[i_roi]
             x1, x2, y1, y2 = self.rois[i_roi]
@@ -622,6 +656,8 @@ class DataModeler:
             data = data.ravel()
             all_background += list(background[pid, y1:y2, x1:x2].ravel())
             trusted = is_trusted[pid, y1:y2, x1:x2].ravel()
+            datamax = data[trusted].max()
+            roi_datamax.append(datamax)
             if perpixel_dark_rms is not None:
                 sigma_rdout = perpixel_dark_rms[pid, y1:y2, x1:x2].ravel()
             else:
@@ -703,6 +739,13 @@ class DataModeler:
         # note rare chance for sigmas to be nan if the args of sqrt is below 0
         self.all_trusted = np.logical_and(np.array(all_trusted), ~np.isnan(all_sigmas))
 
+        if self.params.roi.filter_bright_peaks.enable:
+            roi_datamax = np.array(roi_datamax)
+            is_bright_peak = utils.is_outlier(roi_datamax, thresh=self.params.roi.filter_bright_peaks.thresh)
+            for i_roi in range(len(self.rois)):
+                if is_bright_peak[i_roi]:
+                    self.all_trusted[self.roi_id==i_roi] = False
+
         if self.params.roi.skip_roi_with_negative_bg:
             # Dont include pixels whose background model is below 0
             self.all_trusted[self.all_background < 0] = False
@@ -722,8 +765,10 @@ class DataModeler:
         (data, background etc) to a new reflection file which can then be used to run
         diffBragg without the raw data in the experiment (this exists mainly for portability, and
         unit tests)"""
+        from dials.model.data import Shoebox
+        from dials.array_family import flex as dials_flex
         shoeboxes = []
-        R = flex.reflection_table()
+        R = dials_flex.reflection_table()
         for i_roi, i_ref in enumerate(self.refls_idx):
             roi_sel = self.roi_id==i_roi
             x1, x2, y1, y2 = self.rois[i_roi]
@@ -733,13 +778,13 @@ class DataModeler:
 
             sb = Shoebox((x1, x2, y1, y2, 0, 1))
             sb.allocate()
-            sb.data = flex.float(np.ascontiguousarray(roi_img[None]))
-            sb.background = flex.float(np.ascontiguousarray(roi_bg[None]))
+            sb.data = dials_flex.float(np.ascontiguousarray(roi_img[None]))
+            sb.background = dials_flex.float(np.ascontiguousarray(roi_bg[None]))
 
             dials_mask = np.zeros(roi_img.shape).astype(np.int32)
             mask = self.all_trusted[roi_sel].reshape(roi_shape)
-            dials_mask[mask] = dials_mask[mask] + MaskCode.Valid
-            sb.mask = flex.int(np.ascontiguousarray(dials_mask[None]))
+            dials_mask[mask] = dials_mask[mask] + 1  # MaskCode.Valid=1
+            sb.mask = dials_flex.int(np.ascontiguousarray(dials_mask[None]))
 
             # quick sanity test
             if do_xyobs_sanity_check:
@@ -751,8 +796,8 @@ class DataModeler:
             R.extend(self.refls[i_ref: i_ref+1])
             shoeboxes.append(sb)
 
-        R['shoebox'] = flex.shoebox(shoeboxes)
-        R['id'] = flex.int(len(R), 0)
+        R['shoebox'] = dials_flex.shoebox(shoeboxes)
+        R['id'] = dials_flex.int(len(R), 0)
         R.as_file(output_name)
 
     def set_parameters_for_experiment(self, best=None):
@@ -944,8 +989,8 @@ class DataModeler:
                     init_scale = self.refls[refl_idx]["scale_factor"]
                 else:
                     init_scale = 1
-                p = RangedParameter(init=init_scale, sigma=self.params.sigmas.roiPerScale,
-                                  minval=0, maxval=1e12,
+                p = PositiveParameter(init=init_scale, sigma=self.params.sigmas.roiPerScale,
+                                  maxval=1e12,
                                   fix=fix.perRoiScale, name="scale_roi%d" % roi_id,
                                   center=1,
                                   beta=1e12)
@@ -978,7 +1023,11 @@ class DataModeler:
             if (p.beta is not None and p.center is None) or (p.center is not None and p.beta is None):
                 raise RuntimeError("To use restraints, must specify both center and beta for param %s" % name)
 
-    def get_data_model_pairs(self, reorder=False):
+    def get_data_model_pairs(self, reorder=False, return_stats=False):
+        """
+        :param reorder: whether to reorder sort by resolution
+        :return: 4 lists of sub-images: data, models, trusted, bragg
+        """
         if self.best_model is None:
             raise ValueError("cannot get the best model, there is no best_model attribute")
         all_dat_img, all_mod_img = [], []
@@ -986,13 +1035,32 @@ class DataModeler:
         all_bragg = []
         all_sigma_rdout = []
         all_d_perpix = 1/self.all_q_perpix
-        all_d = []
+        spot_d = []
+        spot_hkl = []
+        spot_pid_and_cent = []
+        spot_scale = []
+
         for i_roi in range(len(self.rois)):
             x1, x2, y1, y2 = self.rois[i_roi]
-            mod = self.best_model[self.roi_id == i_roi].reshape((y2 - y1, x2 - x1))
+            roi_sel = self.roi_id==i_roi
+            mod = self.best_model[roi_sel].reshape((y2 - y1, x2 - x1))
             try:
-                res = all_d_perpix[self.roi_id==i_roi] .mean()
-                all_d.append(res)
+                res = all_d_perpix[roi_sel] .mean()
+                cent_x = (x1+x2) /2.
+                cent_y = (y1+y2) / 2.
+                pid = self.all_pid[roi_sel].ravel()[0]
+                scale = 1
+                try:
+                    scale = self.roiScalesPerPix[roi_sel].ravel()[0]
+                except:
+                    pass
+                spot_scale.append(scale)
+                spot_pid_and_cent.append((pid, cent_x, cent_y))
+                hkl = None
+                if self.Hi:
+                    hkl = self.Hi[i_roi]
+                spot_hkl.append(hkl)
+                spot_d.append(res)
             except IndexError:
                 pass
             if self.all_trusted is not None:
@@ -1021,13 +1089,22 @@ class DataModeler:
         if all_sigma_rdout:
             ret_subimgs += [all_sigma_rdout]
         if reorder:
-            order = np.argsort(all_d)[::-1]
+            order = np.argsort(spot_d)[::-1]
+            spot_d = np.array(spot_d)[order]
+            spot_hkl = np.array(spot_hkl)[order]
+            spot_scale = np.array(spot_scale)[order]
+            spot_pid_and_cent = np.array(spot_pid_and_cent)[order]
+
             for i in range(len(ret_subimgs)):
                 imgs = ret_subimgs[i]
                 imgs = [imgs[i] for i in order]
                 ret_subimgs[i] = imgs
-
-        return ret_subimgs
+        if return_stats:
+            stats = {"spot_d": spot_d, "spot_hkl": spot_hkl, "spot_pid_and_cent": spot_pid_and_cent,
+                     "spot_scale": spot_scale}
+            return ret_subimgs + [stats]
+        else:
+            return ret_subimgs
 
     def Minimize(self, x0, SIM, i_shot=0):
         self.target = target = TargetFunc(SIM=SIM, niter_per_J=self.params.niter_per_J, profile=self.params.profile)
@@ -1113,6 +1190,10 @@ class DataModeler:
                                    disp=False,
                                    stepsize=self.params.stepsize)
                 target.x0[vary] = out.x
+                MAIN_LOGGER.debug("Optimal results after basinhopping:")
+                f, g, modelpix, J, sigZ, debug_s = target_func(target.x0, None, self, SIM,
+                                                            compute_grad=False, return_all_zscores=False)
+                MAIN_LOGGER.debug("<><><><><><><><><\n"+debug_s+"\n<><><><><><><><>")
             except StopIteration:
                 pass
 
@@ -1138,6 +1219,30 @@ class DataModeler:
             target.x0[vary] = out.x
 
         return target.x0
+
+    def get_best_hop(self):
+        """
+        after refinement, explore all_hop_id, all_sigz, and all_f to find which basinhop resulted in the best minimization
+        """
+        assert self.target.all_f
+        assert self.target.all_hop_id
+        assert self.target.all_sigZ
+        funcs_hops_sigz = list(zip(self.target.all_f, self.target.all_hop_id, self.target.all_sigZ))
+        hop_id = lambda x: x[1] # group by hop id
+        gb = groupby(sorted(funcs_hops_sigz,key=hop_id), key=hop_id)
+        info = {hop_id:list(traces) for hop_id,traces in gb}
+
+        min_f = np.inf
+        min_sigz = np.inf
+        hop_winner = 0
+        for hop_id in info:
+            f, _, sigz = zip(*info[hop_id])
+            if min(f) < min_f:
+                min_f = min(f)
+                min_sigz = min(sigz)
+                hop_winner = hop_id
+                niter = len(f)
+        return min_sigz, niter, hop_winner
 
     def callback(self, x, kwargs):
         save_freq = kwargs["save_freq"]
@@ -1413,9 +1518,9 @@ def convolve_model_with_psf(model_pix, J, mod, SIM, PSF=None, psf_args=None,
         psf_args = SIM.psf_args
         assert psf_args is not None
     if roi_id_slices is None:
-        roi_id_slices = SIM.roi_id_slices
+        roi_id_slices = mod.roi_id_slices
     if roi_id_unique is None:
-        roi_id_unique = SIM.roi_id_unique
+        roi_id_unique = mod.roi_id_unique
 
     coords = mod.pan_fast_slow.as_numpy_array()
     pid = coords[0::3]
@@ -1474,9 +1579,11 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 if name == "detz_shift":
                     val = val * 1e3
                     name = p.name + "_mm"
-                val_s += "%s=%.3f, " % (name, val)
+                if "Rot" in name:
+                    val = val*180 / np.pi
+                    name = p.name +"_deg"
+                val_s += "%s=%.4f, " % (name, val)
         MAIN_LOGGER.debug(val_s)
-
 
     pfs = Mod.pan_fast_slow
 
@@ -1530,6 +1637,21 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
         lambda_coef = p0.get_val(x[p0.xpos]), p1.get_val(x[p1.xpos])
         SIM.D.lambda_coefficients = lambda_coef
 
+    #if Mod.refine_gauss_spec:
+    #    amp_params = [Mod.P["gauss_spec_amp%d"%i] for i in range(SIM.n_spec_peaks)]
+    #    wid_params = [Mod.P["gauss_spec_wid%d"%i] for i in range(SIM.n_spec_peaks)]
+    #    amp_vals = [p.get_val(x[p.xpos]) for p in amp_params]
+    #    wid_vals = [p.get_val(x[p.xpos]) for p in wid_params]
+    #    gauss_spec = []
+    #    Mod.nanoBragg_beam_spectrum = guass_spec
+    #    SIM.beam.spectrum = Mod.nanoBragg_beam_spectrum
+    #    SIM.D.xray_beams = SIM.beam.xray_beams
+    #    # update Fhkl channels
+    #    SIM.D.update_gauss_spec_amps(amp_vals)
+    #    SIM.D.update_gauss_spec_wids(wid_vals)
+    #    if Mod.Fhkl_channel_ids is not None:
+    #        SIM.D.update_Fhkl_channels(Mod.Fhkl_channel_ids)
+
     # Mosaic block
     Nabc_params = [Mod.P["Nabc%d" % (i_n,)] for i_n in range(3)]
     Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
@@ -1577,14 +1699,14 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
     model_pix_noRoi = None
 
     # extract the scale factors per ROI, these might correspond to structure factor intensity scale factors, and quite possibly might result in overfits!
-    roiScalesPerPix = 1
     if not Mod.params.fix.perRoiScale:
         perRoiParams = [Mod.P["scale_roi%d" % roi_id] for roi_id in Mod.roi_id_unique]
         perRoiScaleFactors = [p.get_val(x[p.xpos]) for p in perRoiParams]
-        roiScalesPerPix = np.zeros(npix)
+        if not isinstance(Mod.roiScalesPerPix, np.ndarray):
+            Mod.roiScalesPerPix = np.ones(npix)
         for i_roi, roi_id in enumerate(Mod.roi_id_unique):
             slc = Mod.roi_id_slices[roi_id][0]
-            roiScalesPerPix[slc] = perRoiScaleFactors[i_roi]
+            Mod.roiScalesPerPix[slc] = perRoiScaleFactors[i_roi]
 
     for i_xtal in range(Mod.num_xtals):
 
@@ -1618,10 +1740,14 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
         pix_noRoiScale = SIM.D.raw_pixels_roi[:npix]
         pix_noRoiScale = pix_noRoiScale.as_numpy_array()
 
-        pix = pix_noRoiScale * roiScalesPerPix
+        pix = pix_noRoiScale * Mod.roiScalesPerPix
 
         if model_pix is None:
             model_pix = scale*pix
+            #Mod.best_model = model_pix
+            #dat,model,trust,brg = Mod.get_data_model_pairs()
+            #from IPython import embed;
+            #embed()
             model_pix_noRoi = scale*pix_noRoiScale
         else:
             model_pix += scale*pix
@@ -1700,6 +1826,17 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                     d = d.as_numpy_array()[:npix]
                     d = p.get_deriv(x[p.xpos], d)
                     J[p.xpos] += d
+            #if Mod.refine_gauss_spec:
+            #    amp_p_deriv = SIM.D.get_gauss_spec_amp_deriv_pixels(SIM.n_spec_peaks).as_numpy_array()
+            #    wid_p_deriv = SIM.D.get_gauss_spec_wid_deriv_pixels(SIM.n_spec_peaks).as_numpy_array()
+            #    for i_peak in range(SIM.n_spec_peaks):
+            #        amp_p = Mod.P["gauss_spec_amp%d" % i_peak]
+            #        wid_p = Mod.P["gauss_spec_wid%d" % i_peak]
+            #        deriv_s = slice(i_peak*npix, (i_peak+1)*npix, 1)
+            #        amp_d = amp_p_deriv[deriv_s]
+            #        wid_d = wid_p_deriv[deriv_s]
+            #        J[amp_p.xpos] += amp_d
+            #        J[wid_p.xpos] += wid_d
 
     if not Mod.params.fix.perRoiScale and compute_grad:
         if compute_grad:
@@ -1711,7 +1848,6 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 else:
                     d = p.get_deriv(x[p.xpos], model_pix_noRoi[slc])
                 J[p.xpos, slc] += d
-
 
     return model_pix, J
 
@@ -1918,12 +2054,15 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
 
     restraint_terms = {}
     if params.use_restraints:
-        # scale factor restraint
+        restraint_s = ""
         for name in mod.non_fhkl_params:
             p = mod.P[name]
             if p.beta is not None:
                 val = p.get_restraint_val(x[p.xpos])
                 restraint_terms[name] = val
+                restraint_s += "%s " % name
+        if restraint_s != "":
+            MAIN_LOGGER.debug("Restrained vars (non-Fhkl related): %s"%restraint_s )
 
         if params.centers.Nvol is not None:
             na,nb,nc = SIM.D.Ncells_abc_aniso
@@ -1975,7 +2114,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                 p = mod.P[name]
                 Jac_p = Jac[p.xpos]
                 roi_id = int(p.name.split("scale_roi")[1])
-                slc = SIM.roi_id_slices[roi_id][0]
+                slc = mod.roi_id_slices[roi_id][0]
                 common_grad_slc = common_grad_term_all[slc]
                 Jac_slc = Jac_p[slc]
                 trusted_slc = trusted[slc]
@@ -2067,7 +2206,8 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     return return_data
 
 
-def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, best=None, free_mem=True):
+def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, best=None, free_mem=True,
+           diffBragg_intensity=False):
     if gpu_device is None:
         gpu_device = 0
     params.simulator.spectrum.filename = spec
@@ -2087,8 +2227,13 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     x0 = [1] * nparam
 
     x = Modeler.Minimize(x0, SIM)
-    Modeler.best_model, _ = model(x, Modeler, SIM, compute_grad=False)
+    Modeler.best_model, best_Jac = model(x, Modeler, SIM, compute_grad=True, dont_rescale_gradient=True)
     Modeler.best_model_includes_background = False
+    try:
+        sigz, niter, _ = Modeler.get_best_hop()
+    except Exception:
+        sigz = niter = None
+        pass
 
     new_crystal = update_crystal_from_x(Modeler, SIM, x)
     new_exp = deepcopy(Modeler.E)
@@ -2102,7 +2247,14 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     new_det = update_detector_from_x(Modeler, SIM, x)
     new_exp.detector = new_det
 
-    new_refl = get_new_xycalcs(Modeler, new_exp)
+    if diffBragg_intensity:
+        new_refl = get_new_xycalcs(Modeler, new_exp, x=x, SIM=SIM, Jac=best_Jac)
+    else:
+        new_refl = get_new_xycalcs(Modeler, new_exp, x=x)
+
+    if niter is not None:
+        new_refl["shot_niter"] = flex.double(len(new_refl), niter)
+        new_refl["shot_sigz"] = flex.double(len(new_refl), sigz)
 
     if free_mem:
         Modeler.clean_up(SIM)
@@ -2161,18 +2313,21 @@ def update_crystal_from_x(Mod, SIM, x):
     return new_cryst_from_rotXYZ_and_ucell((rotX,rotY,rotZ), ucparam, SIM.crystal.dxtbx_crystal)
 
 
-def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials"):
+def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials", x=None, Jac=None, SIM=None):
     """
 
     :param Modeler: data modeler instance after refinement
     :param new_exp: post-refinement dxtbx experiment obj
-    :param old_refl_tag: exisiting columns will be renamed with this tag as a prefix
+    :param old_refl_tag: existing columns will be renamed with this tag as a prefix
+    :param x: refinement parameter values *scaled
+    :param Jac: the modeler Jacobian
+    :param SIM: sim_data.SimData instance used by the refiner
     :return: refl table with xyzcalcs derived from the modeling results
     """
     if isinstance(Modeler.all_sigma_rdout, np.ndarray):
-        _, _, _, bragg_subimg, _ = Modeler.get_data_model_pairs()
+        data_subimg, model_subimg, trust_subimg, bragg_subimg, _ = Modeler.get_data_model_pairs()
     else:
-        _,_,_, bragg_subimg = Modeler.get_data_model_pairs()
+        data_subimg, model_subimg, trust_subimg, bragg_subimg = Modeler.get_data_model_pairs()
     new_refls = deepcopy(Modeler.refls)
 
     reflkeys = list(new_refls.keys())
@@ -2186,6 +2341,23 @@ def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials"):
     new_xycalcs = flex.vec3_double(len(Modeler.refls), (np.nan, np.nan, np.nan))
     new_xycalcs_mm = flex.vec3_double(len(Modeler.refls), (np.nan, np.nan, np.nan))
     new_xyobs_mm = flex.vec3_double(len(Modeler.refls), (np.nan, np.nan, np.nan))
+    per_refl_scales = flex.double(len(Modeler.refls), 1)
+    # for storing diffBragg intensity and variance
+    flex_varI = flex.double(len(Modeler.refls),0)
+    flex_I = flex.double(len(Modeler.refls),0)
+    flex_sigZ = flex.double(len(Modeler.refls), 1)
+    flex_meanZ = flex.double(len(Modeler.refls), 0)
+    flex_ccModel = flex.double(len(Modeler.refls),0)
+    # for filtering reflections based on the diffBragg intensity/variance
+    sel2 = flex.bool(len(Modeler.refls), True)
+
+    variance_s = Fp1_map = None
+    if Jac is not None:
+        variance_s = get_variance_s(Modeler, Jac)
+    if SIM is not None:
+        Fp1 = SIM.D.Fhkl #crystal.miller_array
+        Fp1_map = {h:amp for h,amp in zip(Fp1.indices(), Fp1.data())}
+
     for i_roi in range(len(bragg_subimg)):
 
         ref_idx = Modeler.refls_idx[i_roi]
@@ -2197,7 +2369,7 @@ def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials"):
             Y, X = np.indices(bragg_subimg[i_roi].shape)
             x1, _, y1, _ = Modeler.rois[i_roi]
 
-            com_x, com_y, _ = new_refls[ref_idx]["xyzobs.px.value"]
+            com_x, com_y, _ = xyzobs_px_val[ref_idx]
             com_x = int(com_x - x1 - 0.5)
             com_y = int(com_y - y1 - 0.5)
             # make sure at least some signal is at the centroid! otherwise this is likely a neighboring spot
@@ -2215,26 +2387,35 @@ def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials"):
             com = xcom, ycom, 0
 
             pid = Modeler.pids[i_roi]
-            assert pid == new_refls[ref_idx]['panel']
-            panel = new_exp.detector[pid]
+            assert pid == pids[ref_idx]
+            panel = new_exp.detector[int(pid)]
             xmm, ymm = panel.pixel_to_millimeter((xcom, ycom))
             com_mm = xmm, ymm, 0
-            xobs, yobs, _ = new_refls[ref_idx]["xyzobs.px.value"]
-            xobs_mm, yobs_mm = panel.pixel_to_millimeter((xobs, yobs))
+
+            #xobs, yobs, _ = xyzobs_new_refls[ref_idx]["xyzobs.px.value"]
+            xobs_mm, yobs_mm = panel.pixel_to_millimeter((com_x, com_y))
             obs_com_mm = xobs_mm, yobs_mm, 0
 
             new_xycalcs[ref_idx] = com
             new_xycalcs_mm[ref_idx] = com_mm
             new_xyobs_mm[ref_idx] = obs_com_mm
 
-    new_refls["xyzcal.px"] = new_xycalcs
-    new_refls["xyzcal.mm"] = new_xycalcs_mm
-    new_refls["xyzobs.mm.value"] = new_xyobs_mm
+    if isinstance(new_refls, pandas.DataFrame):
+        new_refls["xyzcal.px"] = list(map(tuple, new_xycalcs))
+        new_refls["xyzcal.mm"] = list(map(tuple, new_xycalcs_mm))
+        new_refls["xyzobs.mm.value"] = list(map(tuple, new_xyobs_mm))
+    else:
+        new_refls["xyzcal.px"] = new_xycalcs
+        new_refls["xyzcal.mm"] = new_xycalcs_mm
+        new_refls["xyzobs.mm.value"] = new_xyobs_mm
 
     if Modeler.params.filter_unpredicted_refls_in_output:
         sel = [not np.isnan(x) for x,_,_ in new_refls['xyzcal.px']]
         nbefore = len(new_refls)
-        new_refls = new_refls.select(flex.bool(sel))
+        if isinstance(new_refls, pandas.DataFrame):
+            new_refls = new_refls.loc[sel]
+        else:
+            new_refls = new_refls.select(flex.bool(sel))
         nafter = len(new_refls)
         MAIN_LOGGER.info("Filtered %d / %d reflections which did not show peaks in model" % (nbefore-nafter, nbefore))
 
@@ -2350,6 +2531,9 @@ def downsamp_spec(SIM, params, expt, return_and_dont_set=False):
         stride = params.simulator.spectrum.stride
         spec_wave = spec_wave[::stride]
         spec_wt = spec_wt[::stride]
+        tot_fl = params.simulator.total_flux
+        if tot_fl is not None:
+            spec_wt = spec_wt / sum(spec_wt) * tot_fl
         SIM.beam.spectrum = list(zip(spec_wave, spec_wt))
     else:
         spec_en = SIM.dxtbx_spec.get_energies_eV()
@@ -2429,6 +2613,7 @@ def sanity_test_input_lines(input_lines):
 
 
 def full_img_pfs(img_sh):
+    """shape in numpy style"""
     Panel_inds, Slow_inds, Fast_inds = map(np.ravel, np.indices(img_sh) )
     pfs_coords = np.vstack([Panel_inds, Fast_inds, Slow_inds]).T
     pfs_coords_flattened = pfs_coords.ravel()
@@ -2559,3 +2744,53 @@ def _set_Fhkl_refinement_flags(params, SIM):
                 SIM.is_centric[idx] = is_centric
 
             SIM.where_is_centric = np.where(SIM.is_centric)[0]
+
+
+def get_variance_s(Mod, Jac):
+    """
+    Gets the variance associated with per-reflection scale factors fit using diffBragg
+    The Jacobian passed to this method should be computed using the hopper_utils.model method with dont_rescale_gradient=True
+    with the optimized parameters (e.g., after minimization)
+    :param Mod: data modeler
+    :param Jac: Jacobian at the minimum
+    :return: the diagonal of the inverse Hessian
+    """
+    model_pix = Mod.best_model
+    if not Mod.best_model_includes_background:
+        model_pix += Mod.all_background
+
+    u = Mod.all_data - model_pix  # residuals, named "u" in notes
+
+    sigma_rdout = Mod.params.refiner.sigma_r / Mod.params.refiner.adu_per_photon
+    v = model_pix + sigma_rdout**2
+    one_by_v = 1/v
+    G = 1-2*u - u*u*one_by_v
+    coef = one_by_v*(one_by_v*G - 2  - 2*u*one_by_v -u*u*one_by_v*one_by_v)
+
+    coef_t = coef[Mod.all_trusted]
+    Jac_t = Jac[:,Mod.all_trusted]
+    # if we are only optimizing Fhkl, then the Hess is diagonal matrix
+    diag_Hess = -.5*np.sum(coef_t*(Jac_t)**2, axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        variance_s = 1/diag_Hess
+    return variance_s
+
+
+def split_line(line):
+    line_fields = line.strip().split()
+    num_fields = len(line_fields)
+    assert num_fields in [2, 3, 4]
+    exp, ref = line_fields[:2]
+    spec = None
+    exp_idx = 0
+    if num_fields == 3:
+        try:
+            exp_idx = int(line_fields[2])
+        except ValueError:
+            spec = line_fields[2]
+            exp_idx = 0
+    elif num_fields == 4:
+        assert os.path.isfile(line_fields[2])
+        spec = line_fields[2]
+        exp_idx = int(line_fields[3])
+    return exp, ref, exp_idx, spec

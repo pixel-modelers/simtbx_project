@@ -24,7 +24,7 @@ def save_expt_refl_file(filename, expts, refls, specs=None, check_exists=False, 
     if specs is None:
         specs = [None]*len(expts)
     if indices is None:
-        indices = [None] *len(indices)
+        indices = [None] *len(expts)
     with open(filename, "w") as o:
         for expt, refl, spec, idx in zip(expts, refls, specs, indices):
             expt = os.path.abspath(expt)
@@ -198,6 +198,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         df['sigz'] = [Mod.sigz]
     if hasattr(Mod, "niter"):
         df['niter'] = [Mod.niter]
+    if hasattr(Mod, "nidx"):
+        df['nidx'] = [Mod.nidx]
     df['phi_deg'] = SIM.D.phi_deg
     df['osc_deg'] = SIM.D.osc_deg
     if write_pandas:

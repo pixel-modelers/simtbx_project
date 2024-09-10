@@ -1,12 +1,14 @@
-from __future__ import absolute_import, division, print_function
+
 import os
 import socket
 import sys
 import re
 from io import StringIO
 import numpy as np
+import pandas
 from scipy import fft
 import pickle
+from scipy.ndimage import measurements
 from scipy.optimize import minimize
 from scipy.ndimage import generate_binary_structure, maximum_filter, binary_erosion
 from cctbx.array_family import flex
@@ -24,13 +26,23 @@ from dxtbx.imageset import ImageSet, ImageSetData
 from dxtbx.model.experiment_list import ExperimentListFactory
 import libtbx
 from libtbx.phil import parse
-from dials.array_family import flex as dials_flex
+from cctbx.array_family import flex as cctbx_flex
 import mmtbx.programs.fmodel
 import mmtbx.utils
 from cctbx.eltbx import henke
 from simtbx.diffBragg import psf
-from dials.algorithms.shoebox import MaskCode
-from xfel.merging.application.utils.memory_usage import get_memory_usage
+#from dials.algorithms.shoebox import MaskCode
+
+
+def get_memory_usage():
+  '''Return memory used by the process in MB'''
+  import resource
+  import platform
+  # getrusage returns kb on linux, bytes on mac
+  units_per_mb = 1024
+  if platform.system() == "Darwin":
+    units_per_mb = 1024*1024
+  return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / units_per_mb
 
 
 import logging
@@ -50,7 +62,7 @@ def strong_spot_mask(refl_tbl, detector, as_composite=True):
     pids = refl_tbl['panel']
     nfast, nslow = detector[0].get_image_size()
     npan = len(detector)
-    code = MaskCode.Foreground.real
+    code = 4 # int(dials.algorithms.MaskCode.Foreground.real)
 
     x1, x2, y1, y2, z1, z2 = zip(*[refl_tbl[i]['shoebox'].bbox
                                    for i in range(Nrefl)])
@@ -219,7 +231,7 @@ def map_hkl_list(Hi_lst, anomalous_flag=True, symbol="P43212"):
     sg_type = sgtbx.space_group_info(symbol=symbol).type()
     # necessary for py3 to type cast the ints
     type_casted_Hi_lst = tuple([(int(x), int(y), int(z)) for x, y, z in Hi_lst])
-    Hi_flex = dials_flex.miller_index(type_casted_Hi_lst)
+    Hi_flex = cctbx_flex.miller_index(type_casted_Hi_lst)
     miller.map_to_asu(sg_type, anomalous_flag, Hi_flex)
     return list(Hi_flex)
 
@@ -342,6 +354,8 @@ def get_roi_from_spot(refls, fdim, sdim, shoebox_sz=10, centroid='obs'):
         fs_spot, ss_spot, _ = zip(*refls['xyzobs.px.value'])
     elif centroid=='cal':
         fs_spot, ss_spot, _ = zip(*refls['xyzcal.px'])
+    elif centroid=='origobs':
+        fs_spot, ss_spot, _ = zip(*refls['orig.xyzobs.px'])
     else:
         raise NotImplementedError("No instruction to get centroid position from %s" % centroid)
     rois = []
@@ -387,7 +401,7 @@ def get_roi_deltaQ(refls, delta_Q, experiment, centroid='obs'):
     :param refls: reflection table (needs rlp column)
     :param delta_Q:  width of the ROI in inverse Angstromg (e.g. 0.05)
     :param experiment:
-    :param centroid: flag, obs, cal, or bbox
+    :param centroid: flag, obs, cal, origobs, or bbox
     :return:
     """
     nref = len(refls)
@@ -440,7 +454,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
     :param allow_overlaps: allow overlapping ROIS, otherwise shrink ROIS until the no longer overlap
     :param skip_roi_with_negative_bg: if an ROI has negative signal, dont include it in refinement
     :param only_high: only filter zingers that are above the mean (default is True)
-    :param centroid: obs or cal (get centroids from refl column xyzobs.px.value or xyzcal.px)
+    :param centroid: obs or cal or origobs (get centroids from refl column xyzobs.px.value or xyzcal.px)
     :return:
     """
 
@@ -471,6 +485,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
     num_roi_nan_bg = 0
     background = np.full_like(imgs, -1, dtype=float)
     i_roi = 0
+    panels = refls['panel']
     while i_roi < len(rois):
         roi = rois[i_roi]
         i1, i2, j1, j2 = roi
@@ -479,7 +494,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         if is_on_edge[i_roi] and reject_edge_reflections:
             MAIN_LOGGER.debug("Reflection %d is on edge" % i_roi)
             is_selected = False
-        pid = refls[i_roi]['panel']
+        pid = panels[i_roi]
 
         if hotpix_mask is not None:
             is_hotpix = hotpix_mask[pid, j1:j2, i1:i2]
@@ -612,6 +627,9 @@ def determine_shoebox_ROI(detector, delta_Q, wavelength_A, refl, centroid="obs")
         i_com, j_com,_ = refl['xyzobs.px.value']
     elif centroid=='cal':
         i_com, j_com,_ = refl['xyzcal.px']
+    elif centroid == 'origobs':
+        i_com, j_com, _ = refl['orig.xyzobs.px']
+
     else:
         i1,i2,j1,j2,_,_ = refl['bbox']  # super weird funky spots can skew bbox such that its a bad measure of centroid
         i_com = (i1+i2) * .5
@@ -774,6 +792,7 @@ def simulator_for_refinement(expt, params):
 
     #  GET SIMULATOR #
     SIM = simulator_from_expt_and_params(expt, params)
+    MAIN_LOGGER.info("Loaded simulator")
 
     if SIM.D.mosaic_domains > 1:
         MAIN_LOGGER.info("Will use mosaic models: %d domains" % SIM.D.mosaic_domains)
@@ -837,6 +856,7 @@ def simulator_from_expt_and_params(expt, params=None):
 
     # create nanoBragg crystal
     crystal = NBcrystal(init_defaults=False)
+    crystal.xtal_shape = "gauss"
     crystal.isotropic_ncells = has_isotropic_ncells
     if params.simulator.crystal.rotXYZ_ucell is not None:
         rotXYZ = params.simulator.crystal.rotXYZ_ucell[:3]
@@ -873,6 +893,7 @@ def simulator_from_expt_and_params(expt, params=None):
         init_spectrum = [(expt.beam.get_wavelength(), total_flux)]
     beam.spectrum = init_spectrum
     SIM.beam = beam
+    # TODO what about spectrum from imageset ?
 
     # create the diffbragg object, which is the D attribute of SIM
     SIM.panel_id = 0
@@ -885,9 +906,10 @@ def simulator_from_expt_and_params(expt, params=None):
     if test_panel.get_thickness() > 0:
         SIM.update_nanoBragg_instance(
             "detector_thicksteps", params.simulator.detector.thicksteps)
-    MAIN_LOGGER.debug("Detector thicksteps = %d" % SIM.D.detector_thicksteps )
-    MAIN_LOGGER.debug("Detector thick = %f mm" % SIM.D.detector_thick_mm )
-    MAIN_LOGGER.debug("Detector atten len = %f mm" % SIM.D.detector_attenuation_length_mm )
+    if SIM.D.detector_thicksteps is not None:
+        MAIN_LOGGER.debug("Detector thicksteps = %d" % SIM.D.detector_thicksteps )
+        MAIN_LOGGER.debug("Detector thick = %f mm" % SIM.D.detector_thick_mm )
+        MAIN_LOGGER.debug("Detector atten len = %f mm" % SIM.D.detector_attenuation_length_mm )
     if params.simulator.psf.use:
         SIM.use_psf = True
         SIM.psf_args = {'pixel_size': SIM.detector[0].get_pixel_size()[0]*1e3,
@@ -902,7 +924,7 @@ def simulator_from_expt_and_params(expt, params=None):
     return SIM
 
 
-def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5):
+def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5, spindle_axis=(1,0,0)):
     """
 
     :param SIM: sim_data instance
@@ -918,9 +940,10 @@ def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5):
         num_phi_steps = params.simulator.gonio.phi_steps
 
     if delta_phi is not None:
+        SIM.D.spindle_axis = spindle_axis
         SIM.D.phi_deg = 0
         SIM.D.osc_deg = delta_phi
-        SIM.D.phisteps = num_phi_steps
+        SIM.D.phisteps = int(num_phi_steps)
 
 
 def get_complex_fcalc_from_pdb(
@@ -1059,7 +1082,7 @@ def load_spectra_file(spec_file, total_flux=None, pinkstride=1, as_spectrum=Fals
 
 
 def save_numpy_mask_as_flex(numpymask, outfile):
-    flexmask = tuple((dials_flex.bool(m) for m in numpymask))
+    flexmask = tuple((cctbx_flex.bool(m) for m in numpymask))
     with open(outfile, "wb") as f:
         pickle.dump(flexmask, f)
 
@@ -1150,6 +1173,68 @@ def detect_peaks(image_, threshold=0):
     return detected_peaks
 
 
+def find_peaks_connected_regions(img, mask, min_conn=3, max_conn=100, sz=10, how_peak=None, how_intensity=None):
+    """
+
+    :param img: 2d numpy array of float
+    :param mask: 2d numpy array of bool (True means inside a bragg peak)
+    :param min_conn: int, min number of connected pixels needed to save a peak
+    :param max_conn: int, max number of connected pixels for a saved peak
+    :param sz: 2d subimages around each peak are used to compute center of mass efficiently
+    :param how_peak: str, either com or max, determines how the x,y coordinate is returned (default=com)
+    :param how_intensity: str, either max or sum, determines how the intensity value is determined (default=sum)
+    :return: (intens, peaks), two numpy 2d arrays of intensities of shape= (Npeaks,1) and
+        peaks of shape = (Npeaks,2) where x,y = peaks.T where x,y is the fast,slow -scan coord respectively
+    """
+    if how_peak is None:
+        how_peak = "com"
+    else:
+        assert how_peak in {"cent", "max"}
+
+    if how_intensity is None:
+        how_intensity = "sum"
+    else:
+        assert how_intensity in {"max", "sum"}
+    lab_img, _ = measurements.label(img * mask)
+    img_sh = img.shape
+    intens = []
+    peaks = []
+
+    obs = measurements.find_objects(lab_img)
+    for i, (sy, sx) in enumerate(obs):
+        lab_idx = i + 1
+        y1 = max(0, sy.start - sz)
+        y2 = min(img_sh[0], sy.stop + sz)
+        x1 = max(0, sx.start - sz)
+        x2 = min(img_sh[1], sx.stop + sz)
+
+        l = lab_img[y1:y2, x1:x2]
+
+        nconn = np.sum(l == lab_idx)
+        if nconn < min_conn:
+            continue
+        if nconn > max_conn:
+            continue
+
+        pix = img[y1:y2, x1:x2]
+
+        if how_intensity== "max":
+            intens.append(measurements.maximum(pix, l, lab_idx))
+        else:
+            intens.append(measurements.sum(pix, l, lab_idx))
+
+        if how_peak=="com":
+            y, x = measurements.center_of_mass(pix, l, lab_idx)
+        else:
+            y, x = measurements.maximum_position(pix, l, lab_idx)
+
+        peaks.append((x + x1, y + y1))
+
+    intens = np.array(intens)
+    peaks = np.array(peaks)
+    return intens, peaks
+
+
 def refls_from_sims(panel_imgs, detector, beam, thresh=0, filter=None, panel_ids=None,
                     max_spot_size=1000, use_detect_peaks=False, **kwargs):
     """
@@ -1169,16 +1254,23 @@ def refls_from_sims(panel_imgs, detector, beam, thresh=0, filter=None, panel_ids
     :param kwargs: kwargs to pass along to the optional filter
     :return: a reflection table of spot centroids
     """
-    from dials.algorithms.spot_finding.factory import FilterRunner
-    from dials.model.data import PixelListLabeller, PixelList
-    from dials.algorithms.spot_finding.finder import pixel_list_to_reflection_table
+    PixelListLabeller = None
+    try:
+        from dials.algorithms.spot_finding.factory import FilterRunner
+        from dials.model.data import PixelListLabeller, PixelList
+        from dials.algorithms.spot_finding.finder import pixel_list_to_reflection_table
+    except ImportError:
+        import reciprocalspaceship as rs
 
     if panel_ids is None:
         panel_ids = np.arange(len(detector))
     pxlst_labs = []
+    rs_datasets = []
+    plab = None
     for i, pid in enumerate(panel_ids):
-        plab = PixelListLabeller()
         img = panel_imgs[i]
+        if PixelListLabeller is not None:
+            plab = PixelListLabeller()
         if use_detect_peaks:
             mask = detect_peaks(img, thresh)
         elif filter is not None:
@@ -1186,25 +1278,37 @@ def refls_from_sims(panel_imgs, detector, beam, thresh=0, filter=None, panel_ids
         else:
             mask = img > thresh
         img_sz = detector[int(pid)].get_image_size()  # for some reason the int cast is necessary in Py3
-        flex_img = flex.double(img)
-        flex_img.reshape(flex.grid(img_sz))
 
-        flex_mask = flex.bool(mask)
-        flex_mask.resize(flex.grid(img_sz))
-        pl = PixelList(0, flex.double(img), flex.bool(mask))
-        plab.add(pl)
+        if plab is not None:
+            flex_img = flex.double(img)
+            flex_img.reshape(flex.grid(img_sz))
+            flex_mask = flex.bool(mask)
+            flex_mask.resize(flex.grid(img_sz))
+            pl = PixelList(0, flex.double(img), flex.bool(mask))
+            plab.add(pl)
+            pxlst_labs.append(plab)
+        else:
+            intens, peaks = find_peaks_connected_regions(img, mask)
+            xpix,ypix = peaks.T
+            zpix = np.zeros_like(xpix)
+            xyz = list(zip(xpix, ypix, zpix))
+            ds = rs.DataSet({"xyzobs.px.value": xyz, "intensity.sum.value": intens})
+            ds["panel"] = pid
+            rs_datasets.append(ds)
 
-        pxlst_labs.append(plab)
+    if PixelListLabeller is not None:
+        El = explist_from_numpyarrays(panel_imgs, detector, beam)
+        iset = El.imagesets()[0]
+        refls = pixel_list_to_reflection_table(
+            iset, pxlst_labs,
+            min_spot_size=1,
+            max_spot_size=max_spot_size,  # TODO: change this ?
+            filter_spots=FilterRunner(),  # must use a dummie filter runner!
+            write_hot_pixel_mask=False)[0]
 
-    El = explist_from_numpyarrays(panel_imgs, detector, beam)
-    iset = El.imagesets()[0]
-    refls = pixel_list_to_reflection_table(
-        iset, pxlst_labs,
-        min_spot_size=1,
-        max_spot_size=max_spot_size,  # TODO: change this ?
-        filter_spots=FilterRunner(),  # must use a dummie filter runner!
-        write_hot_pixel_mask=False)[0]
-
+    else:
+        assert rs_datasets
+        refls = rs.concat(rs_datasets, check_isomorphous=False)
     return refls
 
 
@@ -1306,7 +1410,6 @@ def refls_to_q(refls, detector, beam, update_table=False):
     :param update_table: update the table with rlp col
     :return:
     """
-
     orig_vecs = {}
     fs_vecs = {}
     ss_vecs = {}
@@ -1318,12 +1421,7 @@ def refls_to_q(refls, detector, beam, update_table=False):
 
     s1_vecs = []
     q_vecs = []
-    panels = refls["panel"]
-    n_refls = len(refls)
-    for i_r in range(n_refls):
-        r = refls[i_r]
-        pid = r['panel']
-        i_fs, i_ss, _ = r['xyzobs.px.value']
+    for ((i_fs, i_ss, _), pid) in zip(refls["xyzobs.px.value"], refls["panel"]):
         panel = detector[pid]
         orig = orig_vecs[pid] #panel.get_origin()
         fs = fs_vecs[pid] #panel.get_fast_axis()
@@ -1336,8 +1434,12 @@ def refls_to_q(refls, detector, beam, update_table=False):
         q_vecs.append(s1-beam.get_s0())
 
     if update_table:
-        refls['s1'] = flex.vec3_double(tuple(map(tuple, s1_vecs)))
-        refls['rlp'] = flex.vec3_double(tuple(map(tuple, q_vecs)))
+        if isinstance(refls, pandas.DataFrame):
+            refls["s1"] =  list(map(tuple,s1_vecs))
+            refls["rlp"] = list(map(tuple,q_vecs))
+        else:
+            refls['s1'] = flex.vec3_double(tuple(map(tuple, s1_vecs)))
+            refls['rlp'] = flex.vec3_double(tuple(map(tuple, q_vecs)))
 
     return np.vstack(q_vecs)
 
@@ -1407,13 +1509,19 @@ def refls_to_hkl(refls, detector, beam, crystal,
     if 'rlp' not in list(refls.keys()):
         q_vecs = refls_to_q(refls, detector, beam, update_table=update_table)
     else:
-        q_vecs = np.vstack([refls[i_r]['rlp'] for i_r in range(len(refls))])
+        if isinstance(refls, pandas.DataFrame):
+            q_vecs = np.vstack(refls['rlp'].values)
+        else:
+            q_vecs = np.vstack([refls[i_r]['rlp'] for i_r in range(len(refls))])
     Ai = sqr(crystal.get_A()).inverse()
     Ai = Ai.as_numpy_array()
     HKL = np.dot( Ai, q_vecs.T)
     HKLi = np.ceil(HKL-0.5)
     if update_table:
-        refls['miller_index'] = flex.miller_index(list(map(tuple, HKLi.T.astype(np.int32))))
+        if isinstance(refls, pandas.DataFrame):
+            refls['miller_index'] = list(map(tuple, HKLi.T.astype(np.int32)))
+        else:
+            refls['miller_index'] = flex.miller_index(list(map(tuple, HKLi.T.astype(np.int32))))
     if returnQ:
         return np.vstack(HKL).T, np.vstack(HKLi).T, q_vecs
     else:

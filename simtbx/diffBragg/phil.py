@@ -6,7 +6,12 @@ from iotbx.phil import parse
 #'''
 
 hopper_phil = """
-
+perRoi_finish = False
+  .type = bool
+  .help = optionally finish the refinement by fixing all other params and optimizing per-reflection scale factors
+shuffle_stage2_inputs = False
+  .type = bool
+  .help = optionally shuffle the pandas input pickle for stage 2, so then max_process can be used to select random subsets
 filter_during_refinement {
   enable = False
     .type = bool
@@ -53,6 +58,9 @@ consider_multicrystal_shots = False
 debug_mode = False
   .type = bool
   .help = If True, many output files are written to explore the diffBragg models in great detail
+debug_mode_rank0_only = True
+  .type = bool
+  .help = if debug_mode is True, then only set it for rank0
 nominal_Fhkl_only = True
   .type = bool
   .help = if refining Fhkls, only refine the ones that are assigned to a reflection table...
@@ -394,6 +402,9 @@ sanity_test_input = True
   .type = bool
   .help = sanity test input
   .expert_level=10
+shots_per_chunk=50
+  .type = int
+  .help = number of experiments saved per composite file
 outdir = None
   .type = str
   .help = output folder
@@ -1097,7 +1108,26 @@ refiner {
 
 roi_phil = """
 roi {
-  centroid = *obs cal
+  filter_scores {
+    enable = False
+      .type = bool
+    state_file = None
+      .type = str
+    cutoff = 0.5
+      .type = float
+  }
+  filter_bright_peaks {
+    enable = False
+      .type = bool
+      .help = whether to filter shoeboxes if the pixels are exceptionally bright
+    thresh = 3.5
+      .type = float
+      .help = threshold for median absolute deviaion filter (lower rejects more shoeboxes)
+  }
+  strong_only = False
+    .type = bool
+    .help = check for the column is_strong in the reflection table, and if it exists, only load refls where is_strong=True
+  centroid = *obs cal origobs
     .type = choice
     .help = Determines which refl table column contains the spot centroids
     .help = Shoeboxes are drawn around the centroids, and refinement uses pixels
@@ -1190,6 +1220,12 @@ geometry {
     .type = str
     .help = optional tagname, if provided,write optimized refls/expts alongside the
     .help = input refls/expts however using this tag suffix
+  exp_key = exp_name
+    .type = str
+    .help = name of experiment name col in input pandas pkl
+  exp_idx_key = exp_idx
+    .type = str
+    .help = name of experiment index col in input pandas pkl
   refls_key = stage1_refls
     .type = str
     .help = column name for the input pickle which contains the reflection tables to be modeled
@@ -1259,6 +1295,14 @@ geometry {
 
 predictions_phil = """
 predictions {
+  fit_intensity_using_diffBragg = False
+    .type = bool 
+  integrate_phil = None
+    .type = str
+    .help = phil file for stills process specifying integration
+  printout_pix = None
+    .type = ints(size=3)
+    .help = panel id, fast coord, slow coord. If provided, debug stdout will be shown detailing the mstate of the diffBragg model
   use_peak_detection = False
     .type = bool
     .help = If True, then simulations will be converted to refl tables
@@ -1319,6 +1363,9 @@ predictions {
     .help = diffbragg offers CUDA support via the DIFFBRAGG_USE_CUDA=1 environment variable specification
     .help = or openmp support using the OMP_NUM_THREADS flag
     .help = The exascale only uses CUDA (will raise error if CUDA is not confugured)
+  mosaic_samples_override = None
+    .type = int
+    .help = Specify the number of mosaic spread samples
 }
 """
 

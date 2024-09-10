@@ -401,6 +401,14 @@ void diffBragg_sum_over_steps(
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_latt_diffuse[6] = {0,0,0,0,0,0};
 
+        // compute unit cell volume
+        // TODO: this should be computed using the P1 unit cell
+        Eigen::Vector3d ap_vec(1e10*db_cryst.eig_B(0,0), 1e10*db_cryst.eig_B(1,0), 1e10*db_cryst.eig_B(2,0));
+        Eigen::Vector3d bp_vec(1e10*db_cryst.eig_B(0,1), 1e10*db_cryst.eig_B(1,1), 1e10*db_cryst.eig_B(2,1));
+        Eigen::Vector3d cp_vec(1e10*db_cryst.eig_B(0,2), 1e10*db_cryst.eig_B(1,2), 1e10*db_cryst.eig_B(2,2));
+        double cell_vol = ap_vec.dot(bp_vec.cross(cp_vec)); // cubic Angstrom
+        double xtal_size = pow(db_cryst.Na*db_cryst.Nb*db_cryst.Nc*cell_vol, (double)1/double(3)); // Angstrom
+
         for (int i_step=0; i_step < db_steps.Nsteps; i_step++){
 
             int subS = db_steps.subS_pos[i_step];
@@ -474,25 +482,21 @@ void diffBragg_sum_over_steps(
                 }
             }
 
-            double phi = db_cryst.phi0 + db_cryst.phistep*phi_tic;
-            Eigen::Matrix3d Bmat_realspace = db_cryst.eig_B;
-            if( phi != 0.0 )
-            {
-                double cosphi = cos(phi);
-                double sinphi = sin(phi);
-                Eigen::Vector3d ap_vec(db_cryst.eig_B(0,0), db_cryst.eig_B(1,0), db_cryst.eig_B(2,0));
-                Eigen::Vector3d bp_vec(db_cryst.eig_B(0,1), db_cryst.eig_B(1,1), db_cryst.eig_B(2,1));
-                Eigen::Vector3d cp_vec(db_cryst.eig_B(0,2), db_cryst.eig_B(1,2), db_cryst.eig_B(2,2));
+            Eigen::Matrix3d Bmat_realspace = 1e10*db_cryst.eig_B;
+            //if( phi != 0.0 )
+            //{
+            //    double cosphi = cos(phi);
+            //    double sinphi = sin(phi);
 
-                ap_vec = ap_vec*cosphi + db_cryst.spindle_vec.cross(ap_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(ap_vec))*(1-cosphi);
-                bp_vec = bp_vec*cosphi + db_cryst.spindle_vec.cross(bp_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(bp_vec))*(1-cosphi);
-                cp_vec = cp_vec*cosphi + db_cryst.spindle_vec.cross(cp_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(cp_vec))*(1-cosphi);
+            //    ap_vec = ap_vec*cosphi + db_cryst.spindle_vec.cross(ap_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(ap_vec))*(1-cosphi);
+            //    bp_vec = bp_vec*cosphi + db_cryst.spindle_vec.cross(bp_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(bp_vec))*(1-cosphi);
+            //    cp_vec = cp_vec*cosphi + db_cryst.spindle_vec.cross(cp_vec)*sinphi + db_cryst.spindle_vec*(db_cryst.spindle_vec.dot(cp_vec))*(1-cosphi);
 
-                Bmat_realspace << ap_vec[0], bp_vec[0], cp_vec[0],
-                                    ap_vec[1], bp_vec[1], cp_vec[1],
-                                    ap_vec[2], bp_vec[2], cp_vec[2];
-            }
-            Bmat_realspace *= 1e10;
+            //    Bmat_realspace << ap_vec[0], bp_vec[0], cp_vec[0],
+            //                        ap_vec[1], bp_vec[1], cp_vec[1],
+            //                        ap_vec[2], bp_vec[2], cp_vec[2];
+            //}
+            //Bmat_realspace *= 1e10;
             if (db_flags.use_diffuse && db_flags.gamma_miller_units){
               anisoG_local = anisoG_local * Bmat_realspace;
               for (int i_gam=0; i_gam<3; i_gam++){
@@ -501,9 +505,28 @@ void diffBragg_sum_over_steps(
             }
 
             Eigen::Matrix3d U = db_cryst.eig_U;
-            Eigen::Matrix3d UBO = (db_cryst.UMATS_RXYZ[mos_tic] * U*Bmat_realspace*(db_cryst.eig_O.transpose())).transpose();
 
-                Eigen::Matrix3d Ainv = U*(Bmat_realspace.transpose().inverse())* (db_cryst.eig_O.inverse());
+            Eigen::Matrix3d UBOt=U*Bmat_realspace*(db_cryst.eig_O.transpose());
+            double phi = db_cryst.phi0 + db_cryst.phistep*phi_tic;
+            if (phi != 0){
+                if (i_pix==0){
+                    printf("phistep=%f, phi0=%f, phi=%f\n", db_cryst.phistep, db_cryst.phi0, phi);
+                }
+
+                double c = cos(phi);
+                double omc = 1-c;
+                double s = sin(phi);
+                Eigen::Matrix3d Rphi;
+                double gx = db_cryst.spindle_vec[0];
+                double gy = db_cryst.spindle_vec[1];
+                double gz = db_cryst.spindle_vec[2];
+                Rphi << c + gx*gx*omc,    gx*gy*omc-gz*s,   gx*gz*omc+gy*s,
+                      gy*gx*omc + gz*s,   c + gy*gy*omc,   gy*gz*omc - gx*s,
+                      gz*gx*omc - gy*s,  gz*gy*omc + gx*s, c + gz*gz*omc;
+                UBOt = Rphi*UBOt;
+            }
+            Eigen::Matrix3d UBO = (db_cryst.UMATS_RXYZ[mos_tic]*UBOt).transpose();
+            Eigen::Matrix3d Ainv = UBO.inverse();
             Eigen::Vector3d q_vec(scattering[0], scattering[1], scattering[2]);
             q_vec *= 1e-10;
             Eigen::Vector3d H_vec = UBO*q_vec;
@@ -528,12 +551,30 @@ void diffBragg_sum_over_steps(
             Eigen::Vector3d V = NABC*delta_H;
             double hrad_sqr = V.dot(V);
             double NABC_determ = NABC.determinant();
-            double F_latt;
-            if (db_flags.no_Nabc_scale)
-                F_latt = exp(-( hrad_sqr / 0.63 * db_cryst.fudge ));
-            else
-                //F_latt = db_cryst.Na*db_cryst.Nb*db_cryst.Nc*exp(-( hrad_sqr / 0.63 * db_cryst.fudge ));
-                F_latt = NABC_determ*exp(-( hrad_sqr / 0.63 * db_cryst.fudge ));
+            double F_latt = 0;
+            if (db_cryst.xtal_shape==SQUARE){
+                F_latt = 1;
+                if (db_cryst.Na > 1)
+                        F_latt *= sincg(M_PI * h, db_cryst.Na);
+                if (db_cryst.Nb > 1)
+                        F_latt *= sincg(M_PI * k, db_cryst.Nb);
+                if (db_cryst.Nc > 1)
+                        F_latt *= sincg(M_PI * l, db_cryst.Nc);
+            }
+            else { // gaussian relp model
+                double exparg;
+                if (db_cryst.xtal_shape==GAUSS_STAR){
+                    Eigen::Vector3d delta_Q = UBO.inverse()*delta_H;
+                    double rad_star_sqr = delta_Q.dot(delta_Q)*xtal_size*xtal_size;
+                    exparg = rad_star_sqr *1.75* db_cryst.fudge ;
+                }
+                else
+                    exparg = hrad_sqr / 0.63 * db_cryst.fudge;
+
+                F_latt = exp(-exparg);
+                if (! db_flags.no_Nabc_scale)
+                    F_latt *= NABC_determ;
+            }
 
             /* convert amplitudes into intensity (photons per steradian) */
             if (!db_flags.oversample_omega && !db_flags.Fhkl_gradient_mode)
@@ -745,11 +786,20 @@ void diffBragg_sum_over_steps(
                 fp_fdp_manager_dI[1] += 2*I_noFcell * (d_deriv_Fcell);
             }
 
+            //if (db_flags.refine_gauss_spec){
+            //    for (int i_peak=0; i_peak < db_beam.n_gauss_peaks; i_peak++){
+            //        double damp = gauss_spec_amp_derivs[i_peak];
+            //        double dwid = gauss_spec_wid_derivs[i_peak];
+            //        double Iincrement_div_sourceI = Iincrement / source_I[source];
+            //        gauss_spec_dI[i_peak] += Iincrement_div_sourceI* damp;
+            //        gauss_spec_dI[db_beam.n_gauss_peaks + i_peak] += Iincrement_div_sourceI * dwid;
+            //    }
+            //}
+
             //if(verbose > 3)
             //    printf("hkl= %f %f %f  hkl1= %d %d %d  Fcell=%f\n", h,k,l,h0,k0,l0, F_cell);
 
             double two_C = 2*C;
-            Eigen::Matrix3d UBOt = U*Bmat_realspace*(db_cryst.eig_O.transpose());
             if (db_flags.refine_Umat[0]){
                 Eigen::Matrix3d RyRzUBOt = db_cryst.RotMats[1]*db_cryst.RotMats[2]*UBOt;
                 Eigen::Vector3d delta_H_prime = (db_cryst.UMATS[mos_tic]*db_cryst.dRotMats[0]*RyRzUBOt).transpose()*q_vec;
@@ -836,7 +886,9 @@ void diffBragg_sum_over_steps(
 
                     double N_i = NABC(i_nc, i_nc);
                     Eigen::Vector3d dV_dN = dN*delta_H;
-                    double determ_deriv = (NABC.inverse()*dN).trace(); // TODO speedops: precompute these
+                    double determ_deriv=0;
+                    if (!db_flags.no_Nabc_scale)
+                        determ_deriv = (NABC.inverse()*dN).trace(); // TODO speedops: precompute these
                     double deriv_coef = determ_deriv - C* ( dV_dN.dot(V));
                     double value = 2*Iincrement*deriv_coef;
                     double value2=0;
@@ -861,7 +913,9 @@ void diffBragg_sum_over_steps(
                     else
                         dN << 0,0,1,0,0,0,1,0,0;
                     Eigen::Vector3d dV_dN = dN*delta_H;
-                    double determ_deriv = (NABC.inverse()*dN).trace(); // TODO speedops: precompute these
+                    double determ_deriv =0;
+                    if (!db_flags.no_Nabc_scale)
+                        determ_deriv = (NABC.inverse()*dN).trace(); // TODO speedops: precompute these
                     //double deriv_coef = -C* (2* dV_dN.dot(V));
                     double deriv_coef = determ_deriv - C* (dV_dN.dot(V));
                     double value = 2*Iincrement*deriv_coef;
@@ -1194,6 +1248,14 @@ void diffBragg_sum_over_steps(
             d_image.fp_fdp[Npix_to_model + i_pix] = value;
         }
 
+        //if (db_flags.refine_gauss_spec){
+        //    for (int i_peak=0; i_peak < db_beam.n_gauss_peaks; i_peak++){
+        //        double amp_value = scale_term*gauss_spec_dI[i_peak];
+        //        d_image.gauss_spec[Npix_to_model*i_peak + i_pix] = amp_value;
+        //        double wid_value = scale_term*gauss_spec_dI[db_beam.n_gauss_peaks + i_peak];
+        //        d_image.gauss_spec[Npix_to_model*db_beam.n_gauss_peaks + Npix_to_model*i_peak + i_pix] = wid_value;
+        //    }
+        //}
         /* update eta derivative image */
         if(db_flags.refine_eta){
             //double value = scale_term*eta_manager_dI[0];
