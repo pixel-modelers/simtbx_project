@@ -19,7 +19,7 @@ try:  # TODO keep backwards compatibility until we close the nxmx_writer_experim
 except ModuleNotFoundError:
     from xfel.util.jungfrau import get_pedestalRMS_from_jungfrau
 from simtbx.nanoBragg.utils import downsample_spectrum
-from dials.array_family import flex
+from cctbx.array_family import flex
 from simtbx.diffBragg import utils
 from simtbx.diffBragg.refiners.parameters import RangedParameter, Parameters, PositiveParameter
 from simtbx.diffBragg.attr_list import NB_BEAM_ATTRS, NB_CRYST_ATTRS, DIFFBRAGG_ATTRS
@@ -416,7 +416,8 @@ class DataModeler:
         :param exp_idx: index corresponding to experiment in experiment list
         """
         if isinstance(ref, str):
-            refls = flex.reflection_table.from_file(ref)
+            from dials.array_family import flex as dials_flex
+            refls = dials_flex.reflection_table.from_file(ref)
             # TODO: is this the proper way to select the id ?
             refls = refls.select(refls['id']==exp_idx)
         else:
@@ -2358,6 +2359,8 @@ def get_new_xycalcs(Modeler, new_exp, old_refl_tag="dials", x=None, Jac=None, SI
         Fp1 = SIM.D.Fhkl #crystal.miller_array
         Fp1_map = {h:amp for h,amp in zip(Fp1.indices(), Fp1.data())}
 
+    xyzobs_px_val = new_refls["xyzobs.px.value"]
+    pids = new_refls["panel"]
     for i_roi in range(len(bragg_subimg)):
 
         ref_idx = Modeler.refls_idx[i_roi]
