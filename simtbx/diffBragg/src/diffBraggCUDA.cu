@@ -2,27 +2,12 @@
 #include "diffBraggCUDA.h"
 #include "diffBragg_gpu_kernel.h"
 #include <stdio.h>
+#include "simtbx/nanoBragg/safecall.cuh"
 //lkalskdlaksdlkalsd
 
 //#define BLOCKSIZE 128
 //#define NUMBLOCKS 128
-//https://stackoverflow.com/a/14038590/2077270
 #define gpuErr(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess)
-   {
-      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-   }
-}
-
-void error_msg(cudaError_t err, const char* msg){
-    if (err != cudaSuccess){
-        printf("%s: CUDA error message: %s\n", msg, cudaGetErrorString(err));
-        exit(err);
-    }
-}
 
 void diffBragg_sum_over_steps_cuda(
         int Npix_to_model,
