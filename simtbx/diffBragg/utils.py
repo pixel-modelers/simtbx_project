@@ -1729,11 +1729,12 @@ def recover_diff_phil_from_scope_extract(modeler_file):
     master.fetch_diff(source=user_phil).show()
 
 
-def get_extracted_params_from_phil_sources(phil_file=None, cmdline_phil_lst=None):
+def get_extracted_params_from_phil_sources(phil_file=None, cmdline_phil_lst=None, return_diff_phil_s=False):
     """
     get a params obj derived from diffBragg/phil.py thats ready to passed to various methods
     :param phil_file: is the path to a phil configuration file for diffBragg/phil.py
     :param cmdline_phil_lst: list of strings, each a command line phil arg, e.g. ['rank0_level=high', 'outdir=something']
+    :param return_diff_phil_s: also return string version of the difference phil
 
     Just like in normal operation, the cmdline str does not need to specify the absolute scope unless there are conflicting scopes
     """
@@ -1757,7 +1758,13 @@ def get_extracted_params_from_phil_sources(phil_file=None, cmdline_phil_lst=None
         print("WARNING: unused phil:", loc)
 
     params = working_phil.extract()
-    return params
+    s = StringIO()
+    working_phil.fetch_diff(sources=phil_sources).show(out=s)
+    diff_phil_s = s.getvalue()
+    if return_diff_phil_s:
+        return params, diff_phil_s
+    else:
+        return params
 
 
 def get_laue_group_number(sg_symbol=None):

@@ -1297,9 +1297,6 @@ predictions_phil = """
 predictions {
   fit_intensity_using_diffBragg = False
     .type = bool 
-  integrate_phil = None
-    .type = str
-    .help = phil file for stills process specifying integration
   printout_pix = None
     .type = ints(size=3)
     .help = panel id, fast coord, slow coord. If provided, debug stdout will be shown detailing the mstate of the diffBragg model
