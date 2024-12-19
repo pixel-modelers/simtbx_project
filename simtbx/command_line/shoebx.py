@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from __future__ import division
 
 # LIBTBX_SET_DISPATCHER_NAME diffBragg.shoebx
@@ -151,6 +152,7 @@ if not args.scroll:
             labs["xy"].append( (xlab, ylab))
 
     subplot(121)
+    ax1=gca()
     gca().set_facecolor('tomato')
     gca().set_title("DATA", fontsize=18)
     masked_dat_vals = full_dat_im[~full_trust_im]
@@ -177,7 +179,7 @@ if not args.scroll:
     #gca().set_xlim(0, size_edg*sub_sh[1])
     #gca().set_ylim(0, size_edg*sub_sh[0])
     #gca().set_yticks([])
-    subplot(122)
+    subplot(122, sharex=ax1, sharey=ax1)
     gca().set_title("MODEL", fontsize=18)
     masked_mod_vals = full_im[~full_trust_im]
     full_im[~full_trust_im] = np.nan

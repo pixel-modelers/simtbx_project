@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from __future__ import absolute_import, division, print_function
 import socket
 from copy import deepcopy
@@ -151,8 +152,8 @@ class Script:
         shots_per_chunk=self.params.shots_per_chunk
         CHECKER = None
         try:
-            from simtbx.tests import roi_check
-            CHECKER = roi_check.roiCheck(self.params.roi.filter_scores.state_file)
+            from score_trainer import roi_check
+            CHECKER = roi_check.roiCheck()
         except:
             CHECKER = None
         for i_shot, line in enumerate(input_lines):
@@ -398,6 +399,9 @@ class Script:
             shoeboxes = []
             scores = []
             Ridx = flex.reflection_table()
+
+            if not hasattr(Modeler, "roi_id_slices"):
+                Modeler.set_slices("roi_id")
             for roi, slc in Modeler.roi_id_slices.items():
                 hopper_pix = Modeler.best_model[slc[0]]
 
