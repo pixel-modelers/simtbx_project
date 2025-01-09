@@ -9,12 +9,13 @@ from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("modeler_file", type=str, help="path to a diffBragg modeler file (output from hopper, see the imgs folder in the outdir)")
 parser.add_argument("--scroll", action="store_true", help="if provided, scroll through shoeboxes one-by-one using arrow keys")
-parser.add_argument("--stateFile", type=str, help="Optional path to the roi checker file (requires pytorch). Will be used to label rois as good/bad fits")
+parser.add_argument("--stateFile", type=str, help="Optional path to the roi checker file (requires pytorch). Will be used to label rois as good/bad fits", default=None)
 args = parser.parse_args()
 
 
-FIG,(ax0,ax1,ax2) = subplots(nrows=1,ncols=3)
-FIG.set_size_inches((5,2))
+if args.scroll:
+    FIG,(ax0,ax1,ax2) = subplots(nrows=1,ncols=3)
+    FIG.set_size_inches((5,2))
 
 
 def press(event):
@@ -44,9 +45,10 @@ def centroid_poly(x,y):
 M = np.load(args.modeler_file, allow_pickle=True)[()]
 num_spots = len(M.pids)
 
-FIG.loop_counter = 0
-FIG.nspots = num_spots
-FIG.canvas.mpl_connect('key_press_event', press)
+if args.scroll:
+    FIG.loop_counter = 0
+    FIG.nspots = num_spots
+    FIG.canvas.mpl_connect('key_press_event', press)
 
 assert len(set(M.roi_id)) == max(M.roi_id)+1
 sigma_rdout = M.params.refiner.sigma_r / M.params.refiner.adu_per_photon
@@ -80,13 +82,13 @@ if not args.scroll:
         sigma_rdout_subimg = None
 
     scores = None
-    if args.stateFile is not None:
-        try:
-            from simtbx.tests import roi_check
-            checker = roi_check.roiCheck(args.stateFile)
-            scores = checker.score(data_subimg, model_subimg)
-        except:
-            pass
+    try:
+        from score_trainer import roi_check
+        checker = roi_check.roiCheck()
+        scores = checker.score(data_subimg, model_subimg)
+    except Exception as err:
+        print(str(err))
+        pass
 
     sub_sh = tuple(np.max([im.shape for im in model_subimg], axis=0))
     size_edg = int(np.sqrt(len(data_subimg))) + 1

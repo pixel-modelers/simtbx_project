@@ -114,8 +114,10 @@ class NBbeam(object):
       vec_xyz = rotate_axis(-beam_vector, polar_vector, vdiv)
       unit_s0 = rotate_axis(vec_xyz, vert_vector, hdiv)
       div_ang = np.arccos(np.dot(unit_s0, -beam_vector))
+      if np.isnan(div_ang):
+          div_ang = 0
       if hdiv == 0 and vdiv == 0:
-        assert div_ang == 0
+        assert np.allclose(div_ang, 0)
         assert np.allclose(unit_s0, nominal_beam.get_unit_s0())
       if div_ang > 1.1*(self.divergence_mrad / 1000. / 2.):
         continue
