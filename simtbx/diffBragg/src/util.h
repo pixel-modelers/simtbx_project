@@ -81,6 +81,7 @@ struct images{
     image_type fp_fdp;  // fprime and fdblprime gradients
     image_type diffuse_gamma; // diffuse gamma gradients
     image_type diffuse_sigma; // diffuse sigma gradients
+    image_type gonio_angle; // goniometer angle gradients
 };
 
 
@@ -131,6 +132,7 @@ struct flags{
     bool complex_miller = false;  // is the miller array complex (such thet Fhkl_linear and Fhkl2_linear are both defined)
     bool no_Nabc_scale = false; // no Nabc prefactor
     bool refine_diffuse = false; // flag for computing diffuse gradients
+    bool refine_gonio_angle = false; // flag for computing diffuse gradients
     std::vector<bool> refine_Bmat;  //  Bmatrix
     std::vector<bool> refine_Ncells; // mosaic domain size
     bool refine_Ncells_def = false; // mosaic domain size off diag

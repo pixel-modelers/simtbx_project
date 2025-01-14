@@ -4,7 +4,7 @@ parser = ArgumentParser()
 parser.add_argument("--kokkos", action="store_true")
 parser.add_argument("--curvatures", action='store_true')
 parser.add_argument("--readout", type=float, default=0)
-parser.add_argument("--perturb", choices=["G", "Nabc", "detz_shift", "crystal", "eta", "spec"], type=str, nargs="+", default=["crystal"] )
+parser.add_argument("--perturb", choices=["G", "Nabc", "detz_shift", "crystal", "eta", "spec", "gonio"], type=str, nargs="+", default=["crystal"] )
 parser.add_argument("--eta", type=float, nargs=3, default=[.2, .1, .4])
 parser.add_argument("--plot", action="store_true", help="shows the ground truth image")
 parser.add_argument("--typeG", choices=["ranged", "positive"], default="ranged", type=str,  help="shows the ground truth image")
@@ -133,6 +133,12 @@ with DeviceWrapper(0) as _:
         SIM.D.no_Nabc_scale = True
         na,nb,nc = nbcryst.Ncells_abc
         SIM.D.spot_scale = SIM.D.spot_scale * (na*nb*nc)**2
+    # gonio
+    delta_phi_gt = 0.3
+    phisteps=100
+    if "gonio" in args.perturb:
+        utils.update_SIM_with_gonio(SIM, delta_phi=delta_phi_gt, num_phi_steps=phisteps)
+
     SIM.D.add_diffBragg_spots()
     SIM.D.verbose = 0
     spots = SIM.D.raw_pixels.as_numpy_array()
@@ -194,17 +200,23 @@ with DeviceWrapper(0) as _:
         P.init.spec = [0,1]
         P.fix.Nabc=True
         P.fix.G=True
-        P.fix.RotXYZ=True
+        P.fix.RotXYZ=[1,1,1]
         P.fix.ucell = True
         P.fix.detz_shift = True
         P.ftol=1e-15
+
+    if "gonio" in args.perturb:
+        P.fix.gonio_angle = False
+        P.init.gonio_angle = 0
+        P.sigmas.gonio_angle=1e-2
+        P.simulator.gonio.phi_steps=50
 
     if args.perturb == ["detz_shift"]:
         P.fix.detz_shift = False
         P.fix.ucell=True
         P.fix.Nabc=True
         P.fix.G=True
-        P.fix.RotXYZ=True
+        P.fix.RotXYZ=[1,1,1]
 
     E.detector = SIM.detector
     E.beam = SIM.D.beam
@@ -283,13 +295,20 @@ with DeviceWrapper(0) as _:
         os.system(cmd)
         # TODO open the pandas output file and optimized expt in outdir and verify the optimized parameters are similar to ground
         exit()
+    if "gonio" in args.perturb:
+        P.method="Nelder-Mead"
+        #P.niter=10
+        P.sigmas.RotXYZ=[1e-10,1e-3,1e-10]
+        #P.fix.RotXYZ = [2,0,1]
 
     P.record_device_timings = True
     Eopt,_, Mod, SIM_used_by_hopper, x = hopper_utils.refine(E, refls, P, spec=spec, return_modeler=True)
     if SIM_used_by_hopper.D.record_timings:
         SIM_used_by_hopper.D.show_timings(MPI_RANK=0)
 
-    G, rotX,rotY, rotZ, Na,Nb,Nc,_,_,_,_,_,_,_,_,_,a,b,c,al,be,ga,detz_shift = hopper_utils.get_param_from_x(x, Mod)
+    G, rotX,rotY, rotZ, Na,Nb,Nc,_,_,_,_,_,_,_,_,_,a,b,c,al,be,ga,detz_shift,gonio_ang = hopper_utils.get_param_from_x(x, Mod)
+    if "gonio" in args.perturb:
+        assert np.round(gonio_ang,1) == delta_phi_gt
     eta_abc_opt = hopper_utils.get_mosaicity_from_x(x, Mod, SIM_used_by_hopper)
 
     print("Na, Nb, Nc= %f %f %f" % (Na, Nb, Nc))

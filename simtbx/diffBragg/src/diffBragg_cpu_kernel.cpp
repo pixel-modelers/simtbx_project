@@ -400,6 +400,7 @@ void diffBragg_sum_over_steps(
         double lambda_manager_dI2[2] = {0,0};
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_latt_diffuse[6] = {0,0,0,0,0,0};
+        double dI_gonio_ang = 0;
 
         // compute unit cell volume
         // TODO: this should be computed using the P1 unit cell
@@ -507,11 +508,9 @@ void diffBragg_sum_over_steps(
             Eigen::Matrix3d U = db_cryst.eig_U;
 
             Eigen::Matrix3d UBOt=U*Bmat_realspace*(db_cryst.eig_O.transpose());
+            Eigen::Matrix3d dUBOt;
             double phi = db_cryst.phi0 + db_cryst.phistep*phi_tic;
-            if (phi != 0){
-                if (i_pix==0){
-                    printf("phistep=%f, phi0=%f, phi=%f\n", db_cryst.phistep, db_cryst.phi0, phi);
-                }
+            if (phi != 0 || db_flags.refine_gonio_angle){
 
                 double c = cos(phi);
                 double omc = 1-c;
@@ -520,6 +519,18 @@ void diffBragg_sum_over_steps(
                 double gx = db_cryst.spindle_vec[0];
                 double gy = db_cryst.spindle_vec[1];
                 double gz = db_cryst.spindle_vec[2];
+
+                if (db_flags.refine_gonio_angle){
+                    double dphi_scale = (M_PI/180) * phi_tic / db_cryst.phisteps;
+                    double dc = -s*dphi_scale;
+                    double domc = s*dphi_scale;
+                    double ds = c*dphi_scale;
+                    Eigen::Matrix3d dRphi;
+                    dRphi << dc + gx*gx*domc,    gx*gy*domc-gz*ds,   gx*gz*domc+gy*ds,
+                          gy*gx*domc + gz*ds,   dc + gy*gy*domc,   gy*gz*domc - gx*ds,
+                          gz*gx*domc - gy*ds,  gz*gy*domc + gx*ds, dc + gz*gz*domc;
+                    dUBOt = dRphi* UBOt;
+                }
                 Rphi << c + gx*gx*omc,    gx*gy*omc-gz*s,   gx*gz*omc+gy*s,
                       gy*gx*omc + gz*s,   c + gy*gy*omc,   gy*gz*omc - gx*s,
                       gz*gx*omc - gy*s,  gz*gy*omc + gx*s, c + gz*gz*omc;
@@ -800,6 +811,12 @@ void diffBragg_sum_over_steps(
             //    printf("hkl= %f %f %f  hkl1= %d %d %d  Fcell=%f\n", h,k,l,h0,k0,l0, F_cell);
 
             double two_C = 2*C;
+            if (db_flags.refine_gonio_angle){
+                Eigen::Vector3d delta_H_prime = (db_cryst.UMATS_RXYZ[mos_tic]*dUBOt).transpose()*q_vec;
+                double V_dot_dV = V.dot(NABC*delta_H_prime);
+                double value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_ang += value;
+            }
             if (db_flags.refine_Umat[0]){
                 Eigen::Matrix3d RyRzUBOt = db_cryst.RotMats[1]*db_cryst.RotMats[2]*UBOt;
                 Eigen::Vector3d delta_H_prime = (db_cryst.UMATS[mos_tic]*db_cryst.dRotMats[0]*RyRzUBOt).transpose()*q_vec;
@@ -1172,6 +1189,10 @@ void diffBragg_sum_over_steps(
                   d_image.diffuse_sigma[img_idx] = val;
                 }
             }
+        }
+        if (db_flags.refine_gonio_angle){
+            double value = scale_term*dI_gonio_ang;
+            d_image.gonio_angle[i_pix] = value;
         }
         /* udpate the rotation derivative images*/
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){

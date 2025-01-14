@@ -171,6 +171,9 @@ void diffBragg_sum_over_steps_cuda(
             gpuErr(cudaMallocManaged(&cp.cu_d_diffuse_gamma_images, db_cu_flags.Npix_to_allocate*3*sizeof(CUDAREAL)));
             gpuErr(cudaMallocManaged(&cp.cu_d_diffuse_sigma_images, db_cu_flags.Npix_to_allocate*3*sizeof(CUDAREAL)));
         }
+        if (db_flags.refine_gonio_angle){
+            gpuErr(cudaMallocManaged(&cp.cu_d_gonio_angle_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
+        }
         if (db_flags.refine_fcell){
             gpuErr(cudaMallocManaged(&cp.cu_d_fcell_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
             gpuErr(cudaMallocManaged(&cp.cu_d2_fcell_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
@@ -445,6 +448,7 @@ void diffBragg_sum_over_steps_cuda(
         cp.cu_d_panel_rot_images, cp.cu_d2_panel_rot_images,
         cp.cu_d_panel_orig_images, cp.cu_d2_panel_orig_images,
         cp.cu_d_fp_fdp_images,
+        cp.cu_d_gonio_angle_images,
         db_steps.Nsteps, db_flags.printout_fpixel, db_flags.printout_spixel, db_flags.printout, db_cryst.default_F,
         db_det.oversample,  db_flags.oversample_omega, db_det.subpixel_size, db_det.pixel_size,
         db_det.detector_thickstep, db_det.detector_thick, cp.cu_close_distances, db_det.detector_attnlen,
@@ -493,7 +497,7 @@ void diffBragg_sum_over_steps_cuda(
         cp.Fhkl_channels,
         cp.Fhkl_scale, cp.Fhkl_scale_deriv,
         db_cryst.xtal_shape==GAUSS_STAR,
-        db_cryst.xtal_shape==SQUARE
+        db_cryst.xtal_shape==SQUARE, db_flags.refine_gonio_angle
         );
 
     error_msg(cudaGetLastError(), "after kernel call");
@@ -513,6 +517,10 @@ void diffBragg_sum_over_steps_cuda(
 //  COPY BACK FROM DEVICE
     for (int i=0; i< Npix_to_model; i++){
         floatimage[i] = cp.cu_floatimage[i];
+    }
+    if (db_flags.refine_gonio_angle){
+        for (int i=0; i< Npix_to_model; i++)
+            d_image.gonio_angle[i] = cp.cu_d_gonio_angle_images[i];
     }
     if(db_flags.wavelength_img){
         for (int i=0; i< 4*Npix_to_model; i++){
@@ -616,6 +624,7 @@ void freedom(diffBragg_cudaPointers& cp){
         gpuErr(cudaFree( cp.cu_d_panel_orig_images));
         gpuErr(cudaFree( cp.cu_d_sausage_XYZ_scale_images));
         gpuErr(cudaFree( cp.cu_d_fp_fdp_images));
+        gpuErr(cudaFree(cp.cu_d_gonio_angle_images));
 
         gpuErr(cudaFree(cp.cu_Fhkl));
         gpuErr(cudaFree(cp.cu_Fhkl2));

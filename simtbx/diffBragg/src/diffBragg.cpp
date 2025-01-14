@@ -917,6 +917,8 @@ void diffBragg::let_loose(int refine_id){
     }
     if (refine_id==23)
         db_flags.refine_diffuse = true;
+    if (refine_id==24)
+        db_flags.refine_gonio_angle = true;
 }
 
 void diffBragg::fix(int refine_id){
@@ -989,6 +991,8 @@ void diffBragg::fix(int refine_id){
     }
     if (refine_id==23)
         db_flags.refine_diffuse = false;
+    if (refine_id==24)
+        db_flags.refine_gonio_angle = false;
 }
 
 
@@ -1099,6 +1103,8 @@ void diffBragg::refine(int refine_id){
     }
     if (refine_id==23)
         db_flags.refine_diffuse = true;
+    if (refine_id==24)
+        db_flags.refine_gonio_angle = true;
 }
 
 void diffBragg::print_if_refining(){
@@ -1546,6 +1552,20 @@ boost::python::tuple diffBragg::get_diffuse_gamma_derivative_pixels(){
     }
     boost::python::tuple derivative_pixels;
     derivative_pixels = boost::python::make_tuple(raw_pixels_a, raw_pixels_b, raw_pixels_c);
+    return derivative_pixels;
+}
+
+boost::python::tuple diffBragg::get_gonio_angle_derivative_pixels(){
+    SCITBX_ASSERT(db_flags.refine_gonio_angle);
+    int Npix_total = first_deriv_imgs.gonio_angle.size() / 1;
+    af::flex_double raw_pixels_angle = af::flex_double(Npix_total);
+
+    double* floatimage_angle = raw_pixels_angle.begin();
+    for (int ii=0; ii< Npix_to_model; ii++){
+        floatimage_angle[ii] = first_deriv_imgs.gonio_angle[ii];
+    }
+    boost::python::tuple derivative_pixels;
+    derivative_pixels = boost::python::make_tuple(raw_pixels_angle);
     return derivative_pixels;
 }
 
@@ -2046,6 +2066,9 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     if (db_flags.refine_diffuse){
         first_deriv_imgs.diffuse_gamma.resize(Npix_to_model*3,0);
         first_deriv_imgs.diffuse_sigma.resize(Npix_to_model*3,0);
+    }
+    if (db_flags.refine_gonio_angle){
+        first_deriv_imgs.gonio_angle.resize(Npix_to_model*1,0);
     }
     gettimeofday(&t4,0 );
     double time_make_images = (1000000.0*(t4.tv_sec-t3.tv_sec) + t4.tv_usec-t3.tv_usec)/1000.0;

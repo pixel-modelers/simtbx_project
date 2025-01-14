@@ -46,6 +46,7 @@ DETZ_ID = 10
 FHKL_ID = 11
 ETA_ID = 19
 DIFFUSE_ID = 23
+GONIO_ANGLE_ID = 24
 LAMBDA_IDS = 12, 13
 
 DEG = 180 / np.pi
@@ -670,10 +671,11 @@ class DataModeler:
                     assert minDat < maxDat
                 else:
                     minDat, maxDat = self.E.detector[pid].get_trusted_range()
-                data_out_of_range = np.logical_or(data <= minDat, data >= maxDat)
+                data_out_of_range = np.logical_or(data < minDat, data > maxDat)
                 if self.params.roi.mask_all_if_any_outside_trusted_range:
                     if np.any(data_out_of_range):
                         data_out_of_range[:] = True
+                
 
                 trusted[data_out_of_range] = False
                 numOutOfRange +=np.sum(data_out_of_range)
@@ -834,6 +836,9 @@ class DataModeler:
             if "detz_shift_mm" in list(best):
                 self.params.init.detz_shift = best.detz_shift_mm.values[0]
 
+            if "gonio_angle" in list(best):
+                self.params.init.gonio_angle = best.gonio_angle.values[0]
+
             # TODO: set best eta_abc params
             self.params.init.eta_abc = tuple(best.eta_abc.values[0])
 
@@ -856,7 +861,7 @@ class DataModeler:
 
                 p = ParameterType(init=0, sigma=sigma.RotXYZ[ii],
                                   minval=mins.RotXYZ[ii], maxval=maxs.RotXYZ[ii],
-                                  fix=fix.RotXYZ, name="RotXYZ%d_xtal%d" % (ii,i_xtal),
+                                  fix=fix.RotXYZ[ii], name="RotXYZ%d_xtal%d" % (ii,i_xtal),
                                   center=0 if betas.RotXYZ is not None else None,
                                   beta=betas.RotXYZ)
                 P.add(p)
@@ -978,6 +983,13 @@ class DataModeler:
                           fix=fix.detz_shift,name="detz_shift",
                           center=centers.detz_shift,
                           beta=betas.detz_shift)
+        P.add(p)
+
+        p = ParameterType(init=init.gonio_angle, sigma=sigma.gonio_angle,
+                          minval=mins.gonio_angle, maxval=maxs.gonio_angle,
+                          fix=fix.gonio_angle,name="gonio_angle",
+                          center=centers.gonio_angle,
+                          beta=betas.gonio_angle)
         P.add(p)
 
         if not self.params.fix.perRoiScale:
@@ -1164,6 +1176,8 @@ class DataModeler:
                 SIM.D.refine(ETA_ID)
             if self.P["detz_shift"].refine:
                 SIM.D.refine(DETZ_ID)
+            if self.P["gonio_angle"].refine:
+                SIM.D.refine(GONIO_ANGLE_ID)
             if SIM.D.use_diffuse:
                 SIM.D.refine(DIFFUSE_ID)
 
@@ -1425,6 +1439,7 @@ class DataModeler:
             _, wavelen_subimg, _, _ = Modeler.get_data_model_pairs()
             Modeler.best_model = bm
             Modeler.best_model_includes_background = False
+            from IPython import embed;embed()
 
         if save_refl:
             rank_refls_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "refls", rank)
@@ -1580,6 +1595,8 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 if name == "detz_shift":
                     val = val * 1e3
                     name = p.name + "_mm"
+                if name == "gonio_angle":
+                    name = p.name + "_deg"
                 if "Rot" in name:
                     val = val*180 / np.pi
                     name = p.name +"_deg"
@@ -1631,6 +1648,15 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
     x_shiftZ = x[DetZ.xpos]
     shiftZ = DetZ.get_val(x_shiftZ)
     SIM.D.shift_origin_z(SIM.detector, shiftZ)
+
+#   goniometer parameters
+    GonioAng = Mod.P["gonio_angle"]
+    if GonioAng.refine:
+        x_gonio_angle = x[GonioAng.xpos]
+        gonio_angle = GonioAng.get_val(x_gonio_angle)
+        gonio_ax = SIM.D.spindle_axis
+        utils.update_SIM_with_gonio(SIM, delta_phi=gonio_angle, num_phi_steps=Mod.params.simulator.gonio.phi_steps,
+                                    spindle_axis=gonio_ax)
 
     if Mod.P["lambda_offset"].refine:
         p0 = Mod.P["lambda_offset"]
@@ -1819,6 +1845,11 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 d = DetZ.get_deriv(x[DetZ.xpos], d)
                 J[DetZ.xpos] += d
 
+            if GonioAng.refine:
+                d = SIM.D.get_gonio_angle_derivative_pixels()[0].as_numpy_array()[:npix]
+                d = GonioAng.get_deriv(x[GonioAng.xpos], d)
+                J[GonioAng.xpos] += d
+
             if Mod.P["lambda_offset"].refine:
                 lambda_derivs = SIM.D.get_lambda_derivative_pixels()
                 lambda_param_names = "lambda_offset", "lambda_scale"
@@ -1891,13 +1922,16 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     DetZ = Mod.P["detz_shift"]
     detz = DetZ.get_val(x[DetZ.xpos])
 
+    GonioAng = Mod.P["gonio_angle"]
+    gonio_angle = GonioAng.get_val(x[GonioAng.xpos])
+
     if as_dict:
-        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz
-        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_bvals = f_sig_c', 'a','b','c','al','be','ga', 'detz'
+        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
+        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_bvals = f_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle'
         param_dict = dict(zip(keys, vals))
         return param_dict
     else:
-        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz
+        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
 
 
 class TargetFunc:
@@ -1998,6 +2032,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         SIM.D.fix(DETZ_ID)
         SIM.D.fix(ETA_ID)
         SIM.D.fix(DIFFUSE_ID)
+        SIM.D.fix(GONIO_ANGLE_ID)
     elif compute_grad:
         # actually compute the gradients
         _compute_grad = True
@@ -2012,6 +2047,8 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                 SIM.D.let_loose(UCELL_ID_OFFSET + i_ucell)
         if mod.P["detz_shift"].refine:
             SIM.D.let_loose(DETZ_ID)
+        if mod.P["gonio_angle"].refine:
+            SIM.D.let_loose(GONIO_ANGLE_ID)
         if mod.P["eta_abc0"].refine:
             SIM.D.let_loose(ETA_ID)
         if mod.P["lambda_offset"].refine:
@@ -2228,7 +2265,8 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     x0 = [1] * nparam
 
     x = Modeler.Minimize(x0, SIM)
-    Modeler.best_model, best_Jac = model(x, Modeler, SIM, compute_grad=True, dont_rescale_gradient=True)
+    compute_grad = params.method=="L-BFGS-B"
+    Modeler.best_model, best_Jac = model(x, Modeler, SIM, compute_grad=compute_grad, dont_rescale_gradient=True)
     Modeler.best_model_includes_background = False
     try:
         sigz, niter, _ = Modeler.get_best_hop()
@@ -2249,6 +2287,7 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     new_exp.detector = new_det
 
     if diffBragg_intensity:
+        assert best_Jac is not None
         new_refl = get_new_xycalcs(Modeler, new_exp, x=x, SIM=SIM, Jac=best_Jac)
     else:
         new_refl = get_new_xycalcs(Modeler, new_exp, x=x)
@@ -2268,7 +2307,7 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
 
 
 def update_detector_from_x(Mod, SIM, x):
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
     detz_shift_mm = detz_shift*1e3
     det = SIM.detector
     det = utils.shift_panelZ(det, detz_shift_mm)
@@ -2309,7 +2348,7 @@ def update_crystal_from_x(Mod, SIM, x):
     :param x: parameters returned by hopper_utils (instance of simtbx.diffBragg.refiners.parameters.Parameters()
     :return: a new dxtbx.model.Crystal object with updated unit cell and orientation matrix
     """
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
     ucparam = a, b, c, al, be, ga
     return new_cryst_from_rotXYZ_and_ucell((rotX,rotY,rotZ), ucparam, SIM.crystal.dxtbx_crystal)
 

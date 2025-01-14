@@ -217,6 +217,9 @@ betas
   .help = variances for the restraint targets
   .expert_level=0
 {
+  gonio_angle = None
+    .type = float
+    .help = tightness parameter for gonio restraint (smaller it tighter)
   Finit = None
     .type = float
   Friedel = None
@@ -304,6 +307,9 @@ centers
   .help = restraint targets
   .expert_level=0
 {
+  gonio_angle = None
+    .type = float
+    .help = retraint target for goniometer rotation amount (deg)
   ucell_a = None
     .type = float
     .help = restraint target for unit cell a (Angstrom)
@@ -430,6 +436,9 @@ sigmas
   .help = sensitivity of target to parameter (experimental)
   .expert_level=10
 {
+  gonio_angle = 1e-2
+    .type = float
+    .help = goniometer angle sigma
   spec = [1,1]
     .type=floats(size=2)
     .help = spectrum offset and scale factor sigmas
@@ -473,6 +482,9 @@ init
   .help = initial value of model parameter (will be overrided if best pickle is provided)
   .expert_level=0
 {
+  gonio_angle = 0
+    .type = float
+    .help = rotation of goniometer during exposure in degrees (can be refined, see also simulator.gonio.phi_steps)
   random_Gs = None
     .type = floats
     .help = list of floats from which to select an init.G at random
@@ -515,6 +527,9 @@ mins
   .help = min value allowed for parameter
   .expert_level = 0
 {
+  gonio_angle = -10
+    .type = float
+    .help = minimum allowed goniometer rotation during exposure (degrees)
   detz_shift = -10
     .type = float
     .help = min value for detector z-shift in millimeters
@@ -553,6 +568,9 @@ maxs
   .help = max value allowed for parameter
   .expert_level = 0
 {
+  gonio_angle = 10
+    .type = float
+    .help = maximum allowed goniometer rotation during exposure (degrees)
   detz_shift = 10
     .type = float
     .help = max value for detector z-shift in millimeters
@@ -594,6 +612,9 @@ fix
   .help = flags for fixing parameters during refinement
   .expert_level = 0
 {
+  gonio_angle = True
+    .type = bool
+    .help = fix the goniometer rotation amount during exposure (dont refine)
   Fhkl = True
     .type = bool
     .help = fix the structure factors scales during refinement
@@ -612,8 +633,8 @@ fix
   eta_abc = True
     .type = bool
     .help = fix the mosaic spread parameters during refinement
-  RotXYZ = False
-    .type = bool
+  RotXYZ = [0,0,0]
+    .type = ints(size=3)
     .help = fix the misorientation matrix during refinement
   Nabc = False
     .type = bool
@@ -838,7 +859,7 @@ simulator {
   gonio {
     delta_phi = None
       .type = float
-      .help = Angular amount in degrees by which goniometer is rotated during shot
+      .help = Angular amount in degrees by which goniometer is rotated during shot (will be overwritten by init.gonio_ang)
     phi_steps = 50
       .type = int
       .help = number of discrete angular positions to model
@@ -1142,7 +1163,7 @@ roi {
     .help = trusted range, then mask the entire reflections and surrounding
     .help = pixels. If False, then only pixels outside the range are masked.
     .help = Note: this only takes effect if mask_outside_trusted_range=True.
-  mask_outside_trusted_range = False
+  mask_outside_trusted_range = True
     .type = bool
     .help = Check the dxtbx detector's trusted range and use that to mask
     .help = out-of-range pixels on a per-image basis
@@ -1155,7 +1176,7 @@ roi {
   cache_dir_only = False
     .type = bool
     .help = if True, create the cache folder , populate it with the roi data, then exit
-  fit_tilt = False
+  fit_tilt = True
     .type = bool
     .help = fit tilt plane, or else background is simply an offset
   force_negative_background_to_zero = False

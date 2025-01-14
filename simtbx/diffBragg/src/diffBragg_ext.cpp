@@ -588,6 +588,8 @@ namespace boost_python { namespace {
 
       .def("get_diffuse_sigma_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_diffuse_sigma_derivative_pixels, "get derivatives of intensity w.r.t. diffuse (sigma_a, sigma_b, sigma_c)")
 
+      .def("get_gonio_angle_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_gonio_angle_derivative_pixels, "get derivatives of intensity w.r.t. goniometer angle")
+
       .def("get_fp_fdp_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_fp_fdp_derivative_pixels, "get derivatives of intensity w.r.t c,d that describe fprime and fdblprime (see diffBragg.utils)")
 
       .def("get_ncells_def_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_ncells_def_derivative_pixels, "get derivatives of intensity w.r.t (Nd, Ne, Nf)")

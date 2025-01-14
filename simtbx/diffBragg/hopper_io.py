@@ -95,7 +95,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
 
     scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf,\
         diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, \
-        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift = \
+        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle = \
         hopper_utils.get_param_from_x(x, Mod)
 
     scale_p = Mod.P["G_xtal0"]
@@ -190,7 +190,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         stg1_img_path=stg1_img_path,
         ncells_init=Nabc_init, spot_scales_init=scale_init,
         other_Umats = other_Umats, other_spotscales = other_spotscales,
-        num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples)
+        num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
+                            gonio_angle=gonio_angle)
 
     df['exp_idx'] = exp_idx
 
@@ -202,6 +203,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         df['nidx'] = [Mod.nidx]
     df['phi_deg'] = SIM.D.phi_deg
     df['osc_deg'] = SIM.D.osc_deg
+    df['phisteps'] = SIM.D.phisteps
+    #df["gonio_ax"] = SIM.D.spindle_axis
     if write_pandas:
         rank_pandas_outdir = make_rank_outdir(params.outdir, "pandas",rank)
         pandas_path = os.path.join(rank_pandas_outdir, "%s_%s_%d.pkl" % (params.tag, basename, rank_exp_idx))
@@ -215,7 +218,7 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
                        spec_file, spec_stride,flux, beamsize_mm,
                        orig_exp_name, opt_exp_name, spec_from_imageset, oversample,
                        opt_det, stg1_refls, stg1_img_path, ncells_init=None, spot_scales_init = None,
-                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None):
+                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None):
     """
 
     :param xtal_scale:
@@ -244,7 +247,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
     :param opt_det:
     :param stg1_refls:
     :param stg1_img_path:
-    :num_mosaicity_samples:
+    :param num_mosaicity_samples:
+    :param gonio_angle:
     :return:
     """
     if other_Umats is None:
@@ -278,6 +282,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         "a_init": a_init, "b_init": b_init, "c_init": c_init, "al_init": al_init,
         "lam0": lam0, "lam1": lam1,
         "be_init": be_init, "ga_init": ga_init})
+    if gonio_angle is not None:
+        df["gonio_angle"] = gonio_angle
     if spec_file is not None:
         spec_file = os.path.abspath(spec_file)
     df["spectrum_filename"] = spec_file

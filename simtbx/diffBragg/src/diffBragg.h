@@ -240,6 +240,7 @@ class diffBragg: public nanoBragg{
   boost::python::tuple get_ncells_derivative_pixels();
   boost::python::tuple get_diffuse_gamma_derivative_pixels();
   boost::python::tuple get_diffuse_sigma_derivative_pixels();
+  boost::python::tuple get_gonio_angle_derivative_pixels();
   boost::python::tuple get_ncells_def_derivative_pixels();
   boost::python::tuple get_ncells_def_second_derivative_pixels();
   boost::python::tuple get_ncells_second_derivative_pixels();

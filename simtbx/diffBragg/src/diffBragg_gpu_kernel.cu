@@ -24,6 +24,7 @@ void gpu_sum_over_steps(
         CUDAREAL* d_panel_rot_images, CUDAREAL* d2_panel_rot_images,
         CUDAREAL* d_panel_orig_images, CUDAREAL* d2_panel_orig_images,
         CUDAREAL* d_fp_fdp_images,
+        CUDAREAL* d_gonio_angle_images,
         const int Nsteps, int _printout_fpixel, int _printout_spixel, bool _printout, CUDAREAL _default_F,
         int oversample, bool _oversample_omega, CUDAREAL subpixel_size, CUDAREAL pixel_size,
         CUDAREAL detector_thickstep, CUDAREAL _detector_thick, const CUDAREAL* __restrict__ close_distances, CUDAREAL detector_attnlen,
@@ -74,11 +75,12 @@ void gpu_sum_over_steps(
         const int* __restrict__ FhklLinear_ASUid,
         const CUDAREAL* __restrict__ Fhkl_channels,
         const CUDAREAL* __restrict__ Fhkl_scale, CUDAREAL* Fhkl_scale_deriv,
-        bool gaussian_star_shape, bool square_shape)
+        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle)
 { // BEGIN GPU kernel
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_stride = blockDim.x * gridDim.x;
+    __shared__ bool s_refine_gonio_angle;
     __shared__ CUDAREAL s_phi0, s_phistep, gx,gy,gz;
     __shared__ int s_phisteps;
     __shared__ bool s_gaussian_star_shape;
@@ -141,6 +143,7 @@ void gpu_sum_over_steps(
     __shared__ CUDAREAL s_xtal_size_sq;
 
     if (threadIdx.x==0){ // TODO can we get speed gains by dividing up the following definitions over more threads ?
+        s_refine_gonio_angle = refine_gonio_angle;
         s_phisteps = phisteps;
         s_phi0 = phi0;
         s_phistep = phistep;
@@ -336,6 +339,7 @@ void gpu_sum_over_steps(
         double pan_orig_manager_dI2[3]= {0,0,0};
         double pan_rot_manager_dI[3]= {0,0,0};
         double pan_rot_manager_dI2[3]= {0,0,0};
+        double dI_gonio_angle = 0;
         double fcell_manager_dI = 0;
         double fcell_manager_dI2 = 0;
         double eta_manager_dI[3] = {0,0,0};
@@ -462,20 +466,30 @@ void gpu_sum_over_steps(
 
         for (int _phi_tic=0; _phi_tic<s_phisteps; ++_phi_tic){
             MAT3 Rphi;
+            MAT3 dRphi;
             CUDAREAL phi = s_phi0 + s_phistep*_phi_tic;
-            if (phi != 0){
+            if (phi != 0 || s_refine_gonio_angle){
                 CUDAREAL c = cos(phi);
                 CUDAREAL omc = 1-c;
                 CUDAREAL s = sin(phi);
                 Rphi << c + gx*gx*omc,    gx*gy*omc-gz*s,   gx*gz*omc+gy*s,
                       gy*gx*omc + gz*s,   c + gy*gy*omc,   gy*gz*omc - gx*s,
                       gz*gx*omc - gy*s,  gz*gy*omc + gx*s, c + gz*gz*omc;
+                if (s_refine_gonio_angle){
+                     CUDAREAL dphi_scale = (M_PI/180) * _phi_tic / s_phisteps;
+                     CUDAREAL dc = -s*dphi_scale;
+                     CUDAREAL domc = s*dphi_scale;
+                     CUDAREAL ds = c*dphi_scale;
+                     dRphi << dc + gx*gx*domc,    gx*gy*domc-gz*ds,   gx*gz*domc+gy*ds,
+                           gy*gx*domc + gz*ds,   dc + gy*gy*domc,   gy*gz*domc - gx*ds,
+                           gz*gx*domc - gy*ds,  gz*gy*domc + gx*ds, dc + gz*gz*domc;
+                }
             }
 
         for(int _mos_tic=0;_mos_tic<s_mosaic_domains;++_mos_tic){
             int amat_idx = _mos_tic;
             MAT3 UBO = Amatrices[amat_idx];
-            if (phi != 0){
+            if (phi != 0 || s_refine_gonio_angle){
                 MAT3 Um = UMATS_RXYZ[_mos_tic]; // note, this will be slow - check if we can simply allow Um and Rphi to commute ...
                 UBO = UBO*Um*Rphi.transpose()*Um.transpose();
             }
@@ -666,10 +680,19 @@ void gpu_sum_over_steps(
                 printf("hkl= %f %f %f  hkl1= %d %d %d  Fcell=%f\n", _h,_k,_l,_h0,_k0,_l0, _F_cell);
 
             MAT3 UBOt;
-            if (s_refine_Umat[0] || s_refine_Umat[1] ||s_refine_Umat[2] || s_refine_eta){
+            MAT3 dUBOt;
+            if (s_refine_Umat[0] || s_refine_Umat[1] ||s_refine_Umat[2] || s_refine_eta || s_refine_gonio_angle){
                 UBOt = Amat_init;
+                if (s_refine_gonio_angle)
+                    dUBOt = dRphi*UBOt;
                 if (phi != 0)
                     UBOt = Rphi*UBOt;
+            }
+            if (s_refine_gonio_angle){
+                VEC3 delta_H_prime = (UMATS_RXYZ[_mos_tic]*dUBOt).transpose()*q_vec;
+                CUDAREAL V_dot_dV = V.dot(_NABC*delta_H_prime);
+                CUDAREAL value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_angle += value;
             }
             if (s_refine_Umat[0]){
                 MAT3 RyRzUBOt = RotMats[1]*RotMats[2]*UBOt;
@@ -1058,6 +1081,11 @@ void gpu_sum_over_steps(
         }
 
         // udpate the rotation derivative images*
+        if (s_refine_gonio_angle){
+            CUDAREAL value = _scale_term * dI_gonio_angle;
+            d_gonio_angle_images[i_pix] = value;
+        }
+
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){
             if (s_refine_Umat[i_rot]){
                 CUDAREAL value = _scale_term*rot_manager_dI[i_rot];

@@ -926,11 +926,11 @@ def simulator_from_expt_and_params(expt, params=None):
 
 def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5, spindle_axis=(1,0,0)):
     """
-
     :param SIM: sim_data instance
     :param params: diffBragg phil parameters instance
     :param delta_phi: how much to rotate gonio during model
     :param num_phi_steps: number of phi steps
+    :param spindle_axis: direction defining goniometer rotation (axis+angle formula)
     :return:
     """
     if not hasattr(SIM, "D"):
