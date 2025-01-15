@@ -118,8 +118,14 @@ class Script:
                 hopper_utils.sanity_test_input_lines(input_lines)
 
             if self.params.best_pickle is not None:
-                logging.info("reading pickle %s" % self.params.best_pickle)
-                best_models = pandas.read_pickle(self.params.best_pickle)
+                if os.path.isfile(self.params.best_pickle):
+                    logging.info("reading pickle %s" % self.params.best_pickle)
+                    best_models = pandas.read_pickle(self.params.best_pickle)
+                else:
+                    logging.info("reading pickles from Glob %s" % self.params.best_pickle)
+                    best_pickles = glob.glob(self.params.best_pickle)
+                    best_models = pandas.concat([pandas.read_pickle(f) for f in best_pickles])
+                    best_models.reset_index(inplace=True, drop=True)
 
             if self.params.dump_gathers:
                 if self.params.gathers_dir is None:
@@ -150,7 +156,6 @@ class Script:
         this_rank_Ridxs = None
         chunk_id = 0
         shots_per_chunk=self.params.shots_per_chunk
-        CHECKER = None
         try:
             from score_trainer import roi_check
             CHECKER = roi_check.roiCheck()
@@ -186,7 +191,8 @@ class Script:
                 best = best_models.query("exp_name=='%s'" % os.path.abspath(exp)).query("exp_idx==%d" % exp_idx)
 
                 if len(best) != 1:
-                    raise ValueError("Should be 1 entry for exp %s in best pickle %s" % (exp, self.params.best_pickle))
+                    best = None
+                    MAIN_LOGGER.info("Expected exactly 1 entry for exp %s in best pickle %s but found %d entries" % (exp, self.params.best_pickle, len(best)))
             self.params.simulator.spectrum.filename = spec
             Modeler = hopper_utils.DataModeler(self.params)
             Modeler.exper_name = exp
@@ -304,7 +310,10 @@ class Script:
                     for fix_name in dir(self.params.fix):
                         if fix_name.startswith("_"):
                             continue
-                        setattr(self.params.fix, fix_name, True)
+                        if "RotXYZ" in fix_name:
+                            setattr(self.params.fix, fix_name, [1,1,1])
+                        else:
+                            setattr(self.params.fix, fix_name, True)
                     self.params.fix.perRoiScale = False
                     Modeler.params = self.params
                     Modeler.set_parameters_for_experiment(best)

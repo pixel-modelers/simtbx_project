@@ -492,7 +492,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         is_selected = True
         refl_bbox_str = "Reflection %d bounded by x1=%d,x2=%d,y1=%d,y2=%d" % (i_roi, i1,i2,j1,j2)
         if is_on_edge[i_roi] and reject_edge_reflections:
-            MAIN_LOGGER.debug("Reflection %d is on edge" % i_roi)
+            #MAIN_LOGGER.debug("Reflection %d is on edge" % i_roi)
             is_selected = False
         pid = panels[i_roi]
 
@@ -509,7 +509,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         # Before padding and fitting, test for overlaps and shrink if needed
         is_overlapping = not np.all(background[pid, j1:j2, i1:i2] == -1)
         if not allow_overlaps and is_overlapping:
-            MAIN_LOGGER.debug("region of interest already accounted for roi size= %d %d" % (i2-i1, j2-j1))
+            #MAIN_LOGGER.debug("region of interest already accounted for roi size= %d %d" % (i2-i1, j2-j1))
             rois[i_roi] = (i1 + 1, i2, j1 + 1, j2) if (i1 + i2) % 2 \
                 else (i1, i2 - 1, j1, j2 - 1)  # shrink alternately from corners
             continue
@@ -528,7 +528,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         shoebox = imgs[pid, j1:j2, i1:i2]
 
         if shoebox.size < 4:
-            MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
+            #MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
             is_selected = False
 
         if not isinstance(sigma_rdout, float) and not isinstance(sigma_rdout, int):
@@ -557,7 +557,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
                 if set_negative_bg_to_zero:
                     bg_signal = 0
                 elif skip_roi_with_negative_bg:
-                    MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
+                    #MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
                     is_selected = False
                 elif np.isnan(bg_signal):
                     is_selected = False
@@ -571,21 +571,21 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
                 weighted=weighted_fit)
             if fit_results is None:
                 tilt_a = tilt_b = tilt_c = covariance = 0
-                MAIN_LOGGER.debug("Reflection %d has no fit!" % i_roi)
+                #MAIN_LOGGER.debug("Reflection %d has no fit!" % i_roi)
                 is_selected = False
-                MAIN_LOGGER.debug("tilt fit failed for reflection %d, probably too few pixels" % i_roi)
+                #MAIN_LOGGER.debug("tilt fit failed for reflection %d, probably too few pixels" % i_roi)
                 tilt_plane = np.zeros_like(Xcoords)
             else:
                 #MAIN_LOGGER.debug("successfully fit tilt plane")
                 (tilt_a, tilt_b, tilt_c), covariance = fit_results
                 tilt_plane = tilt_a * Xcoords + tilt_b * Ycoords + tilt_c
                 if np.any(np.isnan(tilt_plane)) and is_selected:
-                    MAIN_LOGGER.debug("reflection %d has nan in plane" % i_roi)
+                    #MAIN_LOGGER.debug("reflection %d has nan in plane" % i_roi)
                     is_selected = False
                     num_roi_nan_bg += 1
                 if skip_roi_with_negative_bg and np.min(tilt_plane) < 0:  # dips below
                     num_roi_negative_bg += 1
-                    MAIN_LOGGER.debug("reflection %d has tilt plane that dips below 0" % i_roi)
+                    #MAIN_LOGGER.debug("reflection %d has tilt plane that dips below 0" % i_roi)
                     is_selected = False
 
         # unpadded ROI dimension
@@ -605,8 +605,8 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         kept_rois.append(roi)
         panel_ids.append(pid)
         selection_flags.append(is_selected)
-        if not is_selected:
-            MAIN_LOGGER.debug("--> %s was not selected for above reasons" % refl_bbox_str)
+        #if not is_selected:
+        #    MAIN_LOGGER.debug("--> %s was not selected for above reasons" % refl_bbox_str)
         i_roi += 1
 
     MAIN_LOGGER.debug("Number of skipped ROI with negative BGs: %d / %d" % (num_roi_negative_bg, len(rois)))

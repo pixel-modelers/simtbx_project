@@ -841,6 +841,7 @@ class DataModeler:
 
             # TODO: set best eta_abc params
             self.params.init.eta_abc = tuple(best.eta_abc.values[0])
+            self.params.init.eta_abc = tuple([eta_val if eta_val > self.params.mins.eta_abc[i_eta] else self.params.mins.eta_abc[i_eta]+1e-2 for i_eta, eta_val in enumerate(self.params.init.eta_abc)])
 
             lam0, lam1 = get_lam0_lam1_from_pandas(best)
             self.params.init.spec = lam0, lam1
@@ -1439,7 +1440,6 @@ class DataModeler:
             _, wavelen_subimg, _, _ = Modeler.get_data_model_pairs()
             Modeler.best_model = bm
             Modeler.best_model_includes_background = False
-            from IPython import embed;embed()
 
         if save_refl:
             rank_refls_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "refls", rank)
