@@ -24,6 +24,7 @@ from simtbx.diffBragg.refiners.crystal_systems import OrthorhombicManager, Tetra
 from dxtbx.imageset import MemReader
 from dxtbx.imageset import ImageSet, ImageSetData
 from dxtbx.model.experiment_list import ExperimentListFactory
+from dxtbx.model import ExperimentList
 import libtbx
 from libtbx.phil import parse
 from cctbx.array_family import flex as cctbx_flex
@@ -385,6 +386,14 @@ def add_rlp_column(refls, experiment):
     :return:
     """
     keys = list(refls[0].keys())
+    #try:
+    #    El = ExperimentList()
+    #    El.append(experiment)
+    #    refls.centroid_px_to_mm(El)
+    #    refls.map_centroids_to_reciprocal_space(El)
+    #    return
+    #except Exception:
+    #    pass
     if "s1" in keys:
         s1 = refls['s1']
         s1_norm = np.array(s1) / np.linalg.norm(s1,axis=1)[:,None]
