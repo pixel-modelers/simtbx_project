@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/opt/scratch/simforge/envs/simtbx9/bin/python3.9
 from __future__ import division, print_function
 
 # LIBTBX_SET_DISPATCHER_NAME diffBragg.integrate
@@ -340,14 +340,16 @@ if __name__=="__main__":
             continue
         n = len(pandas.read_pickle(f))
         shots_per_df += [(f, str(x)) for x in range(n)]  # note we cast to string because of mpi reduce
-        Nf += n
+        Nf += len(shots_per_df)
+        print(shots_per_df, n, Nf)
 
     shots_per_df = COMM.bcast(COMM.reduce( shots_per_df))
     Nf = COMM.bcast(COMM.reduce(Nf))
-    if args.maxProcess is not None:
+    if args.maxProcess > 0:
         Nf = args.maxProcess
         shots_per_df = shots_per_df[:Nf]
     print0("total num shots is %d" % Nf)
+    print0("shots_per_df", shots_per_df, Nf)
     df_rows_per_rank = np.array_split(shots_per_df, COMM.size)[COMM.rank]
 
     print0("getting dataframe handles")
@@ -404,7 +406,7 @@ if __name__=="__main__":
                 spectrum_override = None
                 if params.spectrum_from_imageset:
                     spectrum_override = downsamp_spec_from_params(params, data_expt)
-                pred = predictions.get_predicted_from_pandas(
+                pred,_ = predictions.get_predicted_from_pandas(
                     df, params, strong=None, device_Id=dev, spectrum_override=spectrum_override)
                 if args.filterDupes:
                     pred = predictions.filter_refls(pred)
@@ -477,7 +479,7 @@ if __name__=="__main__":
                     # TODO:check whether this works...
                     int_expt_name = "%s/%s_%d_integrated.expt" % (EXPT_DIRS, tag, i_f)
                     int_expt.as_file(int_expt_name)
-                    int_refl['bbox'] = int_refl['shoebox'].bounding_boxes()
+                    #int_refl['bbox'] = int_refl['shoebox'].bounding_boxes()
                     int_refl_name = int_expt_name.replace(".expt", ".refl")
                     int_refl.as_file(int_refl_name)
                 except RuntimeError:

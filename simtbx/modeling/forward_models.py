@@ -202,6 +202,11 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
         eta_abc = df.eta_abc.values[0]
         LOGGER.debug("Num mos samples=%d, eta_abc=%f %f %f" % ((mos_dom,)+ eta_abc )  )
         LOGGER.debug("Num energy channels=%d" % len(energies))
+        delta_phi = None
+        phisteps=1
+        if "osc_deg" in df:
+            delta_phi = df.osc_deg.values[0]
+            phisteps = df.phisteps.values[0]
         results = diffBragg_forward(CRYSTAL=expt.crystal, DETECTOR=expt.detector, BEAM=expt.beam, Famp=Famp,
                                     fluxes=fluxes, energies=energies, beamsize_mm=beamsize_mm,
                                     Ncells_abc=Ncells_abc, spot_scale_override=spot_scale,
@@ -215,7 +220,8 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
                                     show_timings=show_timings,
                                     perpixel_wavelen=perpixel_wavelen,
                                     det_thicksteps=det_thicksteps, Ncells_def=Ncells_def,
-                                    no_Nabc_scale=no_Nabc_scale)
+                                    no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi, 
+                                    num_phi_steps=phisteps)
         return results, expt
 
     else:

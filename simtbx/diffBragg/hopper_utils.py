@@ -1059,7 +1059,10 @@ class DataModeler:
             roi_sel = self.roi_id==i_roi
             mod = self.best_model[roi_sel].reshape((y2 - y1, x2 - x1))
             try:
-                res = all_d_perpix[roi_sel] .mean()
+                if all_d_perpix.size:
+                    res = all_d_perpix[roi_sel] .mean()
+                else:
+                    res = None
                 cent_x = (x1+x2) /2.
                 cent_y = (y1+y2) / 2.
                 pid = self.all_pid[roi_sel].ravel()[0]
@@ -1103,16 +1106,17 @@ class DataModeler:
         if all_sigma_rdout:
             ret_subimgs += [all_sigma_rdout]
         if reorder:
-            order = np.argsort(spot_d)[::-1]
-            spot_d = np.array(spot_d)[order]
-            spot_hkl = np.array(spot_hkl)[order]
-            spot_scale = np.array(spot_scale)[order]
-            spot_pid_and_cent = np.array(spot_pid_and_cent)[order]
+            if spot_d and spot_d[0] is not None:
+                order = np.argsort(spot_d)[::-1]
+                spot_d = np.array(spot_d)[order]
+                spot_hkl = np.array(spot_hkl)[order]
+                spot_scale = np.array(spot_scale)[order]
+                spot_pid_and_cent = np.array(spot_pid_and_cent)[order]
 
-            for i in range(len(ret_subimgs)):
-                imgs = ret_subimgs[i]
-                imgs = [imgs[i] for i in order]
-                ret_subimgs[i] = imgs
+                for i in range(len(ret_subimgs)):
+                    imgs = ret_subimgs[i]
+                    imgs = [imgs[i] for i in order]
+                    ret_subimgs[i] = imgs
         if return_stats:
             stats = {"spot_d": spot_d, "spot_hkl": spot_hkl, "spot_pid_and_cent": spot_pid_and_cent,
                      "spot_scale": spot_scale}
@@ -2088,6 +2092,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     # data contributions to target function
     V = model_pix + sigma_rdout**2
     # TODO:what if V is allowed to be negative? The logarithm/sqrt will explore below
+    # TODO ignore overflow encountered here ? 
     resid_square = resid**2
     fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
     if params.roi.allow_overlapping_spots:
