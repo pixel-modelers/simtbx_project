@@ -16,7 +16,7 @@ from dials.array_family import flex
 from dxtbx.model import Experiment, ExperimentList
 from dxtbx.model import Detector, Panel
 from simtbx.diffBragg.hopper_io import single_expt_pandas
-from simtbx.diffBragg import hopper_utils, ensemble_refine_launcher
+from simtbx.diffBragg import utils, hopper_utils, ensemble_refine_launcher
 from simtbx.diffBragg.refiners.parameters import RangedParameter, Parameters
 from simtbx.diffBragg import psf
 from simtbx.diffBragg.prep_stage2_input import prep_dataframe
@@ -109,6 +109,32 @@ class BeamParameters:
                                 is_global=True)
             self.parameters.append(p)
 
+class SourceIParameter:
+    def __init__(self):
+        self.name = None
+        self.xpos = None
+        self.scale_idx = None
+        self.value = None
+        self.fix = True
+        self.is_global = True
+        self.scale = None
+
+
+class SourceIParameters:
+    def __init__(self, params, SIM):
+        self.parameters = []
+        for i_source in range(len(SIM.beam.xray_beams)):
+            p = RangedParameter(name="sourceI_%d" % i_source,
+                                init=1,
+                                sigma=params.geometry.sigma_sourceI,  # TODO
+                                minval=0,
+                                maxval=100,
+                                fix=not SIM.refining_sourceI, center=None, beta=None, is_global=True)
+            #p = SourceIParameter()
+            #p.scale_idx =  i_source
+            #p.fix = False
+            #p.name = "sourceI_%d" % i_source
+            self.parameters.append(p)
 
 class FhklParameter:
     def __init__(self):
@@ -405,9 +431,29 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     # update the photon energy spectrum for this shot
     SIM.beam.spectrum = Modeler.spectra
     SIM.D.xray_beams = SIM.beam.xray_beams
+    # TODO make faster later...
+    if SIM.refining_sourceI and SIM.update_sourceI_scales:
+        sourceI_scales = []
+        for i_source in range(len(SIM.beam.spectrum)):
+            p = ref_params[f"sourceI_{i_source}"]
+            #sourceI_scale = x[p.xpos]
+            sourceI_scale = p.get_val(x[p.xpos])
+            sourceI_scales.append(sourceI_scale)
+        SIM.sourceI_scales = np.array(sourceI_scales)
+        #sigma_sourceI= Modeler.params.geometry.sigma_sourceI
+        #sourceI_init_scale=1
+        #SIM.sourceI_scales = sourceI_init_scale*np.exp(sigma_sourceI*(SIM.sourceI_scales-1))
+        #if any(np.isinf(sI) for sI in SIM.sourceI_scales):
+        #    from IPython import embed;embed()
+        SIM.D.update_sourceI_scale_factors(SIM.sourceI_scales)
+
     # update the lambda coeff
     lambda_coef = lam0.get_val(x[lam0.xpos]), lam1.get_val(x[lam1.xpos])
     SIM.D.lambda_coefficients = lambda_coef
+
+    # update gonio, TODO: free up gonio axis
+    utils.update_SIM_with_gonio(SIM, delta_phi=Modeler.osc_deg,
+                                num_phi_steps=Modeler.phisteps)
 
     # update the Bmatrix
     Modeler.ucell_man.variables = [p.get_val(x[p.xpos]) for p in ucell_pars]
@@ -465,7 +511,6 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     model_pix = bragg + Modeler.all_background
     if SIM.use_psf:
         model_pix = convolve_model_with_psf(model_pix, SIM,  Modeler.pan_fast_slow, roi_id_slices=Modeler.roi_id_slices, roi_id_unique=Modeler.roi_id_unique)
-
 
     # compute the negative log Likelihood
     resid = (Modeler.all_data - model_pix)
@@ -589,6 +634,33 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
                 pixderivs = detector_derivs[i_name][pixel_rng][trusted_pixels]
                 pixderivs = det_param.get_deriv(x[det_param.xpos], pixderivs)
                 J[par_name] += pixderivs.sum()
+
+    if SIM.refining_sourceI:
+        Gscale = G.get_val(x[G.xpos])
+        sourceI_grad = SIM.D.add_sourceI_gradients(Modeler.pan_fast_slow, resid, V, Modeler.all_trusted,
+                                             Modeler.all_freq, Gscale)
+        if SIM.update_sourceI_scales and COMM.rank==0:
+            print("sourceI_scale stats: %.4f %.4f %.4f %.4f"
+                  %(SIM.sourceI_scales.mean(), SIM.sourceI_scales.max(), SIM.sourceI_scales.min(), SIM.sourceI_scales.std()))
+        #print("sourceI_scales_states",SIM.sourceI_scales.mean(), SIM.sourceI_scales.max(), SIM.sourceI_scales.min(), SIM.sourceI_scales.std())
+        #sigma_sourceI= Modeler.params.geometry.sigma_sourceI
+        for i_source in range(len(sourceI_grad)):
+            name =f"sourceI_{i_source}"
+            p = ref_params[name]
+            p_g = p.get_deriv(x[p.xpos], sourceI_grad[i_source])
+            if name in J:
+                J[name] += p_g
+            else:
+                J[name] = p_g
+
+        #sourceI_grad *= SIM.sourceI_scales * sigma_sourceI
+        #for name in ref_params:
+        #    if name.startswith("sourceI"):
+        #        p = ref_params[name]
+        #        if name in J:
+        #            J[name] += sourceI_grad[p.scale_idx]
+        #        else:
+        #            J[name] = sourceI_grad[p.scale_idx]
 
     if SIM.refining_Fhkl:
         Gscale = G.get_val(x[G.xpos])
@@ -716,11 +788,15 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params):
     if SIM.refining_Fhkl:
         #TODO add this boolean to the __init__ of nanoBragg/sim_data.SimData
         SIM.update_Fhkl_scales=True  # toggle this to on before iterating over modelers
+    if SIM.refining_sourceI:
+        SIM.update_sourceI_scales = True
     for i_shot in data_modelers:
         Modeler = data_modelers[i_shot]
 
         neg_LL, neg_LL_grad, model_pix, per_shot_sigZ = model(x, ref_params, i_shot, Modeler, SIM)
-        SIM.update_Fhkl_scales = False # toggle this to off after first modeler (only needs to be done once, as its global)
+        # toggle these to off after first modeler (only needs to be done once, as its global)
+        SIM.update_Fhkl_scales = False
+        SIM.update_sourceI_scales = False
         all_shot_sigZ.append(per_shot_sigZ)
 
         # accumulate the target functional for this rank/shot
@@ -750,6 +826,8 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params):
 
     if params.use_restraints and params.geometry.betas.close_distances is not None:
         target_functional += np.std(SIM.D.close_distances) / params.geometry.betas.close_distances
+    #if SIM.refining_sourceI:
+    #    target_functional += np.std(SIM.update_sourceI_scales)
 
     ## add in the detector parameter restraints
     if params.use_restraints:
@@ -812,9 +890,18 @@ def geom_min(params):
     from simtbx.diffBragg import mpi_logger
     mpi_logger.setup_logging_from_params(params)
     df.reset_index(drop=True, inplace=True)
-    df, work_distribution = prep_dataframe(df, res_ranges_string=params.refiner.res_ranges, refls_key=params.geometry.refls_key)
-    launcher.load_inputs(df, refls_key=params.geometry.refls_key, exp_key=params.geometry.exp_key,
-                         exp_idx_key=params.geometry.exp_idx_key,
+    exps,refs, exp_idxs = [],[],[]
+    for line in df.hopper_line:
+        exp, ref, exp_idx, spec = hopper_utils.split_line(line)
+        exps.append(exp)
+        refs.append(ref)
+        exp_idxs.append(exp_idx)
+    df["geom_exp"] = exps
+    df["geom_exp_idx"] = exp_idxs
+    df["geom_ref"] = refs
+    df, work_distribution = prep_dataframe(df, res_ranges_string=params.refiner.res_ranges, refls_key="geom_ref")
+    launcher.load_inputs(df, refls_key="geom_ref", exp_key="geom_exp",
+                         exp_idx_key="geom_exp_idx",
                          work_distribution=work_distribution)
 
     for i_shot in launcher.Modelers:
@@ -840,7 +927,12 @@ def geom_min(params):
         print("ADDING %d FHKL parameters!" % len(fhkl_params.parameters))
         for p in fhkl_params.parameters:
             LMP.add(p)
-
+    launcher.SIM.refining_sourceI = not params.geometry.fix.sourceI
+    if launcher.SIM.refining_sourceI:
+        sourceI_params = SourceIParameters(params, launcher.SIM)
+        print("ADDING %d sourceI parameters!" % len(sourceI_params.parameters))
+        for p in sourceI_params.parameters:
+            LMP.add(p)
     # use spectrum coefficients
     launcher.SIM.D.use_lambda_coefficients = True
     launcher.SIM.D.lambda_coefficients = LMP["lambda0"].init, LMP["lambda1"].init
@@ -878,6 +970,7 @@ def geom_min(params):
     for i, diffbragg_id in enumerate(PAN_OFS_IDS):
         if not params.geometry.fix.panel_rotations[i]:
             launcher.SIM.D.refine(diffbragg_id)
+    # TODO gonio_angle refine
 
     for i, diffbragg_id in enumerate(PAN_XYZ_IDS):
         if not params.geometry.fix.panel_translations[i]:
@@ -907,6 +1000,34 @@ def geom_min(params):
 
     if COMM.rank == 0:
         save_opt_det(params, target.x0, target.ref_params, launcher.SIM)
+        save_opt_sourceI(params, SIM=launcher.SIM)
+
+
+def save_opt_sourceI(params, SIM, tag="current"):
+    assert hasattr(SIM, "sourceI_scales")
+    nsource = len(SIM.beam.xray_beams)
+    assert len(SIM.sourceI_scales) == nsource
+    sourceI_orig, sourceI_scaled = [],[]
+    waves = []
+    for i_source in range(nsource):
+        #p = LMP[f"sourceI_{i_source}"]
+        scale = SIM.sourceI_scales[i_source]
+        sourceI = SIM.beam.xray_beams[i_source].get_flux()
+        scaled_sourceI = scale * sourceI
+        wave = SIM.beam.xray_beams[i_source].get_wavelength() * 1e10
+        waves.append(wave)
+        sourceI_orig.append(sourceI)
+        sourceI_scaled.append(scaled_sourceI)
+    sourceI_dir = os.path.join(params.outdir, "sourceI")
+    if not os.path.exists(sourceI_dir):
+        os.makedirs(sourceI_dir)
+    opt_spec_name = os.path.join( sourceI_dir, "iter%s.lam" % tag)
+    utils.save_spectra_file(spec_file=opt_spec_name, wavelengths=waves,weights=sourceI_scaled)
+
+    orig_spec_name = os.path.join(sourceI_dir, "iter%s_orig.lam" % tag)
+    if not os.path.exists(orig_spec_name):
+        utils.save_spectra_file(spec_file=orig_spec_name, wavelengths=waves, weights=sourceI_orig)
+
 
 def save_opt_Fhkl(params, LMP, SIM, tag='current'):
     assert hasattr(SIM, "Fhkl_scales")
@@ -958,6 +1079,9 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
         if SIM.refining_Fhkl:
             save_opt_Fhkl(params, LMP, SIM, tag=str(iternum) if iternum is not None else 'current')
 
+        if SIM.refining_sourceI:
+            save_opt_sourceI(params, SIM, tag=str(iternum) if iternum is not None else 'current')
+
     if params.outdir is not None and COMM.rank == 0:
         if not os.path.exists(params.outdir):
             os.makedirs(params.outdir)
@@ -1008,6 +1132,8 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
 
         if SIM.refining_Fhkl:
             SIM.update_Fhkl_scales = True
+        if SIM.refining_sourceI:
+            SIM.update_sourceI_scales = True
         Modeler.best_model = model(Xopt, LMP, i_shot, Modeler, SIM, return_bragg_model=True)
         Modeler.best_model_includes_background = False
 

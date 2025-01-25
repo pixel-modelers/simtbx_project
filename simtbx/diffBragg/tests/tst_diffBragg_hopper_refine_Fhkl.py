@@ -201,7 +201,7 @@ with DeviceWrapper(0) as _:
         #P.maxs.G = SIM.D.spot_scale*100
     P.use_geometric_mean_Fhkl = args.geo
     P.fix.ucell=True
-    P.fix.RotXYZ=True
+    P.fix.RotXYZ=[1,1,1]
     P.fix.Nabc=True
     if args.perturb is not None and "Nabc" in args.perturb:
         P.fix.Nabc = False

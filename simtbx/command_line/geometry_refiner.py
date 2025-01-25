@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from __future__ import print_function, division
 
 # LIBTBX_SET_DISPATCHER_NAME diffBragg.geometry_refiner

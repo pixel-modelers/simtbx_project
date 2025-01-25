@@ -79,6 +79,8 @@ void diffBragg_sum_over_steps_cuda(
         gpuErr(cudaFree(cp.cu_source_Y));
         gpuErr(cudaFree(cp.cu_source_Z));
         gpuErr(cudaFree(cp.cu_source_I));
+        gpuErr(cudaFree(cp.cu_sourceI_scale));
+        gpuErr(cudaFree(cp.cu_sourceI_grad));
         gpuErr(cudaFree(cp.cu_source_lambda));
         //printf("Reallocating for  %d sources!:\n", db_beam.number_of_sources);
         gpuErr(cudaMallocManaged(&cp.Fhkl_channels, db_beam.number_of_sources*sizeof(CUDAREAL)));
@@ -86,6 +88,8 @@ void diffBragg_sum_over_steps_cuda(
         gpuErr(cudaMallocManaged(&cp.cu_source_Y, db_beam.number_of_sources*sizeof(CUDAREAL)));
         gpuErr(cudaMallocManaged(&cp.cu_source_Z, db_beam.number_of_sources*sizeof(CUDAREAL)));
         gpuErr(cudaMallocManaged(&cp.cu_source_I, db_beam.number_of_sources*sizeof(CUDAREAL)));
+        gpuErr(cudaMallocManaged(&cp.cu_sourceI_scale, db_beam.number_of_sources*sizeof(CUDAREAL)));
+        gpuErr(cudaMallocManaged(&cp.cu_sourceI_grad, db_beam.number_of_sources*sizeof(CUDAREAL)));
         gpuErr(cudaMallocManaged(&cp.cu_source_lambda, db_beam.number_of_sources*sizeof(CUDAREAL)));
         cp.previous_nsource = db_beam.number_of_sources;
     }
@@ -100,16 +104,19 @@ void diffBragg_sum_over_steps_cuda(
            printf("Will model %d pixels and allocate %d pix\n", Npix_to_model, db_cu_flags.Npix_to_allocate);
         }
         // Check the Fhkl geradient arrays
-        if (db_flags.Fhkl_have_scale_factors){
+        if (db_flags.Fhkl_have_scale_factors ||db_flags.sourceI_have_scale_factors){
             gpuErr(cudaMallocManaged(&cp.data_residual, db_cu_flags.Npix_to_allocate*sizeof(CUDAREAL)));
             gpuErr(cudaMallocManaged(&cp.data_variance, db_cu_flags.Npix_to_allocate*sizeof(CUDAREAL)));
             gpuErr(cudaMallocManaged(&cp.data_freq, db_cu_flags.Npix_to_allocate*sizeof(int)));
             gpuErr(cudaMallocManaged(&cp.data_trusted, db_cu_flags.Npix_to_allocate*sizeof(bool)));
-            gpuErr(cudaMallocManaged(&cp.FhklLinear_ASUid, db_cryst.FhklLinear_ASUid.size()*sizeof(int)));
-            gpuErr(cudaMallocManaged(&cp.Fhkl_scale, d_image.Fhkl_scale.size()*sizeof(CUDAREAL)));
-            // alloc Fhkl_scale_deriv to bs same length as Fhkl_scale.size(), as Fhkl_scale_deriv is only set when Fhkl_gradient_mode=True, typpically not first iteration
-            gpuErr(cudaMallocManaged(&cp.Fhkl_scale_deriv, d_image.Fhkl_scale.size()*sizeof(CUDAREAL)));
-            cp.Fhkl_grad_arrays_allocated = true;
+            cp.grad_arrays_allocated = true;
+            if (db_flags.Fhkl_have_scale_factors){
+                gpuErr(cudaMallocManaged(&cp.FhklLinear_ASUid, db_cryst.FhklLinear_ASUid.size()*sizeof(int)));
+                gpuErr(cudaMallocManaged(&cp.Fhkl_scale, d_image.Fhkl_scale.size()*sizeof(CUDAREAL)));
+                // alloc Fhkl_scale_deriv to bs same length as Fhkl_scale.size(), as Fhkl_scale_deriv is only set when gradient_mode=True, typpically not first iteration
+                gpuErr(cudaMallocManaged(&cp.Fhkl_scale_deriv, d_image.Fhkl_scale.size()*sizeof(CUDAREAL)));
+                cp.Fhkl_grad_arrays_allocated = true;
+            }
         }
 
         gpuErr(cudaMallocManaged(&cp.Fhkl_channels, db_beam.number_of_sources*sizeof(CUDAREAL)));
@@ -118,6 +125,8 @@ void diffBragg_sum_over_steps_cuda(
         gpuErr(cudaMallocManaged(&cp.cu_source_Z, db_beam.number_of_sources*sizeof(CUDAREAL)));
         gpuErr(cudaMallocManaged(&cp.cu_source_I, db_beam.number_of_sources*sizeof(CUDAREAL)));
         gpuErr(cudaMallocManaged(&cp.cu_source_lambda, db_beam.number_of_sources*sizeof(CUDAREAL)));
+        gpuErr(cudaMallocManaged(&cp.cu_sourceI_grad, db_beam.number_of_sources*sizeof(CUDAREAL)));
+        gpuErr(cudaMallocManaged(&cp.cu_sourceI_scale, db_beam.number_of_sources*sizeof(CUDAREAL)));
         cp.previous_nsource = db_beam.number_of_sources;
 
         gpuErr(cudaMallocManaged((void **)&cp.cu_UMATS, db_cryst.UMATS.size()*sizeof(MAT3)));
@@ -226,7 +235,7 @@ void diffBragg_sum_over_steps_cuda(
     bool FORCE_COPY=true;
 
 //  END step position
-    if (db_flags.Fhkl_gradient_mode){
+    if (db_flags.gradient_mode){
         for (int i=0; i < Npix_to_model; i++){
             cp.data_residual[i] = d_image.residual[i];
             cp.data_variance[i] = d_image.variance[i];
@@ -248,7 +257,7 @@ void diffBragg_sum_over_steps_cuda(
 
         for (int i=0; i < d_image.Fhkl_scale.size(); i++){
             cp.Fhkl_scale[i] = d_image.Fhkl_scale[i];
-            if (db_flags.Fhkl_gradient_mode){
+            if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
                 cp.Fhkl_scale_deriv[i] = 0;
             }
         }
@@ -263,6 +272,12 @@ void diffBragg_sum_over_steps_cuda(
             cp.cu_source_Y[i] = incident[1];
             cp.cu_source_Z[i] = incident[2];
             cp.cu_source_I[i] = db_beam.source_I[i];
+            if (db_flags.sourceI_have_scale_factors)
+                cp.cu_sourceI_scale[i] = db_beam.sourceI_scale[i];
+            else
+                cp.cu_sourceI_scale[i]=1;
+            if (db_flags.gradient_mode && db_flags.calc_sourceI_gradients)
+                cp.cu_sourceI_grad[i]=0;
             cp.cu_source_lambda[i] = db_beam.source_lambda[i];
         }
         if(db_flags.verbose>1 )
@@ -468,6 +483,7 @@ void diffBragg_sum_over_steps_cuda(
         cp.cu_dB2_Mats,
         cp.cu_AMATS,
         cp.cu_source_X, cp.cu_source_Y, cp.cu_source_Z, cp.cu_source_lambda, cp.cu_source_I,
+        cp.cu_sourceI_scale, cp.cu_sourceI_grad,
         db_beam.kahn_factor,
         db_cryst.Na, db_cryst.Nb, db_cryst.Nc,
         db_cryst.Nd, db_cryst.Ne, db_cryst.Nf,
@@ -489,7 +505,9 @@ void diffBragg_sum_over_steps_cuda(
         db_flags.use_diffuse, cp.cu_d_diffuse_gamma_images, cp.cu_d_diffuse_sigma_images,
         db_flags.refine_diffuse, db_flags.gamma_miller_units, db_flags.refine_Icell,
         db_flags.wavelength_img, db_cryst.laue_group_num, db_cryst.stencil_size,
-        db_flags.Fhkl_gradient_mode, db_flags.Fhkl_errors_mode, db_flags.using_trusted_mask, db_beam.Fhkl_channels.empty(), db_flags.Fhkl_have_scale_factors,
+        db_flags.gradient_mode, db_flags.Fhkl_errors_mode, db_flags.using_trusted_mask, db_beam.Fhkl_channels.empty(), db_flags.Fhkl_have_scale_factors,
+        db_flags.calc_Fhkl_gradients, db_flags.calc_sourceI_gradients,
+        db_flags.sourceI_have_scale_factors,
         db_cryst.Num_ASU,
         cp.data_residual, cp.data_variance,
         cp.data_freq, cp.data_trusted,
@@ -533,7 +551,7 @@ void diffBragg_sum_over_steps_cuda(
             d2_image.fcell[i] = cp.cu_d2_fcell_images[i];
         }
     }
-    if (db_flags.Fhkl_gradient_mode){
+    if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
         if (db_flags.Fhkl_errors_mode){
             for (int i=0; i < d_image.Fhkl_hessian.size(); i++)
                 d_image.Fhkl_hessian[i]= cp.Fhkl_scale_deriv[i];
@@ -542,6 +560,10 @@ void diffBragg_sum_over_steps_cuda(
             for (int i=0; i < d_image.Fhkl_scale_deriv.size(); i++)
                 d_image.Fhkl_scale_deriv[i]= cp.Fhkl_scale_deriv[i];
         }
+    }
+    if (db_flags.gradient_mode && db_flags.calc_sourceI_gradients){
+        for (int i=0; i < db_beam.sourceI_grad.size(); i++)
+            db_beam.sourceI_grad[i] = cp.cu_sourceI_grad[i];
     }
     if (std::count(db_flags.refine_Umat.begin(), db_flags.refine_Umat.end(), true) > 0){
         for (int i=0; i<3*Npix_to_model; i++){
@@ -678,13 +700,19 @@ void freedom(diffBragg_cudaPointers& cp){
     }
 
     if (cp.Fhkl_grad_arrays_allocated){
-        gpuErr(cudaFree(cp.data_trusted));
-        gpuErr(cudaFree(cp.data_freq));
-        gpuErr(cudaFree(cp.data_residual));
-        gpuErr(cudaFree(cp.data_variance));
         gpuErr(cudaFree(cp.FhklLinear_ASUid));
         gpuErr(cudaFree(cp.Fhkl_scale));
         gpuErr(cudaFree(cp.Fhkl_scale_deriv));
         cp.Fhkl_grad_arrays_allocated=false;
+    }
+    gpuErr(cudaFree(cp.cu_sourceI_scale));
+    gpuErr(cudaFree(cp.cu_sourceI_grad));
+    if (cp.grad_arrays_allocated){
+        gpuErr(cudaFree(cp.data_trusted));
+        gpuErr(cudaFree(cp.data_freq));
+        gpuErr(cudaFree(cp.data_residual));
+        gpuErr(cudaFree(cp.data_variance));
+        //cp.sourceI_grad_arrays_allocated=false;
+        cp.grad_arrays_allocated=false;
     }
 }

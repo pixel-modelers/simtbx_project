@@ -353,15 +353,15 @@ void diffBragg_sum_over_steps(
         int pid = panels_fasts_slows[i_pix*3];
         int fpixel = panels_fasts_slows[i_pix*3+1];
         int spixel = panels_fasts_slows[i_pix*3+2];
-        double Fhkl_deriv_coef=0;
-        double Fhkl_hessian_coef=0;
-        if (db_flags.Fhkl_gradient_mode){
+        double gradient_coef=0;
+        double hessian_coef=0;
+        if (db_flags.gradient_mode){
             double u = d_image.residual[i_pix];
             double one_by_v = 1/d_image.variance[i_pix];
             double Gterm = 1 - 2*u - u*u*one_by_v;
-            Fhkl_deriv_coef = 0.5 * Gterm*one_by_v / d_image.freq[i_pix];
+            gradient_coef = 0.5 * Gterm*one_by_v / d_image.freq[i_pix];
             if (db_flags.Fhkl_errors_mode){
-                Fhkl_hessian_coef = -0.5*one_by_v*(one_by_v*Gterm - 2  - 2*u*one_by_v -u*u*one_by_v*one_by_v)/d_image.freq[i_pix];
+                hessian_coef = -0.5*one_by_v*(one_by_v*Gterm - 2  - 2*u*one_by_v -u*u*one_by_v*one_by_v)/d_image.freq[i_pix];
             }
         }
         double close_distance = db_det.close_distances[pid];
@@ -470,7 +470,7 @@ void diffBragg_sum_over_steps(
 
             // polarization
             double polar_for_Fhkl_grad=1;
-            if (!db_flags.nopolar && db_flags.Fhkl_gradient_mode)
+            if (!db_flags.nopolar && db_flags.gradient_mode)
                 polar_for_Fhkl_grad = diffBragg_cpu_kernel_polarization(incident, diffracted,
                                     db_beam.polarization_axis, db_beam.kahn_factor);
 
@@ -588,9 +588,12 @@ void diffBragg_sum_over_steps(
             }
 
             /* convert amplitudes into intensity (photons per steradian) */
-            if (!db_flags.oversample_omega && !db_flags.Fhkl_gradient_mode)
+            if (!db_flags.oversample_omega && !db_flags.gradient_mode)
                 omega_pixel = 1;
-            double count_scale = db_beam.source_I[source]*capture_fraction*omega_pixel;
+            double s_sourceI = 1;
+            if (db_flags.sourceI_have_scale_factors)
+                double s_sourceI = db_beam.sourceI_scale[source];
+            double count_scale = s_sourceI*db_beam.source_I[source]*capture_fraction*omega_pixel;
 
             double I0 = 0;
             double step_diffuse_param[6] = {0,0,0,0,0,0};
@@ -756,10 +759,10 @@ void diffBragg_sum_over_steps(
             if (db_flags.Fhkl_have_scale_factors)
                 s_hkl = d_image.Fhkl_scale[i_hklasu + Fhkl_channel*db_cryst.Num_ASU];
 
-            if (db_flags.Fhkl_gradient_mode){
+            if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
                 double Fhkl_deriv_scale = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar_for_Fhkl_grad/db_steps.Nsteps;
                 double dfhkl = I_noFcell*I_cell * Fhkl_deriv_scale;
-                double grad_incr = dfhkl*Fhkl_deriv_coef;
+                double grad_incr = dfhkl*gradient_coef;
                 int fhkl_grad_idx=i_hklasu + Fhkl_channel*db_cryst.Num_ASU;
                 if (db_flags.track_Fhkl_indices)
                     db_cryst.Fhkl_grad_idx_tracker.insert(fhkl_grad_idx);
@@ -768,7 +771,7 @@ void diffBragg_sum_over_steps(
                 d_image.Fhkl_scale_deriv[fhkl_grad_idx] += grad_incr;
 
                 if (db_flags.Fhkl_errors_mode){
-                    double hessian_incr = Fhkl_hessian_coef*dfhkl*dfhkl;
+                    double hessian_incr = hessian_coef*dfhkl*dfhkl;
                     #pragma omp atomic
                     d_image.Fhkl_hessian[fhkl_grad_idx] += hessian_incr;
                 }
@@ -776,6 +779,16 @@ void diffBragg_sum_over_steps(
             }
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
+            if (db_flags.gradient_mode && db_flags.calc_sourceI_gradients){
+                double sourceI_deriv_scale = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar_for_Fhkl_grad/db_steps.Nsteps;
+                double dIincrement_dsourceI = Iincrement / s_sourceI * sourceI_deriv_scale;
+                double grad_incr = dIincrement_dsourceI*gradient_coef;
+                // omega pixel is correctly in count_scale, and spot_scale should have been set to its refined value
+                #pragma omp atomic
+                db_beam.sourceI_grad[source] += grad_incr;
+            }
+            if (db_flags.gradient_mode)
+                continue;
             I += Iincrement;
             if(db_flags.wavelength_img){
                 Ilambda += Iincrement*lambda_ang;
@@ -1166,7 +1179,7 @@ void diffBragg_sum_over_steps(
             // final scale term to being everything to photon number units
             scale_term = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar*om/db_steps.Nsteps;
 
-            if (db_flags.Fhkl_gradient_mode)
+            if (db_flags.gradient_mode)
                 continue; // move on to next pixel (i_pix)
 
             floatimage[i_pix] = scale_term*I;

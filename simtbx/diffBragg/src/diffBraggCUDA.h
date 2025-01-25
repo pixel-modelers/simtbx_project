@@ -66,6 +66,7 @@ struct diffBragg_cudaPointers {
   CUDAREAL * cu_atom_data=NULL;
 
   CUDAREAL * cu_source_X, * cu_source_Y, * cu_source_Z, * cu_source_I, * cu_source_lambda;
+  CUDAREAL * cu_sourceI_scale, * cu_sourceI_grad;
   int cu_sources;
   bool sources_are_allocated = false;
   bool sources_recopy = false;
@@ -97,9 +98,10 @@ struct diffBragg_cudaPointers {
   bool* cu_refine_panel_origin;
   bool* cu_refine_panel_rot;
 
-  bool Fhkl_gradient_mode, using_trusted_mask, Fhkl_channels_empty, Fhkl_have_scale_factors;
+  bool gradient_mode, using_trusted_mask, Fhkl_channels_empty, Fhkl_have_scale_factors;
   // these are copied once at first iteration
   bool Fhkl_grad_arrays_allocated=false;
+  bool grad_arrays_allocated=false;
   CUDAREAL*  data_residual=NULL; // length is number of modeled pixels
   CUDAREAL* data_variance=NULL; // length is number of modeled pixels
   int* data_freq=NULL; // length is number of modeled pixels

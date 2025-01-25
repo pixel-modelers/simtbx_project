@@ -5,6 +5,8 @@ import numpy as np
 from dials.array_family import flex
 from libtbx.mpi4py import MPI
 from simtbx.diffBragg import utils
+from dxtbx.model import ExperimentList
+
 COMM = MPI.COMM_WORLD
 
 import logging
@@ -48,13 +50,13 @@ def prep_dataframe(df, refls_key="predictions", res_ranges_string=None):
     nshots = len(df)
     df.reset_index(drop=True, inplace=True)
     df['index'] = df.index.values
-    refl_info = df[["index", refls_key, "exp_idx"]].values
+    refl_info = df[["index", refls_key, "exp_idx", "exp_name"]].values
 
     # sort and split such that each rank will read many refls from same file
     sorted_names_and_ids = sorted(
         refl_info,
         key=lambda x: x[1])  # sort by name
-    df_idx, refl_names, expt_ids = np.array_split(sorted_names_and_ids, COMM.size)[COMM.rank].T
+    df_idx, refl_names, expt_ids, expt_names = np.array_split(sorted_names_and_ids, COMM.size)[COMM.rank].T
 
     refls_per_shot = []
     if COMM.rank==0:
@@ -62,7 +64,7 @@ def prep_dataframe(df, refls_key="predictions", res_ranges_string=None):
 
     prev_name = ""  # keep track of the most recently read refl table file
     Rall = None
-    for (i_shot, name, expt_id) in zip(df_idx, refl_names, expt_ids):
+    for (i_shot, name, expt_id, expt_name) in zip(df_idx, refl_names, expt_ids, expt_names):
         if Rall is None or name != prev_name:
             Rall = flex.reflection_table.from_file(name)
             prev_name = name
@@ -71,7 +73,12 @@ def prep_dataframe(df, refls_key="predictions", res_ranges_string=None):
         if res_ranges is not None:
             num_ref = 0
             if 'rlp' not in set(R.keys()):
-                raise KeyError("Cannot filter res ranges if rlp column not in refl tables")
+                try:
+                    E = ExperimentList.from_file(expt_name, False)[i_shot]
+                    utils.add_rlp_column(R, E)
+                    assert "rlp" in list(R[0].keys())
+                except KeyError:
+                    raise KeyError("Cannot filter res ranges if rlp column not in refl tables")
             d = 1. / np.linalg.norm(R["rlp"], axis=1)  # resolution per refl
             for d_fine, d_coarse in res_ranges:
                 d_sel = np.logical_and(d >= d_fine, d < d_coarse)

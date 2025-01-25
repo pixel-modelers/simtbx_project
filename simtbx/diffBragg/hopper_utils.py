@@ -1580,28 +1580,36 @@ def convolve_model_with_psf(model_pix, J, mod, SIM, PSF=None, psf_args=None,
     return model_pix, J
 
 
+def print_params(Mod, x):
+    """
+    :param Mod: Data modeler
+    :param x: refinement parameters
+    """
+    val_s = ""
+    for p in Mod.P.values():
+        if p.name.startswith("Fhkl_"):
+            continue
+        if p.refine:
+            xval = x[p.xpos]
+            val = p.get_val(xval)
+            name = p.name
+            if name == "detz_shift":
+                val = val * 1e3
+                name = p.name + "_mm"
+            if name == "gonio_angle":
+                name = p.name + "_deg"
+            if "Rot" in name:
+                val = val*180 / np.pi
+                name = p.name +"_deg"
+            val_s += "%s=%.4f, " % (name, val)
+    MAIN_LOGGER.debug(val_s)
+
+
 def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_spectrum=False,
           update_Fhkl_scales=True):
 
     if Mod.params.logging.parameters:
-        val_s = ""
-        for p in Mod.P.values():
-            if p.name.startswith("Fhkl_"):
-                continue
-            if p.refine:
-                xval = x[p.xpos]
-                val = p.get_val(xval)
-                name = p.name
-                if name == "detz_shift":
-                    val = val * 1e3
-                    name = p.name + "_mm"
-                if name == "gonio_angle":
-                    name = p.name + "_deg"
-                if "Rot" in name:
-                    val = val*180 / np.pi
-                    name = p.name +"_deg"
-                val_s += "%s=%.4f, " % (name, val)
-        MAIN_LOGGER.debug(val_s)
+        print_params(Mod, x)
 
     pfs = Mod.pan_fast_slow
 

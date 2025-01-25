@@ -110,6 +110,7 @@ struct cuda_flags{
     bool update_Fhkl = false; // structure factors
     bool update_Fhkl_scales = false; // structure factors
     bool update_Fhkl_channels = false; // structure factors
+    //bool update_sourceI_scales = false;
     bool update_detector = false; // detector vectors (origin, slow-axis, fast-axis, orth-axis)
     bool update_refine_flags = false;  // refinement flags (in case one is iteratively freezing parameters)
     bool update_panel_deriv_vecs = false; // if one is refining the detector vectors)
@@ -119,8 +120,11 @@ struct flags{
     bool Fhkl_errors_mode=false;
     bool track_Fhkl_indices = false;
     bool Fhkl_have_scale_factors = false;
+    bool sourceI_have_scale_factors = false;
     bool using_trusted_mask=false;
-    bool Fhkl_gradient_mode=false;
+    bool calc_Fhkl_gradients=false;
+    bool calc_sourceI_gradients=false;
+    bool gradient_mode=false;
     bool wavelength_img=false;
     bool track_Fhkl = false; // for CPU kernel only, track the HKLS evaluated in the inner most loop
     bool printout = false; // whether to printout debug info for a pixel
@@ -231,6 +235,8 @@ struct beam{
     CUDAREAL *source_I; // intensities
     CUDAREAL lambda0,lambda1; // affine correction to spectra
     int number_of_sources; // number of beams
+    std::vector<CUDAREAL> sourceI_grad; // gradient of our wavelength spectrum
+    std::vector<CUDAREAL> sourceI_scale; // gradient of our wavelength spectrum
 };
 
 struct detector{

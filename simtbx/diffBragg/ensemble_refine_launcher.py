@@ -404,6 +404,9 @@ class RefineLauncher:
                     LOGGER.debug("Loaded specta from %s" % exper_dataframe.spectrum_filename.values[0])
                     shot_modeler.spec_name = exper_dataframe.spectrum_filename.values[0]
 
+                elif self.params.gen_gauss_spec:
+                    shot_spectra = hopper_utils.set_gauss_spec(None, self.params, expt)
+
                 else:
                     total_flux = exper_dataframe.total_flux.values[0]
                     if total_flux is None:
@@ -412,6 +415,13 @@ class RefineLauncher:
 
             shot_modeler.spectra = shot_spectra
             shot_modeler.nanoBragg_beam_spectrum = shot_spectra
+            if "osc_deg" in exper_dataframe:
+                shot_modeler.osc_deg = exper_dataframe.osc_deg.values[0]
+                shot_modeler.phisteps = exper_dataframe.phisteps.values[0]
+            else:
+                shot_modeler.osc_deg=None
+                shot_modeler.phisteps=None
+
             if self.params.refiner.gather_dir is not None and not self.params.refiner.load_data_from_refl:
                 spec_wave, spec_weights = map(np.array, zip(*shot_spectra))
                 spec_filename = os.path.splitext(os.path.basename(exper_name))[0]

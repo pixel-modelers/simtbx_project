@@ -624,8 +624,14 @@ namespace boost_python { namespace {
       .def("__add_Fhkl_gradients", &simtbx::nanoBragg::diffBragg::add_Fhkl_gradients,
             "special mode for computing the gradients of the structure factors. Takes psf, residual, variance, and trusted mask as arguments")
 
+      .def("__add_sourceI_gradients", &simtbx::nanoBragg::diffBragg::add_sourceI_gradients,
+            "special mode for computing the gradients of the energy spectra. Takes psf, residual, variance, and trusted mask as arguments")
+
       .def("__update_Fhkl_scale_factors", &simtbx::nanoBragg::diffBragg::update_Fhkl_scale_factors,
             "updates the scale factors for each ASU. Should be same length as the db_cryst.ADUid_map")
+
+      .def("__update_sourceI_scale_factors", &simtbx::nanoBragg::diffBragg::update_sourceI_scale_factors,
+            "updates the scale factors for each source. length should be same as number of sources")
 
       .def("__update_Fhkl_channels", &simtbx::nanoBragg::diffBragg::update_Fhkl_channels,
             "pass this a numpy int array the same length as the number of energy sources, this specifies the mapping of structure factor to energy channel, allowing one to refine multiple energy-dependent structure factors for example in a two-color experiment")

@@ -1795,8 +1795,9 @@ np::ndarray diffBragg::add_Fhkl_gradients(const af::shared<size_t>& panels_fasts
         first_deriv_imgs.freq[i] = fr;
     }
 
-    db_flags.Fhkl_gradient_mode = true;
+    db_flags.gradient_mode = true;
     db_flags.using_trusted_mask = true;
+    db_flags.calc_Fhkl_gradients = true;
     bool is_empty  = first_deriv_imgs.Fhkl_scale_deriv.empty();
     for (int i=0; i < db_cryst.Num_ASU*num_Fhkl_channels; i ++){
         if (is_empty)
@@ -1817,7 +1818,8 @@ np::ndarray diffBragg::add_Fhkl_gradients(const af::shared<size_t>& panels_fasts
     spot_scale=1;
 
     db_flags.using_trusted_mask = false;
-    db_flags.Fhkl_gradient_mode = false;
+    db_flags.gradient_mode = false;
+    db_flags.calc_Fhkl_gradients = false;
     db_flags.track_Fhkl_indices = false;
     db_flags.Fhkl_errors_mode = false;
 
@@ -1834,6 +1836,83 @@ np::ndarray diffBragg::add_Fhkl_gradients(const af::shared<size_t>& panels_fasts
         output = np::from_data(&first_deriv_imgs.Fhkl_scale_deriv[0], dt, shape, stride, boost::python::object());
     }
     return output.copy();
+}
+
+np::ndarray diffBragg::add_sourceI_gradients(const af::shared<size_t>& panels_fasts_slows,
+    np::ndarray& residual, np::ndarray& variance, np::ndarray& trusted, np::ndarray& freq,
+    double Gscale){
+
+    Npix_to_model = panels_fasts_slows.size()/3;
+
+    double* resid_ptr = reinterpret_cast<double*>(residual.get_data());
+    double* var_ptr = reinterpret_cast<double*>(variance.get_data());
+    bool* trust_ptr = reinterpret_cast<bool*>(trusted.get_data());
+    int* freq_ptr = reinterpret_cast<int*>(freq.get_data());
+
+    int n_data_alloc = first_deriv_imgs.residual.size();
+    while (n_data_alloc < Npix_to_model){
+        first_deriv_imgs.residual.push_back(0);
+        first_deriv_imgs.variance.push_back(0);
+        first_deriv_imgs.trusted.push_back(0);
+        first_deriv_imgs.freq.push_back(0);
+        n_data_alloc ++;
+    }
+
+    for (int i=0; i < Npix_to_model; i++){
+        double resid = *(resid_ptr+i);
+        double var = *(var_ptr+i);
+        bool trust = *(trust_ptr+i);
+        int fr = *(freq_ptr+i);
+        first_deriv_imgs.residual[i] = resid;
+        first_deriv_imgs.variance[i] = var;
+        first_deriv_imgs.trusted[i] = trust;
+        first_deriv_imgs.freq[i] = fr;
+    }
+
+    db_flags.gradient_mode = true;
+    db_flags.calc_sourceI_gradients = true;
+    db_flags.using_trusted_mask = true;
+
+    //db_cryst.sourceI_grad.resize(source,0);
+    bool is_empty  = db_beam.sourceI_grad.empty();
+    for (int i=0; i < sources; i ++){
+        if (is_empty)
+            db_beam.sourceI_grad.push_back(0);
+        else
+            db_beam.sourceI_grad[i] = 0;
+    }
+
+    // we need to supply the spot scale parameter
+    SCITBX_ASSERT(spot_scale==1);
+    spot_scale=Gscale;
+    add_diffBragg_spots(panels_fasts_slows);
+    spot_scale=1;
+
+    db_flags.using_trusted_mask = false;
+    db_flags.gradient_mode = false;
+    db_flags.calc_sourceI_gradients = false;
+
+    boost::python::tuple shape = boost::python::make_tuple(sources);
+    boost::python::tuple stride = boost::python::make_tuple(sizeof(double));
+    np::dtype dt = np::dtype::get_builtin<double>();
+    np::ndarray output = np::empty(shape,dt);
+
+    output = np::from_data(&db_beam.sourceI_grad[0], dt, shape, stride, boost::python::object());
+    return output.copy();
+}
+
+void diffBragg::update_sourceI_scale_factors(np::ndarray& scale_factors){
+    bool initialize_scales=db_beam.sourceI_scale.empty();
+    double* scale_ptr = reinterpret_cast<double*>(scale_factors.get_data());
+    db_flags.sourceI_have_scale_factors=true;
+    //db_cu_flags.update_sourceI_scales=true;
+    for (int i=0; i <sources; i++){
+        double scale =  *(scale_ptr+i);
+        if (initialize_scales)
+            db_beam.sourceI_scale.push_back(scale);
+        else
+            db_beam.sourceI_scale[i]=scale;
+    }
 }
 
 void diffBragg::update_Fhkl_scale_factors(np::ndarray& scale_factors, int num_Fhkl_channels){

@@ -25,6 +25,12 @@ class _():
         # assert len(channel_ids)== number_of_sources
         self.__update_Fhkl_channels(channel_ids)
 
+    def update_sourceI_scale_factors(self, scales):
+        if scales.dtype != np.float64:
+            print("Warning, converting scale factors to double!")
+            scales = scales.astype(np.float64)
+        self.__update_sourceI_scale_factors(scales)
+
     def update_Fhkl_scale_factors(self, scales, num_Fhkl_channels):
         assert isinstance(scales, np.ndarray)
         scales = self._check_contig(scales)
@@ -48,6 +54,37 @@ class _():
         # do stuff to set val, e.g renormalize
         # val =
         self._ext_rotate_principal_axes = val  # as a 9-tuple or a scitbx matrix sqr
+
+    def add_sourceI_gradients(self, psf, residuals, variance, trusted, freq, spot_scale):
+        """
+        :param psf:
+        :param residuals:
+        :param variance:
+        :param trusted:
+        :param freq:
+        :param spot_scale:
+        :return:
+        """
+
+        assert isinstance(residuals, np.ndarray)
+        assert isinstance(variance, np.ndarray)
+        assert isinstance(trusted, np.ndarray)
+        assert isinstance(freq, np.ndarray)
+        residuals = self._check_contig(residuals)
+        variance = self._check_contig(variance)
+        trusted = self._check_contig(trusted)
+        Npix = len(psf) / 3
+        assert Npix == len(residuals)
+        assert Npix == len(variance)
+        assert Npix == len(trusted)
+        assert Npix == len(freq)
+        # TODO check or contiguous arrays..
+
+        assert trusted.dtype == bool
+        assert freq.dtype == np.int32
+        assert residuals.dtype == np.float64
+        assert variance.dtype == np.float64
+        return self.__add_sourceI_gradients(psf, residuals, variance, trusted, freq, spot_scale)
 
     def add_Fhkl_gradients(self, psf, residuals, variance, trusted, freq, num_Fhkl_channels, spot_scale,
                            track=False, errors=False):

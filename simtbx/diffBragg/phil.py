@@ -1226,6 +1226,8 @@ roi {
 }
 
 geometry {
+  sigma_sourceI = 1
+    .type = float
   save_state_freq = 50
     .type = int
     .help = how often to save all model parameters
@@ -1310,6 +1312,9 @@ geometry {
     panel_translations = 0,0,0
       .type = ints(size=3)
       .help = refinement flags, 1 means to fix the parameter
+    sourceI = True
+      .type = bool
+      .help = refine the source I of every beam (spectra optimization)
   }
 }
 """
