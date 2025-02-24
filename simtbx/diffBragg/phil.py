@@ -6,6 +6,11 @@ from iotbx.phil import parse
 #'''
 
 hopper_phil = """
+save_perRoiScale = True
+  .type = bool
+  .help = "Save the scale factors refined for each reflection"
+use_perRoiScale = False
+  .type = bool
 perRoi_finish = False
   .type = bool
   .help = optionally finish the refinement by fixing all other params and optimizing per-reflection scale factors
@@ -21,8 +26,8 @@ filter_during_refinement {
     .help = refiner will pause and check for outliers every after_n iterations
   threshold = 20
     .type = float
-    .help = outliers are detected by looking at the distribution of per shoebox sigmaZ
-    .help = and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers
+    .help = "outliers are detected by looking at the distribution of per shoebox sigmaZ"
+            "and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers"
 }
 
 filter_after_refinement {
@@ -40,8 +45,8 @@ filter_after_refinement {
     .help = only repeat if the previous refinement had sigma Z more than this
   threshold = 20
     .type = float
-    .help = outliers are detected by looking at the distribution of per shoebox sigmaZ
-    .help = and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers
+    .help = "outliers are detected by looking at the distribution of per shoebox sigmaZ"
+            "and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers"
 }
 
 symmetrize_Flatt = False
@@ -49,12 +54,12 @@ symmetrize_Flatt = False
   .help = If True, add 3-fold symmetric mosaic blocks to the calculation of F_latt
 record_device_timings = False
   .type = bool
-  .help = Record the execution times of diffBragg host-dev copies and kernel executions
-  .help = the results will be printed to the terminal
+  .help = "Record the execution times of diffBragg host-dev copies and kernel executions"
+          "the results will be printed to the terminal"
 consider_multicrystal_shots = False
   .type = bool
-  .help = If True, and if there are multiple crystals in the experiment list,
-  .help = then try to model all crystals for a given shot.
+  .help = "If True, and if there are multiple crystals in the experiment list,"
+          "then try to model all crystals for a given shot."
 debug_mode = False
   .type = bool
   .help = If True, many output files are written to explore the diffBragg models in great detail
@@ -69,34 +74,34 @@ use_geometric_mean_Fhkl = False
   .help = whether to use the geometric mean for Fhkl restraint (when betasFhkl is not None, restratin Fhkl to the mean in each res bin)
 Fhkl_channel_bounds = None
   .type = floats
-  .help = Energy bounds for energy-dependent structure factors. Units are eV.
-  .help = If provided refine a unique structure factor correction for each bin defined by Fhkl_channel_bins
-  .help = 0 and infinity are implicit. Providing a single number, e.g. 8950, will refine two sets of structure
-  .help = factors: one for energies [0-8950), and another for energies [8950-infinity]
+  .help = "Energy bounds for energy-dependent structure factors. Units are eV."
+          "If provided refine a unique structure factor correction for each bin defined by Fhkl_channel_bins"
+          "0 and infinity are implicit. Providing a single number, e.g. 8950, will refine two sets of structure"
+          "factors: one for energies [0-8950), and another for energies [8950-infinity]"
 Fhkl_dspace_bins = 10
   .type = int
-  .help = number of resolution bins (out to corner of detector) for computing the average structure factor intensity
-  .help = One can then restrain to these values when fix.Fhkl=False by using the restraint strength betas.Fhkl (default is None in which case no restraints are applied)
+  .help = "number of resolution bins (out to corner of detector) for computing the average structure factor intensity"
+          "One can then restrain to these values when fix.Fhkl=False by using the restraint strength betas.Fhkl (default is None in which case no restraints are applied)"
 try_strong_mask_only = False
   .type = bool
-  .help = if strong spot masks are present in the input refls, then use them
-  .help = as the trusted-flags, i.e. only run strong spot pixels through diffBragg
+  .help = "if strong spot masks are present in the input refls, then use them"
+          "as the trusted-flags, i.e. only run strong spot pixels through diffBragg"
 dilate_strong_mask = None
   .type = int
-  .help = if using strong mask only for refinement, then dilate it this many iterations using
-  .help = scipy.ndimage method binary_dilation (has to be >= 1)
+  .help = "if using strong mask only for refinement, then dilate it this many iterations using"
+          "scipy.ndimage method binary_dilation (has to be >= 1)"
 hopper_save_freq = None
   .type = int
   .help = save the output files when the iteration number is a multiple of this argument
 terminate_after_n_converged_iter = None
   .type = int
-  .help = optionally converge if all parameters seem converged for this many iterations. See
-  .help = converged_param_percent_change
+  .help = "optionally converge if all parameters seem converged for this many iterations. See"
+          "converged_param_percent_change"
 converged_param_percent_change = 0.1
   .type = float
-  .help = if a parameter's value changes by less than this amount (percent) between iterations, for a
-  .help = a ceterain number of iters (determined by terminate_after_n_converged_iter), then
-  .help = optimization is considered done, and is stopped
+  .help = "if a parameter's value changes by less than this amount (percent) between iterations, for a"
+          "a ceterain number of iters (determined by terminate_after_n_converged_iter), then"
+          "optimization is considered done, and is stopped"
 mask_highest_values = None
   .type = int
   .help = mask out the N highest-valued pixels in a shoebox when performing diffBragg refinement
@@ -118,18 +123,18 @@ gathered_output_file = None
   .expert_level=10
 only_dump_gathers = False
   .type = bool
-  .help = only reads in image data, fits background planes, and dumps
-  .help = results to disk, writes a new exper refl file at the end
+  .help = "only reads in image data, fits background planes, and dumps"
+          "results to disk, writes a new exper refl file at the end"
   .expert_level=10
 gathers_dir = None
   .type = str
-  .help = folder where gathered data reflection tables
-  .help = will be writen (if dump_gathers=True)
+  .help = "folder where gathered data reflection tables"
+          "will be writen (if dump_gathers=True)"
   .expert_level=10
 dump_gathers = False
   .type = bool
-  .help = optionally dump the loaded experimental data to reflection tables
-  .help = for portability
+  .help = "optionally dump the loaded experimental data to reflection tables"
+          "for portability"
   .expert_level=10
 spectrum_from_imageset = False
   .type = bool
@@ -137,14 +142,14 @@ spectrum_from_imageset = False
   .expert_level=0
 gen_gauss_spec = False
   .type = bool
-  .help = If the experimental data dont include spectra, one can try generating gaussian spectra.
-  .help = See the diffBragg/phil.py under simulator.spectrum.gauss_spec.
+  .help = "If the experimental data dont include spectra, one can try generating gaussian spectra."
+          "See the diffBragg/phil.py under simulator.spectrum.gauss_spec."
 use_perpixel_dark_rms = False
   .type = bool
-  .help = some Jungfrau formats have per-pixel RMS values that change shot-to-shot with the dynamic
-  .help = gain mode switching. If this flag is true, then the per-pixel gain modes will be extracted from the image
-  .help = format . The image format class is expected to have a method named  get_pedestal_rms(self, index=None)
-  .help = See the method xfel/util/jungfrau/get_pedestalRMS-from_jungfrau
+  .help = "some Jungfrau formats have per-pixel RMS values that change shot-to-shot with the dynamic"
+          "gain mode switching. If this flag is true, then the per-pixel gain modes will be extracted from the image"
+          "format . The image format class is expected to have a method named  get_pedestal_rms(self, index=None)"
+          "See the method xfel/util/jungfrau/get_pedestalRMS-from_jungfrau"
 isotropic {
   diffuse_gamma = False
     .type = bool
@@ -156,8 +161,8 @@ isotropic {
 downsamp_spec {
   skip = False
     .type = bool
-    .help = if reading spectra from imageset, optionally skip the downsample portion
-    .help = Note, if skip=True, then total flux will be determined by whats in the imageset spectrum (sum of the weights)
+    .help = "if reading spectra from imageset, optionally skip the downsample portion"
+            "Note, if skip=True, then total flux will be determined by whats in the imageset spectrum (sum of the weights)"
     .expert_level=10
   filt_freq = 0.07
     .type = float
@@ -178,8 +183,8 @@ downsamp_spec {
 }
 filter_unpredicted_refls_in_output = True
   .type = bool
-  .help = filter reflections in the output refl table for which there was no model bragg peak
-  .help = after stage 1 termination
+  .help = "filter reflections in the output refl table for which there was no model bragg peak"
+          "after stage 1 termination"
   .expert_level=10
 tag = stage1
   .type = str
@@ -202,8 +207,8 @@ nelder_mead_fatol = 0.0001
   .help = nelder mead functional error tolerance
 niter_per_J = 1
   .type = int
-  .help = if using gradient descent, compute gradients
-  .help = every niter_per_J iterations .
+  .help = "if using gradient descent, compute gradients"
+          "every niter_per_J iterations ."
   .expert_level=10
 rescale_params = True
   .type = bool
@@ -224,8 +229,8 @@ betas
     .type = float
   Friedel = None
     .type = float
-    .help = set this to some value to restraint Friedel mates during refinement (ensemble mode) . Lower values are
-    .help = tightly restrained . (Exploratory, experimental phil param)
+    .help = "set this to some value to restraint Friedel mates during refinement (ensemble mode) . Lower values are"
+            "tightly restrained . (Exploratory, experimental phil param)"
   ucell_a = None
     .type = float
     .help = restraint variance for unit cell a
@@ -252,8 +257,8 @@ betas
     .help = restraint variance for detector shift target
   ucell = None
     .type = floats
-    .help = DEPRECATED: use e.g. betas.ucell_a instead
-    .help = variances for unit cell constants in order determined by unit cell manager class (see diffBragg/refiners/crystal_systems)
+    .help = "DEPRECATED: use e.g. betas.ucell_a instead"
+            "variances for unit cell constants in order determined by unit cell manager class (see diffBragg/refiners/crystal_systems)"
   RotXYZ = None
     .type = float
     .help = restraint factor for the rotXYZ restraint
@@ -294,8 +299,8 @@ dual
     .help = init temp for dual annealing
   no_local_search = False
     .type = bool
-    .help = whether to try local search procedure with dual annealing
-    .help = if False, then falls back on classical simulated annealing
+    .help = "whether to try local search procedure with dual annealing"
+            "if False, then falls back on classical simulated annealing"
   visit = 2.62
     .type = float
     .help = dual_annealing visit param, see scipy optimize docs
@@ -384,13 +389,13 @@ niter = 0
   .expert_level=0
 exp_ref_spec_file = None
   .type = str
-  .help = path to 3 col txt file containing file names for exper, refl, spectrum (.lam)
-  .help = Note: only single-image experiment lists are supported! Uses dials.split_experiments or diffBragg.make_input_file if necessary
+  .help = "path to 3 col txt file containing file names for exper, refl, spectrum (.lam)"
+          "Note: only single-image experiment lists are supported! Uses dials.split_experiments or diffBragg.make_input_file if necessary"
   .expert_level=0
 method = None
   .type = str
-  .help = minimizer method, usually this is L-BFGS-B (gradients) or Nelder-Mead (simplex)
-  .help = other methods are experimental (see details in hopper_utils.py)
+  .help = "minimizer method, usually this is L-BFGS-B (gradients) or Nelder-Mead (simplex)"
+          "other methods are experimental (see details in hopper_utils.py)"
   .expert_level=0
 opt_det = None
   .type = str
@@ -520,8 +525,8 @@ init
     .help = init for B factor
   eta_abc = [0,0,0]
     .type = floats(size=3)
-    .help = initial values (in degrees) for anisotropic mosaic spread about the 3 crystal axes a,b,c
-    .help = Note, these can never be exactly 0 if fix.eta_abc=False
+    .help = "initial values (in degrees) for anisotropic mosaic spread about the 3 crystal axes a,b,c"
+            "Note, these can never be exactly 0 if fix.eta_abc=False"
 }
 mins
   .help = min value allowed for parameter
@@ -673,13 +678,13 @@ no_Nabc_scale = False
   .expert_level = 10
 use_diffuse_models = False
   .type = bool
-  .help = if True, let the values of init.diffuse_sigma and init.diffuse_gamma
-  .help = be used to define the diffuse scattering. Set e.g. fix.diffuse_sigma=True in order to refine them
+  .help = "if True, let the values of init.diffuse_sigma and init.diffuse_gamma"
+          "be used to define the diffuse scattering. Set e.g. fix.diffuse_sigma=True in order to refine them"
   .expert_level = 10
 diffuse_stencil_size = 0
   .type = int
-  .help = Increase to add accuracy to diffuse scattering models, at the expense of longer computations
-  .help = Best to increment by values of 1 when testing
+  .help = "Increase to add accuracy to diffuse scattering models, at the expense of longer computations"
+          "Best to increment by values of 1 when testing"
 diffuse_orientation = 1
   .type = int
   .help = orient the diffuse scattering features. 0 is along (a-b, a+b, c), 1 is along (a,b,c)
@@ -704,8 +709,8 @@ sanity_test_models = False
   .expert_level = 10
 sanity_test_amplitudes = False
   .type = bool
-  .help = if True, then quickly run a sanity check ensuring that all h,k,l are predicted
-  .help = and/or in the starting miller array
+  .help = "if True, then quickly run a sanity check ensuring that all h,k,l are predicted"
+          "and/or in the starting miller array"
   .expert_level = 10
 x_write_freq = 25
   .type = int
@@ -747,8 +752,8 @@ use_restraints = False
   .expert_level = 0
 min_multi = 2
   .type = int
-  .help = minimum ASU multiplicity, obs that fall below this threshold
-  .help = are removed from analysis
+  .help = "minimum ASU multiplicity, obs that fall below this threshold"
+          "are removed from analysis"
   .expert_level = 10
 min_spot = 5
   .type = int
@@ -756,8 +761,8 @@ min_spot = 5
   .expert_level = 10
 store_wavelength_images = False
   .type = bool
-  .help = for simtbx.diffBragg.hopper, optionally write subimages whose value
-  .help = is the avereage wavelength per pixels, weighted by the model
+  .help = "for simtbx.diffBragg.hopper, optionally write subimages whose value"
+          "is the avereage wavelength per pixels, weighted by the model"
 logging
   .help = controls the logging module for hopper and stage_two
   .expert_level = 10
@@ -788,8 +793,8 @@ logging
     .help = overwrite the existing logfiles
   logname = mainLog
     .type = str
-    .help = if logfiles=True, then write the log to this file, stored in the folder specified by outdir
-    .help = if None, then defaults to main_stage1.log for hopper, main_pred.log for prediction, main_stage2.log for stage_two
+    .help = "if logfiles=True, then write the log to this file, stored in the folder specified by outdir"
+            "if None, then defaults to main_stage1.log for hopper, main_pred.log for prediction, main_stage2.log for stage_two"
   log_hostname = True
     .type = bool
     .help = prefix logfiles with host name
@@ -800,8 +805,8 @@ profile = False
   .expert_level = 0
 profile_name = lineProf
   .type = str
-  .help = name of the output file that stores the line-by-line profile (written to folder specified by outdir)
-  .help = if None, defaults to prof_stage1.log, prof_pred.log, prof_stage2.log for hopper, prediction, stage_two respectively
+  .help = "name of the output file that stores the line-by-line profile (written to folder specified by outdir)"
+          "if None, defaults to prof_stage1.log, prof_pred.log, prof_stage2.log for hopper, prediction, stage_two respectively"
   .expert_level = 10
 """
 
@@ -852,11 +857,14 @@ simulator {
       .help = 1 or 2. 1 is random sampling, 2 is even sampling
     rotXYZ_ucell = None
       .type = floats(size=9)
-      .help = three missetting angles (about X,Y,Z axes), followed by
-      .help = unit cell parameters. The crystal will be rotated according to
-      .help = the matrix RotX*RotY*RotZ, and then the unit cell will be updated
+      .help = "three missetting angles (about X,Y,Z axes), followed by"
+              "unit cell parameters. The crystal will be rotated according to"
+              "the matrix RotX*RotY*RotZ, and then the unit cell will be updated"
   }
   gonio {
+    axis = [1,0,0]
+      .type = floats
+      .help = "goniometer rotates about this axis"
     delta_phi = None
       .type = float
       .help = Angular amount in degrees by which goniometer is rotated during shot (will be overwritten by init.gonio_ang)
@@ -871,8 +879,8 @@ simulator {
         .help = path to a pdb file
       add_anom = True
         .type = bool
-        .help = Use the dxtbx beams wavelength to sample the henke tables
-        .help = and add anomalous contributions from each atom
+        .help = "Use the dxtbx beams wavelength to sample the henke tables"
+                "and add anomalous contributions from each atom"
       k_sol = None
         .type = float
         .help = solvent component of structure factor: k_sol * exp(-b_sol*s^2/4)
@@ -882,8 +890,8 @@ simulator {
     }
     mtz_name = None
       .type = str
-      .help = path to an MTZ file . If an mtz_name and from_pdb.name are both provided, then
-      .help = the mtz takes precedence
+      .help = "path to an MTZ file . If an mtz_name and from_pdb.name are both provided, then"
+              "the mtz takes precedence"
     mtz_column = None
       .type = str
       .help = column in an MTZ file
@@ -895,10 +903,13 @@ simulator {
       .help = maximum resolution for structure factor array (not applicable when F is loaded from mtz)
     default_F = 0
       .type = float
-      .help = Default value for structure factor amps . MIssing structure factors will have this value
-      .help = during simulation, for example if the mtz is incomplete. Also, if mtz_name and
-      .help = from_pdb.name are both None, then a structure factor array will be created with this
-      .help = value as every amplitude.
+      .help = "Default value for structure factor amps . MIssing structure factors will have this value"
+              "during simulation, for example if the mtz is incomplete. Also, if mtz_name and"
+              "from_pdb.name are both None, then a structure factor array will be created with this"
+              "value as every amplitude."
+    default_Frange = None
+      .type = floats(size=2)
+      .help = "Range of values sorted ascending, e.g. [1000,2000] and Fcalcs will be randomly drawn from there."
   }
   spectrum {
     filename = None
@@ -930,20 +941,20 @@ simulator {
   detector {
     thick = None
       .type = float
-      .help = sensor thickness in millimeters. Overrides dxtbx detector model.
-      .help = Note: must also provide param `atten`, otherwise this param is ineffective
+      .help = "sensor thickness in millimeters. Overrides dxtbx detector model."
+              "Note: must also provide param `atten`, otherwise this param is ineffective"
     atten = None
       .type = float
-      .help = x-ray absorption length in millimeters
-      .help = for sensor. Overrides dxtbx detector model.
-      .help = Note: must also provide param `thick`, otherwise this param is ineffective
+      .help = "x-ray absorption length in millimeters"
+              "for sensor. Overrides dxtbx detector model."
+              "Note: must also provide param `thick`, otherwise this param is ineffective"
     force_zero_thickness = False
       .type = bool
       .help = if True, then set sensor thickness to 0
     thicksteps = 1
       .type = int
-      .help = number of layers within sensor where scattering
-      .help = will be averaged over (evenly divided). This is a nanoBragg attribute
+      .help = "number of layers within sensor where scattering"
+              "will be averaged over (evenly divided). This is a nanoBragg attribute"
   }
   psf {
     use = False
@@ -963,27 +974,27 @@ refiner_phil = """
 refiner {
   check_expt_format = True
     .type = bool
-    .help = In some cases the expt is only used for the crystal model, in which case set check_expt_format=False.
-    .help = If, however, the experimental data and/or spectra are to be extracted from the expt, then this
-    .help = should  remain True.
+    .help = "In some cases the expt is only used for the crystal model, in which case set check_expt_format=False."
+            "If, however, the experimental data and/or spectra are to be extracted from the expt, then this"
+            "should  remain True."
   refldata_trusted = *allValid fg bg
     .type = choice
-    .help = If loading data from reflection table, choose which pixels are flagged as trusted/
-    .help = The default is allValid, meaning any shoebox mask value > 1.
-    .help = fg is any foreground (integrated), valid pixel (mask==5).
-    .help = bg is any valid pixel used for background fitting or foreground (integration).
-    .help = Note, in this context, Foreground is usually the central shoebox pixels marked for integration.
+    .help = "If loading data from reflection table, choose which pixels are flagged as trusted."
+            "The default is allValid, meaning any shoebox mask value > 1."
+            "fg is any foreground (integrated), valid pixel (mask==5)."
+            "bg is any valid pixel used for background fitting or foreground (integration)."
+            "Note, in this context, Foreground is usually the central shoebox pixels marked for integration."
   refldata_to_photons = False
     .type = bool
-    .help = If loading data from reflection table, then optionally normalize by the refiner.adu_to_photon factor.
-    .help = If the reflection tables were created using dials.integrate or dials.stils_process,
-    .help = then you will need to set this flag to True.
+    .help = "If loading data from reflection table, then optionally normalize by the refiner.adu_to_photon factor."
+            "If the reflection tables were created using dials.integrate or dials.stils_process,"
+            "then you will need to set this flag to True."
   load_data_from_refl = False
     .type = bool
-    .help = Rather than load data from the experiment, load data from the reflection table shoeboxes.
-    .help = The data in shoeboxes is stored in float32. The shoebox bound boxes will determing the regions of
-    .help = pixels used for refinement. It is assumed that shoebox background, data, and the mask are properly set.
-    .help = See the method GatherFromReflectionTable in hopper_utils.
+    .help = "Rather than load data from the experiment, load data from the reflection table shoeboxes."
+            "The data in shoeboxes is stored in float32. The shoebox bound boxes will determing the regions of"
+            "pixels used for refinement. It is assumed that shoebox background, data, and the mask are properly set."
+            "See the method GatherFromReflectionTable in hopper_utils."
   test_gathered_file = False
     .type = bool
   gather_dir = None
@@ -991,16 +1002,16 @@ refiner {
     .help = optional dir for stashing loaded input data in refl files (mainly for tests/portability)
   break_signal = None
     .type = int
-    .help = intended to be used to break out of a long refinement job prior to a timeout on a super computer
-    .help = On summit, set this to 12 (SIGUSR2), at least thats what it was last I checked (July 2021)
+    .help = "intended to be used to break out of a long refinement job prior to a timeout on a super computer"
+            "On summit, set this to 12 (SIGUSR2), at least thats what it was last I checked (July 2021)"
   debug_pixel_panelfastslow = None
     .type = ints(size=3)
-    .help = 3-tuple of panel ID, fast coord, slow coord. If set, show the state of diffBragg
-    .help = for this pixel once refinement has finished
+    .help = "3-tuple of panel ID, fast coord, slow coord. If set, show the state of diffBragg"
+            "for this pixel once refinement has finished"
   gain_map_min_max = [.5,2]
     .type = floats(size=2)
-    .help = the min, max allowed values for the gain correction terms
-    .help = that are applied to each region (defined by region_size)
+    .help = "the min, max allowed values for the gain correction terms"
+            "that are applied to each region (defined by region_size)"
   refine_gain_map = False
     .type = bool
     .help = flag for refining a detector gain map, defined by the parameter region_size
@@ -1009,16 +1020,16 @@ refiner {
     .help = after how many iterations should we save the optimized gain map
   region_size = [50,50]
     .type = ints(size=2)
-    .help = Used for gain correction. size of subregions in each detector module in pixels.
-    .help = Each panel region will be divided into blocks of shape region_size
-    .help = and a unique gain correction will be applied to each subregion.
-    .help = Note, this will usually be square shaped, but its (slowDim,fastDim).
+    .help = "Used for gain correction. size of subregions in each detector module in pixels."
+            "Each panel region will be divided into blocks of shape region_size"
+            "and a unique gain correction will be applied to each subregion."
+            "Note, this will usually be square shaped, but its (slowDim,fastDim)."
   res_ranges = None
     .type = str
-    .help = resolution-defining strings, where each string is
-    .help = is comma-separated substrings, formatted according to "%f-%f,%f-%f" where the first float
-    .help = in each substr specifies the high-resolution for the refinement trial, and the second float
-    .help = specifies the low-resolution for the refinement trial. Should be same length as max_calls
+    .help = "resolution-defining strings, where each string is"
+            "is comma-separated substrings, formatted according to `%f-%f,%f-%f` where the first float"
+            "in each substr specifies the high-resolution for the refinement trial, and the second float"
+            "specifies the low-resolution for the refinement trial."
   force_symbol = None
     .type = str
     .help = a space group lookup symbol used to map input miller indices to ASU
@@ -1039,15 +1050,15 @@ refiner {
     .help = whether to refine the mosaic domain size tensor
   gain_restraint=None
     .type = floats(size=2)
-    .help = if not None, apply a gain restraint to the data
-    .help = This is two parameters, a center and a variance
+    .help = "if not None, apply a gain restraint to the data"
+            "This is two parameters, a center and a variance"
   max_calls = [100]
     .type = ints(size_min=1)
     .help = maximum number of calls for the refinement trial
   panel_group_file = None
     .type = str
-    .help = a text file with 2 columns, the first column is the panel_id and the second
-    .help = column is the panel_group_id. Panels geometries in the same group are refined together
+    .help = "a text file with 2 columns, the first column is the panel_id and the second"
+            "column is the panel_group_id. Panels geometries in the same group are refined together"
   update_oversample_during_refinement = False
     .type = bool
     .help = whether to update the oversample parameter as ncells changes
@@ -1088,8 +1099,8 @@ refiner {
     .help = keep repeating the same refinement scheme over and over, this many times
   ncells_mask = *000 110 101 011 111
     .type = choice
-    .help = a mask specifying which ncells parameters should be the same
-    .help = e.g. 110 specifies Na and Nb are refined together as one parameter
+    .help = "a mask specifying which ncells parameters should be the same"
+            "e.g. 110 specifies Na and Nb are refined together as one parameter"
   reference_geom = None
     .type = str
     .help = path to expt list file containing a detector model
@@ -1105,12 +1116,12 @@ refiner {
       .help = save Z-scores for all pixels after this many iterations
     min_multiplicity = 1
       .type = int
-      .help = structure factors whose multiplicity falls below this value
-      .help = will not be refined
+      .help = "structure factors whose multiplicity falls below this value"
+              "will not be refined"
     Fref_mtzname = None
       .type = str
-      .help = path to a reference MTZ file. if passed, this is used solely to
-      .help = observe the R-factor and CC between it and the Fobs being optimized
+      .help = "path to a reference MTZ file. if passed, this is used solely to"
+              "observe the R-factor and CC between it and the Fobs being optimized"
     Fref_mtzcol = "Famp(+),Famp(-)"
       .type = str
       .help = column in the mtz file containing the data
@@ -1150,29 +1161,29 @@ roi {
     .help = check for the column is_strong in the reflection table, and if it exists, only load refls where is_strong=True
   centroid = *obs cal origobs
     .type = choice
-    .help = Determines which refl table column contains the spot centroids
-    .help = Shoeboxes are drawn around the centroids, and refinement uses pixels
-    .help = within those shoeboxes.
-    .help = obs: xyz.px.value  cal: xyzcal.px
+    .help = "Determines which refl table column contains the spot centroids"
+            "Shoeboxes are drawn around the centroids, and refinement uses pixels"
+            "within those shoeboxes."
+            "obs: xyz.px.value  cal: xyzcal.px"
   trusted_range = None
     .type = floats(size=2)
     .help = optional override for detector trusted range, should be (min,max)
   mask_all_if_any_outside_trusted_range = True
     .type = bool
-    .help = If a reflection has any pixels which are outside the detectors
-    .help = trusted range, then mask the entire reflections and surrounding
-    .help = pixels. If False, then only pixels outside the range are masked.
-    .help = Note: this only takes effect if mask_outside_trusted_range=True.
+    .help = "If a reflection has any pixels which are outside the detectors"
+            "trusted range, then mask the entire reflections and surrounding"
+            "pixels. If False, then only pixels outside the range are masked."
+            "Note: this only takes effect if mask_outside_trusted_range=True."
   mask_outside_trusted_range = True
     .type = bool
-    .help = Check the dxtbx detector's trusted range and use that to mask
-    .help = out-of-range pixels on a per-image basis
+    .help = "Check the dxtbx detector's trusted range and use that to mask"
+            "out-of-range pixels on a per-image basis"
   only_filter_zingers_above_mean = True
     .type = bool
-    .help = if fitting background, theres a zinger filter step (background_threshold)
-    .help = and typically it only applies to pixels above the mean
-    .help = Set this to False to filter zingers below the mean, which is useful for
-    .help = data with low background signal.
+    .help = "if fitting background, theres a zinger filter step (background_threshold)"
+            "and typically it only applies to pixels above the mean"
+            "Set this to False to filter zingers below the mean, which is useful for"
+            "data with low background signal."
   cache_dir_only = False
     .type = bool
     .help = if True, create the cache folder , populate it with the roi data, then exit
@@ -1181,23 +1192,23 @@ roi {
     .help = fit tilt plane, or else background is simply an offset
   force_negative_background_to_zero = False
     .type = bool
-    .help = if True and the background model evaluates to a negative number
-    .help = within an ROI, then force the background to be 0 for all pixels in that ROI
+    .help = "if True and the background model evaluates to a negative number"
+            "within an ROI, then force the background to be 0 for all pixels in that ROI"
   background_threshold = 3.5
     .type = float
     .help = for determining background pixels
   pad_shoebox_for_background_estimation = None
     .type = int
-    .help = shoebox_size specifies the dimenstion of the shoebox used during refinement
-    .help = and this parameter is used to increase that shoebox_size only during the background
-    .help = estimation stage
+    .help = "shoebox_size specifies the dimenstion of the shoebox used during refinement"
+            "and this parameter is used to increase that shoebox_size only during the background"
+            "estimation stage"
   shoebox_size = 10
     .type = int
     .help = roi box dimension
   deltaQ = None
     .type = float
-    .help = roi dimension in inverse Angstrom, such that shoeboxes at wider angles are larger.
-    .help = If this parameter is supplied, shoebox_size will be ignored.
+    .help = "roi dimension in inverse Angstrom, such that shoeboxes at wider angles are larger."
+            "If this parameter is supplied, shoebox_size will be ignored."
   reject_edge_reflections = True
     .type = bool
     .help = whether to reject ROIs if they occur near the detector panel edge
@@ -1209,20 +1220,20 @@ roi {
     .help = path to a hotpixel mask (hot pixels set to True)
   panels = None
     .type = str
-    .help = panel list for refinement as a string, e.g. "0-8,10,32-40" . The ranges are inclusive,
-    .help = e.g. 0-8 means panels 0,1,2,3,4,5,6,7,8
+    .help = "panel list for refinement as a string, e.g. '0-8,10,32-40' . The ranges are inclusive,"
+            "e.g. 0-8 means panels 0,1,2,3,4,5,6,7,8"
   fit_tilt_using_weights = False
     .type = bool
-    .help = if not using robust estimation for background, and instead using tilt plane fit,
-    .help = then this parameter will toggle the use of weights. Weights are the estimated
-    .help = pixel variance, incuding readout and shot noises.
+    .help = "if not using robust estimation for background, and instead using tilt plane fit,"
+            "then this parameter will toggle the use of weights. Weights are the estimated"
+            "pixel variance, incuding readout and shot noises."
   allow_overlapping_spots = False
     .type = bool
     .help = if True, then model overlapping spots
   skip_roi_with_negative_bg = True
     .type = bool
-    .help = If a region of interest contains negative background model, then skip entire region,else
-    .help = mask the pixels with negative background model.
+    .help = "If a region of interest contains negative background model, then skip entire region,else"
+            "mask the pixels with negative background model."
 }
 
 geometry {
@@ -1236,13 +1247,13 @@ geometry {
     .help = whether to overwrite model parameter files each time they are saved
   pandas_dir = None
     .type = str
-    .help = If provided, Pandas dataframes for each shot will be written here
-    .help = These are the same format as those saved during stage 1
-    .help = Also, data modelers will pickled and written here as well
+    .help = "If provided, Pandas dataframes for each shot will be written here"
+            "These are the same format as those saved during stage 1"
+            "Also, data modelers will pickled and written here as well"
   optimized_results_tag = None
     .type = str
-    .help = optional tagname, if provided,write optimized refls/expts alongside the
-    .help = input refls/expts however using this tag suffix
+    .help = "optional tagname, if provided,write optimized refls/expts alongside the"
+            "input refls/expts however using this tag suffix"
   exp_key = exp_name
     .type = str
     .help = name of experiment name col in input pandas pkl
@@ -1306,10 +1317,10 @@ geometry {
       .help = restraint factor for the spread of detector panel Z-distances (#TODO think about this in context of tilt)
   }
   fix {
-    panel_rotations = 0,0,0
+    panel_rotations = 1,1,1
       .type = ints(size=3)
       .help = refinement flags, 1 means to fix the parameter
-    panel_translations = 0,0,0
+    panel_translations = 1,1,1
       .type = ints(size=3)
       .help = refinement flags, 1 means to fix the parameter
     sourceI = True
@@ -1331,10 +1342,10 @@ predictions {
     .help = panel id, fast coord, slow coord. If provided, debug stdout will be shown detailing the mstate of the diffBragg model
   use_peak_detection = False
     .type = bool
-    .help = If True, then simulations will be converted to refl tables
-    .help = where each reflection is a single pixel corresponding
-    .help = to the peak in the simulated spot. This is useful if one
-    .help = models spatial overlaps with separate peaks
+    .help = "If True, then simulations will be converted to refl tables"
+            "where each reflection is a single pixel corresponding"
+            "to the peak in the simulated spot. This is useful if one"
+            "models spatial overlaps with separate peaks"
   verbose = False
     .type = bool
     .help = See more console output from prediction methods
@@ -1343,8 +1354,8 @@ predictions {
     .help = if True, predict the per-pixel wavelenth from the model and use that for index assigment
   qcut = 0.1
     .type = float
-    .help = Label predicted reflection as a strong reflection if its within this
-    .help = many inverse Angstromg (q=2/Lambda sin(theta)) of an observed strong spot
+    .help = "Label predicted reflection as a strong reflection if its within this"
+            "many inverse Angstromg (q=2/Lambda sin(theta)) of an observed strong spot"
   label_weak_col = "xyzobs.px.value"
     .type = str
   weak_fraction = 0.5
@@ -1352,15 +1363,15 @@ predictions {
     .help = fraction of weak predictions to integrate
   threshold = 1e-3
     .type = float
-    .help = value determining the cutoff for the forward model intensity. Bragg peaks will then be determined
-    .help = as regions of connected values greater than the threshold
+    .help = "value determining the cutoff for the forward model intensity. Bragg peaks will then be determined"
+            "as regions of connected values greater than the threshold"
   thicksteps_override = None
     .type = int
     .help = Use to force the number of detector thickness steps to a specific value
   oversample_override = None
     .type = int
-    .help = force the pixel oversample rate to this value during the forward model simulation
-    .help = for maximum speed gains, set this to 1, but inspect the output!
+    .help = "force the pixel oversample rate to this value during the forward model simulation"
+            "for maximum speed gains, set this to 1, but inspect the output!"
     .expert_level=10
   use_diffBragg_mtz = False
     .type = bool
@@ -1374,21 +1385,21 @@ predictions {
     .help = if specified, stride through the spectrum according to this interval
   default_Famplitude = 1e3
     .type = float
-    .help = default structure factor amplitude for every miller index
-    .help = this creates a flat prediction model, where the magnitude is dependent on the distance to the Ewald sphere
+    .help = "default structure factor amplitude for every miller index"
+            "this creates a flat prediction model, where the magnitude is dependent on the distance to the Ewald sphere"
   resolution_range = [1,999]
     .type = floats(size=2)
     .help = high-res to low-res limit for prediction model
   symbol_override = None
     .type = str
-    .help = specify the space group symbol to use in diffBragg (e,g, P43212),
-    .help = if None, then it will be pulled from the crystal model
+    .help = "specify the space group symbol to use in diffBragg (e,g, P43212),"
+            "if None, then it will be pulled from the crystal model"
   method = *diffbragg exascale
     .type = choice
-    .help = engine used for computing the forward model
-    .help = diffbragg offers CUDA support via the DIFFBRAGG_USE_CUDA=1 environment variable specification
-    .help = or openmp support using the OMP_NUM_THREADS flag
-    .help = The exascale only uses CUDA (will raise error if CUDA is not confugured)
+    .help = "engine used for computing the forward model"
+            "diffbragg offers CUDA support via the DIFFBRAGG_USE_CUDA=1 environment variable specification"
+            "or openmp support using the OMP_NUM_THREADS flag"
+            "The exascale only uses CUDA (will raise error if CUDA is not confugured)"
   mosaic_samples_override = None
     .type = int
     .help = Specify the number of mosaic spread samples

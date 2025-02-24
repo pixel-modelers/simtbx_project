@@ -13,7 +13,7 @@ parser.add_argument("--splitDir", default=None, type=str, help="optional folder 
 parser.add_argument("--exptSuffix", type=str, default="refined.expt", help="find experiments with this suffix")
 parser.add_argument("--reflSuffix", type=str, default="indexed.refl", help="find reflection files with this suffix")
 parser.add_argument("--write", action="store_true")
-
+parser.add_argument("--importedSuffix", default=None, help="imported experiments suffix. Needed when reflSuffix points to strong spots, so that strong spot experiment id can be mapped according to imageset indices and paths. Note, must use the --write option when supplying importedSuffix")
 
 args = parser.parse_args()
 
@@ -51,13 +51,23 @@ def get_idx_path(El):
     return idx, path
 
 
-def split_stills_expts(expt_f, refl_f, split_dir, write=False):
+
+def split_stills_expts(expt_f, refl_f, split_dir, write=False, imported_name=None):
     El = ExperimentList.from_file(expt_f, False)
     R = flex.reflection_table.from_file(refl_f)
     expt_names = []
     refl_names = []
     orig_expt_names, orig_refl_names = [],[]  # store the original names for recordkeeping
     seen_isets = {}
+
+    Ridx_map = {}
+    if imported_name is not None:
+        imported_El = ExperimentList.from_file(imported_name, False)
+        for i_imported in range(len(imported_El)):
+            El_i = imported_El[i_imported:i_imported+1]
+            imported_idx_path = get_idx_path(El_i)
+            Ridx_map[imported_idx_path] = i_imported
+
     for i_expt in range(len(El)):
         one_exp_El = El[i_expt: i_expt+1]
         idx, path = get_idx_path(one_exp_El)
@@ -66,13 +76,19 @@ def split_stills_expts(expt_f, refl_f, split_dir, write=False):
             seen_isets[iset_id] = 0
         else:
             seen_isets[iset_id] += 1
-        tag = "%s-%d" % (os.path.basename(os.path.splitext(path)[0]), idx)
+        tag = "%s-%d-ex%d" % (os.path.basename(os.path.splitext(path)[0]), idx, i_expt)
         new_expt_name = os.path.splitext(expt_f)[0] + "_%s_xtal%d.expt" % (tag, seen_isets[iset_id])
         if write and split_dir is not None:
             unique_tag = "shot_%s" % hash_name(new_expt_name) + ".expt"
             new_expt_name = os.path.join(split_dir, unique_tag)
         new_refl_name = new_expt_name.replace(".expt", ".refl")
-        refls = R.select(R['id'] == i_expt)
+
+        if Ridx_map:
+            refl_idx = Ridx_map[(idx,path)]
+            refls = R.select(R['id'] == refl_idx)
+        else:
+            refls = R.select(R['id'] == i_expt)
+
         refls.reset_ids()
 
         if write:
@@ -84,6 +100,8 @@ def split_stills_expts(expt_f, refl_f, split_dir, write=False):
         orig_refl_names.append((apath(new_refl_name), (apath(refl_f), i_expt)))
     return expt_names, refl_names, orig_expt_names, orig_refl_names
 
+if args.importedSuffix:
+    assert args.write
 
 exp_names, ref_names = [], []
 orig_exp_names, orig_ref_names = [], []
@@ -104,9 +122,15 @@ for i_dir, dirname in enumerate(args.dirnames):
             ref_f = f.replace(".expt", ".refl")
         if not os.path.exists(ref_f):
             raise FileNotFoundError("No matching refl file for expt %s" % f)
+        if args.importedSuffix is not None:
+            imported_f = ref_f.replace(args.reflSuffix, args.importedSuffix)
+            assert os.path.exists(imported_f)
+        else:
+            imported_f=None
+
         El = ExperimentList.from_file(f, False)
         if len(El.imagesets()) > 1 or len(El.crystals()) > 1:
-            exp_fs, ref_fs, orig_exp_fs, orig_ref_fs = split_stills_expts(f, ref_f, args.splitDir, write=args.write)
+            exp_fs, ref_fs, orig_exp_fs, orig_ref_fs = split_stills_expts(f, ref_f, args.splitDir, write=args.write, imported_name=imported_f)
             exp_names += exp_fs
             ref_names += ref_fs
             orig_exp_names += orig_exp_fs
@@ -121,7 +145,6 @@ exp_names = COMM.reduce(exp_names)
 ref_names = COMM.reduce(ref_names)
 orig_exp_names = COMM.reduce(orig_exp_names)
 orig_ref_names = COMM.reduce(orig_ref_names)
-
 
 if COMM.rank==0:
 

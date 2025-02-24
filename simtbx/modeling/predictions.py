@@ -19,6 +19,7 @@ from collections import Counter
 def get_spot_wave(predictions, expt, wavelen_images, h_images, k_images, l_images):
     perSpotWave = flex.double()
     perSpotHKL = flex.miller_index()
+    sel = flex.bool()
     for i_sb, sb in enumerate(predictions['shoebox']):
         x1,x2,y1,y2,_,_ = sb.bbox
         pid = predictions[i_sb]['panel']
@@ -34,21 +35,26 @@ def get_spot_wave(predictions, expt, wavelen_images, h_images, k_images, l_image
         h_where_sig = h_subimg[where_signal]
         k_where_sig = k_subimg[where_signal]
         l_where_sig = l_subimg[where_signal]
-        assert not  np.any(np.isnan(wave_where_sig))
-        ave_wave = wave_where_sig.mean()
-        ave_h = h_where_sig.mean()
-        ave_k = k_where_sig.mean()
-        ave_l = l_where_sig.mean()
-        h = int(round(ave_h))
-        k = int(round(ave_k))
-        l = int(round(ave_l))
-        perSpotWave.append(ave_wave)
-        perSpotHKL.append((h,k,l))
-    return perSpotWave, perSpotHKL
+        if np.any(np.isnan(wave_where_sig)):
+            sel.append(False)
+            perSpotWave.append(-1)
+            perSpotHKL.append((0,0,0))
+        else:
+            sel.append(True)
+            ave_wave = wave_where_sig.mean()
+            ave_h = h_where_sig.mean()
+            ave_k = k_where_sig.mean()
+            ave_l = l_where_sig.mean()
+            h = int(round(ave_h))
+            k = int(round(ave_k))
+            l = int(round(ave_l))
+            perSpotWave.append(ave_wave)
+            perSpotHKL.append((h,k,l))
+    return perSpotWave, perSpotHKL, sel
 
 
 def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spectrum_override=None,
-                              verbose=True):
+                              verbose=True, return_model=False):
     """
     :param df: pandas dataframe, stage1_df attribute of simtbx.command_line.hopper_process.HopperProcess
     :param params: instance of diffBragg/phil.py phil params
@@ -85,7 +91,6 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         d_min=params.predictions.resolution_range[0],
         symbol_override=params.predictions.symbol_override,
         force_no_detector_thickness=params.simulator.detector.force_zero_thickness,
-        use_exascale_api=params.predictions.method == "exascale",
         use_db=params.predictions.method == "diffbragg",
         show_timings=params.predictions.verbose,
         printout_pix=params.predictions.printout_pix,
@@ -94,12 +99,13 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         det_thicksteps=params.predictions.thicksteps_override,
         from_pdb=from_pdb,
         mosaic_samples_override=params.predictions.mosaic_samples_override,
-        no_Nabc_scale=params.no_Nabc_scale)
+        no_Nabc_scale=params.no_Nabc_scale, return_sim=True,
+        detector_override=params.refiner.reference_geom)
 
     if not params.predictions.laue_mode:
-        panel_images, expt = model_out
+        (panel_images, SIM), expt = model_out
     else:
-        (panel_images, wavelen_images, h_images, k_images, l_images), expt = model_out
+        (panel_images, wavelen_images, h_images, k_images, l_images, SIM), expt = model_out
     # NOTE:  panel-images contains per-pixel model, and wavelen_images contains per-pixel wavelength
 
     predictions = refls_from_sims(panel_images, expt.detector,
@@ -125,12 +131,21 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
     if params.predictions.laue_mode:
         # need to alter rlp according to wavelength ?
         predictions['rlp'] *= expt.beam.get_wavelength()
-        spot_wave, updated_hkl = get_spot_wave(predictions, expt, wavelen_images, h_images, k_images, l_images)
+        spot_wave, updated_hkl, wave_sel = get_spot_wave(predictions, expt, wavelen_images, h_images, k_images, l_images)
         predictions['ave_wavelen'] = spot_wave
         predictions['rlp'] /= predictions['ave_wavelen']
         predictions['miller_index'] = updated_hkl
+        predictions = predictions.select(wave_sel)
     else:
         refls_to_hkl(predictions, expt.detector, expt.beam, expt.crystal, update_table=True)
+    #from simtbx.diffBragg import utils as db_utils
+    #from simtbx.diffBragg import hopper_utils
+    #M = hopper_utils.DataModeler(params)
+    #E = hopper_utils.DataModeler.exper_json_single_file(df.exp_name.values[0], df.exp_idx.values[0])
+    #M.GatherFromExperiment(E, predictions, remove_duplicate_hkl=False)
+    #M.set_slices("roi_id")
+    #out = db_utils.track_fhkl(M, SIM)
+    #from IPython import embed;embed()
 
     predictions['xyzcal.px'] = predictions['xyzobs.px.value']
     predictions['xyzcal.mm'] = predictions['xyzobs.mm.value']
@@ -138,7 +153,10 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
     predictions['scatter'] = predictions["intensity.sum.value"] / flex.double(np.array(numpix, np.float64))
 
     if strong is None:
-        return predictions, panel_images
+        if return_model:
+            return predictions, model_out
+        else:
+            return predictions, panel_images
 
     strong.centroid_px_to_mm(El)
     if params.predictions.laue_mode:
@@ -160,7 +178,10 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         print("Will use %d spots for integration" % sum(predictions["is_for_integration"]))
     predictions = predictions.select(predictions["is_for_integration"])
 
-    return predictions, panel_images
+    if return_model:
+        return predictions, model_out
+    else:
+        return predictions, panel_images
 
 
 def label_weak_predictions(predictions, strong, q_cutoff=0.005, col="rlp"):

@@ -366,7 +366,7 @@ void diffBragg_sum_over_steps(
         }
         double close_distance = db_det.close_distances[pid];
         //std::unordered_map<int, int> Fhkl_tracker;
-        std::unordered_map<std::string, int> Fhkl_tracker;
+        std::unordered_map<std::string, double> Fhkl_tracker;
         bool use_nominal_hkl = false;
         if (!db_cryst.nominal_hkl.empty())
             use_nominal_hkl = true;
@@ -618,15 +618,15 @@ void diffBragg_sum_over_steps(
                                 (k0- db_cryst.k_min) * db_cryst.l_range +
                                 (l0-db_cryst.l_min);
                 F_cell = db_cryst.FhklLinear[Fhkl_linear_index];
-                if (db_flags.track_Fhkl){
-                    std::string hkl_s ;
-                    hkl_s = std::to_string(h0) + ","+ std::to_string(k0) + "," + std::to_string(l0);
-                    if (Fhkl_tracker.count(hkl_s))
-                        Fhkl_tracker[hkl_s] += 1;
-                    else
-                        Fhkl_tracker[hkl_s] = 0;
-                    continue;
-                }
+                //if (db_flags.track_Fhkl){
+                //    std::string hkl_s ;
+                //    hkl_s = std::to_string(h0) + ","+ std::to_string(k0) + "," + std::to_string(l0);
+                //    if (Fhkl_tracker.count(hkl_s))
+                //        Fhkl_tracker[hkl_s] += 1;
+                //    else
+                //        Fhkl_tracker[hkl_s] = 1;
+                //    continue;
+                //}
                 if (db_flags.complex_miller) F_cell2 = db_cryst.Fhkl2Linear[Fhkl_linear_index];
                 if (db_flags.Fhkl_have_scale_factors)
                     i_hklasu = db_cryst.FhklLinear_ASUid[Fhkl_linear_index];
@@ -779,6 +779,15 @@ void diffBragg_sum_over_steps(
             }
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
+            if (db_flags.track_Fhkl){
+                std::string hkl_s ;
+                hkl_s = std::to_string(h0) + ","+ std::to_string(k0) + "," + std::to_string(l0);
+                if (Fhkl_tracker.count(hkl_s))
+                    Fhkl_tracker[hkl_s] += Iincrement;
+                else
+                    Fhkl_tracker[hkl_s] = Iincrement;
+                continue;
+            }
             if (db_flags.gradient_mode && db_flags.calc_sourceI_gradients){
                 double sourceI_deriv_scale = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar_for_Fhkl_grad/db_steps.Nsteps;
                 double dIincrement_dsourceI = Iincrement / s_sourceI * sourceI_deriv_scale;
@@ -1345,7 +1354,7 @@ void diffBragg_sum_over_steps(
         }
         if (db_flags.track_Fhkl){
             for(auto &x: Fhkl_tracker)
-                printf("Pixel %d: Fhkl linear index %s came up %d times\n", i_pix, x.first.c_str(), x.second);
+               printf("Pixel %d: Fhkl linear index %s came up %f times\n", i_pix, x.first.c_str(), x.second);
         }
     } // end i_pix loop
 

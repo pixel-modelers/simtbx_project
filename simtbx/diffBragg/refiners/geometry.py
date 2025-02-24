@@ -20,46 +20,11 @@ from simtbx.diffBragg import utils, hopper_utils, ensemble_refine_launcher
 from simtbx.diffBragg.refiners.parameters import RangedParameter, Parameters
 from simtbx.diffBragg import psf
 from simtbx.diffBragg.prep_stage2_input import prep_dataframe
+from simtbx.diffBragg.geom_utils import convolve_model_with_psf, detector_model_derivs, PAN_OFS_IDS, PAN_XYZ_IDS, update_detector
 from cctbx import miller
 
-# diffBragg internal indices for derivative manager
-ROTXYZ_ID = 0, 1, 2
-PAN_O_ID = 14
-PAN_F_ID = 17
-PAN_S_ID = 18
-PAN_X_ID = 15
-PAN_Y_ID = 16
-PAN_Z_ID = 10
-PAN_OFS_IDS = PAN_O_ID, PAN_F_ID, PAN_S_ID
-PAN_XYZ_IDS = PAN_X_ID, PAN_Y_ID, PAN_Z_ID
+
 DEG_TO_PI = np.pi / 180.
-
-def convolve_model_with_psf(model_pix, SIM, pan_fast_slow, roi_id_slices, roi_id_unique):
-
-    if not SIM.use_psf:
-        return model_pix
-    PSF = SIM.PSF
-    psf_args = SIM.psf_args
-
-    coords = pan_fast_slow.as_numpy_array()
-    fid = coords[1::3]
-    sid = coords[2::3]
-
-    for i in roi_id_unique:
-        for slc in roi_id_slices[i]:
-            fvals = fid[slc]
-            svals = sid[slc]
-            f0 = fvals.min()
-            s0 = svals.min()
-            f1 = fvals.max()
-            s1 = svals.max()
-            fdim = int(f1-f0+1)
-            sdim = int(s1-s0+1)
-            img = model_pix[slc].reshape((sdim, fdim))
-            img = psf.convolve_with_psf(img, psf=PSF, **psf_args)
-            model_pix[slc] = img.ravel()
-
-    return model_pix
 
 
 def get_dist_from_R(R):
@@ -148,23 +113,29 @@ class FhklParameter:
         self.scale = None
 
 class FhklParameters:
-    def __init__(self, SIM, hiasu):
+    def __init__(self, params, SIM, hiasu):
         self.parameters = []
         for h in hiasu.to_idx:
             assert h in SIM.asu_map_int
             for i_chan in range(SIM.num_Fhkl_channels):
                 asu_idx = SIM.asu_map_int[h]
-                is_centric = SIM.is_centric[asu_idx]
-                if is_centric and i_chan > 0: # only refine one energy channel Fhkl if its centric
-                    continue
+                #is_centric = SIM.is_centric[asu_idx]
+                #if is_centric and i_chan > 0: # only refine one energy channel Fhkl if its centric
+                #    continue
+                p = RangedParameter(name="Fhkl_%d,%d,%d_channel%d" % (h+ (i_chan,)),
+                                init=1,
+                                sigma=params.sigmas.Fhkl,  # TODO
+                                minval=0,
+                                maxval=1e7,
+                                fix=params.fix.Fhkl, center=None, beta=None, is_global=True)
 
-                p = FhklParameter()
+                #p = FhklParameter()
                 p.scale_idx = SIM.asu_map_int[h] + i_chan*SIM.Num_ASU
-                p.fix = False
-                if is_centric:
-                    p.name = "Fhkl_%d,%d,%d_centric" % h
-                else:
-                    p.name = "Fhkl_%d,%d,%d_channel%d" % (h+ (i_chan,))
+                #p.fix = False
+                #if is_centric:
+                #    p.name = "Fhkl_%d,%d,%d_centric" % h
+                #else:
+                #p.name = "Fhkl_%d,%d,%d_channel%d" % (h+ (i_chan,))
                 self.parameters.append(p)
 
 
@@ -242,7 +213,8 @@ class CrystalParameters:
                     slcs = Mod.roi_id_slices[roi_id]
                     assert len(slcs)==1
                     slc = slcs[0]
-                    init_scale = Mod.refls[ref_idx]["scale_factor"]
+                    #init_scale = Mod.refls[ref_idx]["scale_factor"]
+                    init_scale=1
                     Mod.per_roi_scales_per_pix[slc] =init_scale
                 else:
                     init_scale = 1
@@ -298,13 +270,26 @@ def hkl_vary_flags(SIM):
     num_fhkl_param = SIM.Num_ASU*SIM.num_Fhkl_channels
     fhkl_vary = np.ones(num_fhkl_param, int)
 
-    if SIM.num_Fhkl_channels > 1:
-        assert SIM.is_centric is not None
-        for i_chan in range(1, SIM.num_Fhkl_channels):
-            channel_slc = slice(i_chan*SIM.Num_ASU, (i_chan+1) *SIM.Num_ASU, 1)
-            np.subtract.at(fhkl_vary, channel_slc, SIM.is_centric.astype(int))
+    #if SIM.num_Fhkl_channels > 1:
+    #    assert SIM.is_centric is not None
+    #    for i_chan in range(1, SIM.num_Fhkl_channels):
+    #        channel_slc = slice(i_chan*SIM.Num_ASU, (i_chan+1) *SIM.Num_ASU, 1)
+    #        np.subtract.at(fhkl_vary, channel_slc, SIM.is_centric.astype(int))
     return fhkl_vary.astype(bool)
 
+class TakeStep:
+    def __init__(self, paramList):
+        self.LP = paramList
+        self.stepsize=0.5
+
+    def __call__(self, x):
+        #new_x = np.random.normal(x, scale=self.stepsize)
+        new_x = np.random.uniform(x-self.stepsize, x+self.stepsize)
+        for name in self.LP:
+            if name.startswith("Fhkl"):
+                p = self.LP[name]
+                new_x[p.xpos] = x[p.xpos]
+        return new_x
 
 class Target:
     def __init__(self, ref_params, save_state_freq=500, overwrite_state=True, plot=False):
@@ -339,7 +324,7 @@ class Target:
         self.x0[self.vary] = x
         #time_per_iter = (time.time()-self.tstart) / self.iternum
 
-        f, self.g, self.sigmaZ = target_and_grad(self.x0, self.ref_params, *args, **kwargs)
+        f, self.g, self.sigmaZ = target_and_grad(self.x0, self.ref_params, iternum=self.iternum, *args, **kwargs)
         t = time.time()-t
         if COMM.rank==0:
             self.all_times.append(t)
@@ -373,6 +358,7 @@ class Target:
     def at_min_callback(self, x, f, accept):
         if COMM.rank==0:
             print("Final Iteration %d:\n\tResid=%f, sigmaZ %f" % (self.iternum, f, self.sigmaZ))
+
 
 
 def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
@@ -414,8 +400,10 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
         for name in ref_params:
             if name.startswith("Fhkl"):
                 p = ref_params[name]
-                current_Fhkl_xvals[p.scale_idx] = x[p.xpos]
-        SIM.Fhkl_scales = SIM.Fhkl_scales_init * np.exp(Modeler.params.sigmas.Fhkl *(current_Fhkl_xvals-1))
+                #current_Fhkl_xvals[p.scale_idx] = x[p.xpos]
+                current_Fhkl_xvals[p.scale_idx] = p.get_val(x[p.xpos])
+        #SIM.Fhkl_scales = SIM.Fhkl_scales_init * np.exp(Modeler.params.sigmas.Fhkl *(current_Fhkl_xvals-1))
+        SIM.Fhkl_scales = current_Fhkl_xvals
         SIM.D.update_Fhkl_scale_factors(SIM.Fhkl_scales, SIM.num_Fhkl_channels)
 
     # update the rotational mosaicity here
@@ -519,7 +507,8 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     neg_LL = (.5*(np.log(2*np.pi*V) + resid_square / V))[Modeler.all_trusted].sum()
 
     # compute the z-score sigma as a diagnostic
-    zscore_sigma = np.std((resid / np.sqrt(V))[Modeler.all_trusted])
+    Modeler.all_zscore =  resid/np.sqrt(V)  # important to set all_zscore so we can filter.. 
+    zscore_sigma = np.std(Modeler.all_zscore[Modeler.all_trusted])
 
     # store the gradients
     J = {}
@@ -611,29 +600,34 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
             J[pr.name] = (common_grad_term*d)[Modeler.all_trusted].sum()
 
     # detector model gradients
-    detector_derivs = []
-    for diffbragg_parameter_id in PAN_OFS_IDS+PAN_XYZ_IDS:
-        try:
-            d = SIM.D.get_derivative_pixels(diffbragg_parameter_id).as_numpy_array()[:npix]
-            d = convolve_model_with_psf(d, **conv_args)
-            d = common_grad_term*scale*d
-        except ValueError:
-            d = None
-        detector_derivs.append(d)
-    names = "RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"
-    for group_id in Modeler.unique_panel_group_ids:
-        for name in names:
-            J["group%d_%s" % (group_id, name)] = 0
-        for pixel_rng in Modeler.group_id_slices[group_id]:
-            trusted_pixels = Modeler.all_trusted[pixel_rng]
-            for i_name, name in enumerate(names):
-                par_name = "group%d_%s" % (group_id, name)
-                det_param = ref_params[par_name]
-                if det_param.fix:
-                    continue
-                pixderivs = detector_derivs[i_name][pixel_rng][trusted_pixels]
-                pixderivs = det_param.get_deriv(x[det_param.xpos], pixderivs)
-                J[par_name] += pixderivs.sum()
+    det_Jac = detector_model_derivs(Modeler, ref_params, SIM, x,
+                                    scale=scale, common_grad_term=common_grad_term, conv_args=conv_args)
+    for key in det_Jac:
+        J[key] = det_Jac[key]
+
+    #detector_derivs = []
+    #for diffbragg_parameter_id in PAN_OFS_IDS+PAN_XYZ_IDS:
+    #    try:
+    #        d = SIM.D.get_derivative_pixels(diffbragg_parameter_id).as_numpy_array()[:npix]
+    #        d = convolve_model_with_psf(d, **conv_args)
+    #        d = common_grad_term*scale*d
+    #    except ValueError:
+    #        d = None
+    #    detector_derivs.append(d)
+    #names = "RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"
+    #for group_id in Modeler.unique_panel_group_ids:
+    #    for name in names:
+    #        J["group%d_%s" % (group_id, name)] = 0
+    #    for pixel_rng in Modeler.group_id_slices[group_id]:
+    #        trusted_pixels = Modeler.all_trusted[pixel_rng]
+    #        for i_name, name in enumerate(names):
+    #            par_name = "group%d_%s" % (group_id, name)
+    #            det_param = ref_params[par_name]
+    #            if det_param.fix:
+    #                continue
+    #            pixderivs = detector_derivs[i_name][pixel_rng][trusted_pixels]
+    #            pixderivs = det_param.get_deriv(x[det_param.xpos], pixderivs)
+    #            J[par_name] += pixderivs.sum()
 
     if SIM.refining_sourceI:
         Gscale = G.get_val(x[G.xpos])
@@ -662,7 +656,7 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
         #        else:
         #            J[name] = sourceI_grad[p.scale_idx]
 
-    if SIM.refining_Fhkl:
+    if SIM.refining_Fhkl and not Modeler.params.method=="Nelder-Mead":#  and Modeler.params.method=="L-BFGS-B":
         Gscale = G.get_val(x[G.xpos])
         fhkl_grad = SIM.D.add_Fhkl_gradients(Modeler.pan_fast_slow, resid, V, Modeler.all_trusted,
                                              Modeler.all_freq, SIM.num_Fhkl_channels, Gscale)
@@ -673,14 +667,18 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
         #        fhkl_slice = slice(i_chan * SIM.Num_ASU, (i_chan + 1) * SIM.Num_ASU, 1)
         #        np.add.at(fhkl_grad, fhkl_slice, restraint_contribution_to_grad)
 
-        fhkl_grad *= SIM.Fhkl_scales * Modeler.params.sigmas.Fhkl  # sigma is always 1 for now..
+        #fhkl_grad *= SIM.Fhkl_scales * Modeler.params.sigmas.Fhkl  # sigma is always 1 for now..
+        
         for name in ref_params:
             if name.startswith("Fhkl"):
                 p = ref_params[name]
+                p_g = p.get_deriv(x[p.xpos], fhkl_grad[p.scale_idx])
                 if name in J:
-                    J[name] += fhkl_grad[p.scale_idx]
+                    #J[name] += fhkl_grad[p.scale_idx]
+                    J[name] += p_g 
                 else:
-                    J[name] = fhkl_grad[p.scale_idx]
+                    #J[name] = fhkl_grad[p.scale_idx]
+                    J[name] = p_g
 
     return neg_LL, J, model_pix, zscore_sigma
 
@@ -706,69 +704,10 @@ def set_group_id_slices(Modeler, group_id_from_panel_id):
     Modeler.group_id_slices = group_id_slices
 
 
-def update_detector(x, ref_params, SIM, save=None):
-    """
-    Update the internal geometry of the diffBragg instance
-    :param x: refinement parameters as seen by scipy.optimize (e.g. rescaled floats)
-    :param ref_params: diffBragg.refiners.Parameters (dict of RangedParameters)
-    :param SIM: SIM instance (instance of nanoBragg.sim_data.SimData)
-    :param save: optional name to save the detector
-    """
-    det = SIM.detector
-    if save is not None:
-        new_det = Detector()
-    for pid in range(len(det)):
-        panel = det[pid]
-        panel_dict = panel.to_dict()
-
-        group_id = SIM.panel_group_from_id[pid]
-        if group_id not in SIM.panel_groups_refined:
-            fdet = panel.get_fast_axis()
-            sdet = panel.get_slow_axis()
-            origin = panel.get_origin()
-        else:
-
-            Oang_p = ref_params["group%d_RotOrth" % group_id]
-            Fang_p = ref_params["group%d_RotFast" % group_id]
-            Sang_p = ref_params["group%d_RotSlow" % group_id]
-            Xdist_p = ref_params["group%d_ShiftX" % group_id]
-            Ydist_p = ref_params["group%d_ShiftY" % group_id]
-            Zdist_p = ref_params["group%d_ShiftZ" % group_id]
-
-            Oang = Oang_p.get_val(x[Oang_p.xpos])
-            Fang = Fang_p.get_val(x[Fang_p.xpos])
-            Sang = Sang_p.get_val(x[Sang_p.xpos])
-            Xdist = Xdist_p.get_val(x[Xdist_p.xpos])
-            Ydist = Ydist_p.get_val(x[Ydist_p.xpos])
-            Zdist = Zdist_p.get_val(x[Zdist_p.xpos])
-
-            origin_of_rotation = SIM.panel_reference_from_id[pid]
-            SIM.D.reference_origin = origin_of_rotation
-            SIM.D.update_dxtbx_geoms(det, SIM.beam.nanoBragg_constructor_beam, pid,
-                                     Oang, Fang, Sang, Xdist, Ydist, Zdist,
-                                     force=False)
-            fdet = SIM.D.fdet_vector
-            sdet = SIM.D.sdet_vector
-            origin = SIM.D.get_origin()
-
-        if save is not None:
-            panel_dict["fast_axis"] = fdet
-            panel_dict["slow_axis"] = sdet
-            panel_dict["origin"] = origin
-            new_det.add_panel(Panel.from_dict(panel_dict))
-
-    if save is not None and COMM.rank==0:
-        t = time.time()
-        El = ExperimentList()
-        E = Experiment()
-        E.detector = new_det
-        El.append(E)
-        El.as_file(save)
-        t = time.time()-t
-        #print("Saved detector model to %s (took %.4f sec)" % (save, t), flush=True )
 
 
-def target_and_grad(x, ref_params, data_modelers, SIM, params):
+
+def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
     """
     Returns the target functional and the gradients
     :param x: float array of parameter values as seen by scipt.optimize (rescaled)
@@ -782,7 +721,7 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params):
     grad = np.zeros(len(x))
 
     save_name = params.geometry.optimized_detector_name
-    update_detector(x, ref_params, SIM, save_name)
+    update_detector(x, ref_params, SIM, save_name, rank=COMM.rank)
 
     all_shot_sigZ = []
     if SIM.refining_Fhkl:
@@ -798,6 +737,11 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params):
         SIM.update_Fhkl_scales = False
         SIM.update_sourceI_scales = False
         all_shot_sigZ.append(per_shot_sigZ)
+
+        # filter during refinement?
+        if Modeler.params.filter_during_refinement.enable and iternum > 0:
+            if iternum % Modeler.params.filter_during_refinement.after_n == 0:
+                Modeler.filter_pixels(thresh=Modeler.params.filter_during_refinement.threshold)
 
         # accumulate the target functional for this rank/shot
         target_functional += neg_LL
@@ -890,16 +834,18 @@ def geom_min(params):
     from simtbx.diffBragg import mpi_logger
     mpi_logger.setup_logging_from_params(params)
     df.reset_index(drop=True, inplace=True)
-    exps,refs, exp_idxs = [],[],[]
-    for line in df.hopper_line:
-        exp, ref, exp_idx, spec = hopper_utils.split_line(line)
-        exps.append(exp)
-        refs.append(ref)
-        exp_idxs.append(exp_idx)
-    df["geom_exp"] = exps
-    df["geom_exp_idx"] = exp_idxs
-    df["geom_ref"] = refs
-    df, work_distribution = prep_dataframe(df, res_ranges_string=params.refiner.res_ranges, refls_key="geom_ref")
+    #if "geom_exp" not in df:
+    #    exps,refs, exp_idxs = [],[],[]
+    #    for line in df.hopper_line:
+    #        exp, ref, exp_idx, spec = hopper_utils.split_line(line)
+    #        exps.append(exp)
+    #        refs.append(ref)
+    #        exp_idxs.append(exp_idx)
+    #    df["geom_exp"] = exps
+    #    df["geom_exp_idx"] = exp_idxs
+    #    df["geom_ref"] = refs
+    df, work_distribution = prep_dataframe(df, res_ranges_string=params.refiner.res_ranges, refls_key="geom_ref",
+                                           exp_idx_key="geom_exp_idx", exp_key="geom_exp")
     launcher.load_inputs(df, refls_key="geom_ref", exp_key="geom_exp",
                          exp_idx_key="geom_exp_idx",
                          work_distribution=work_distribution)
@@ -923,7 +869,7 @@ def geom_min(params):
     for p in crystal_params.parameters + det_params.parameters + beam_params.parameters:
         LMP.add(p)
     if launcher.SIM.refining_Fhkl:
-        fhkl_params = FhklParameters(launcher.SIM, launcher.hiasu)
+        fhkl_params = FhklParameters(params, launcher.SIM, launcher.hiasu)
         print("ADDING %d FHKL parameters!" % len(fhkl_params.parameters))
         for p in fhkl_params.parameters:
             LMP.add(p)
@@ -984,10 +930,12 @@ def geom_min(params):
                  "args": fcn_args,
                  "options":  {"ftol": params.ftol, "gtol": 1e-10, "maxfun":1e5, "maxiter":params.lbfgs_maxiter}}
 
+
     result = basinhopping(target, target.x0[target.vary],
                           niter=params.niter,
                           minimizer_kwargs=lbfgs_kws,
                           T=params.temp,
+                          take_step=TakeStep,
                           callback=target.at_min_callback,
                           disp=False,
                           stepsize=params.stepsize)
@@ -1004,7 +952,8 @@ def geom_min(params):
 
 
 def save_opt_sourceI(params, SIM, tag="current"):
-    assert hasattr(SIM, "sourceI_scales")
+    if not hasattr(SIM, "sourceI_scales"):
+        return
     nsource = len(SIM.beam.xray_beams)
     assert len(SIM.sourceI_scales) == nsource
     sourceI_orig, sourceI_scaled = [],[]

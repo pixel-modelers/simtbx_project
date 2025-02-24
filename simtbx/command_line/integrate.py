@@ -406,8 +406,8 @@ if __name__=="__main__":
                 spectrum_override = None
                 if params.spectrum_from_imageset:
                     spectrum_override = downsamp_spec_from_params(params, data_expt)
-                pred,_ = predictions.get_predicted_from_pandas(
-                    df, params, strong=None, device_Id=dev, spectrum_override=spectrum_override)
+                pred, model_out = predictions.get_predicted_from_pandas(
+                    df, params, strong=None, device_Id=dev, spectrum_override=spectrum_override, return_model=True)
                 if args.filterDupes:
                     pred = predictions.filter_refls(pred)
             except Exception as err:
@@ -425,7 +425,14 @@ if __name__=="__main__":
 
             Rstrong.centroid_px_to_mm(data_exptList)
             Rstrong.map_centroids_to_reciprocal_space(data_exptList)
-            predictions.label_weak_predictions(pred, Rstrong, q_cutoff=params.predictions.qcut, col=params.predictions.label_weak_col )
+            if len(pred) == 0:
+                print(f"No reflections for {expt_name},  idx={expt_idx} ")
+                continue
+            try:
+                predictions.label_weak_predictions(pred, Rstrong, q_cutoff=params.predictions.qcut, col=params.predictions.label_weak_col )
+            except Exception as err:
+                print("WARNING::::!!!", str(err))
+                continue
 
             pred['is_strong'] = flex.bool(np.logical_not(pred['is_weak']))
             strong_sel = np.logical_not(pred['is_weak'])
@@ -470,14 +477,28 @@ if __name__=="__main__":
                 print("No strong indexed refls for shot %s" % expt_name)
                 continue
 
-            utils.refls_to_hkl(Rindexed, data_expt.detector, data_expt.beam, data_expt.crystal, update_table=True)
+            if params.predictions.laue_mode:
+                (_, wavelen_images, h_images, k_images, l_images,SIM), expt = model_out
+                # need to alter rlp according to wavelength ?
+                Rindexed['rlp'] *= data_expt.beam.get_wavelength()
+                spot_wave, updated_hkl, wave_sel = predictions.get_spot_wave(Rindexed, data_expt, wavelen_images, h_images, k_images, l_images)
+                Rindexed['ave_wavelen'] = spot_wave
+                Rindexed['rlp'] /= Rindexed['ave_wavelen']
+                Rindexed['miller_index'] = updated_hkl
+                Rindexed = Rindexed.select(wave_sel)
+            else:
+                _, SIM = model_out
+                utils.refls_to_hkl(Rindexed, data_expt.detector, data_expt.beam, data_expt.crystal, update_table=True)
+            hopper_utils.free_SIM_mem(SIM)
+
             if args.dialsInteg:
                 # TODO: save these files as multi-shot experiment/refls
                 try:
                     int_expt, int_refl = integrate(args.procPhil, data_exptList, Rindexed, pred)
-                    #int_expt_name = "%s/%s_%d_integrated.expt" % (rank_outdir, tag, i_f)
-                    # TODO:check whether this works...
-                    int_expt_name = "%s/%s_%d_integrated.expt" % (EXPT_DIRS, tag, i_f)
+                    new_expt_id = "%s-%d" % (tag, i_f)
+                    int_expt[0].identifier = new_expt_id
+                    int_refl.experiment_identifiers()[0] = new_expt_id
+                    int_expt_name = "%s/%s_integrated.expt" % (EXPT_DIRS, new_expt_id)
                     int_expt.as_file(int_expt_name)
                     #int_refl['bbox'] = int_refl['shoebox'].bounding_boxes()
                     int_refl_name = int_expt_name.replace(".expt", ".refl")

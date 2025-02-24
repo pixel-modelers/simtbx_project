@@ -312,7 +312,7 @@ class RefineLauncher:
                 opt_real_c = opt_O[2], opt_O[5], opt_O[8]
                 opt_C_sg = Crystal(opt_real_a,opt_real_b,opt_real_c,Fhkl_model.space_group())
                 opt_A = np.reshape(sqr(opt_C_sg.get_A()).inverse().elems, (3,3))
-                
+
                 new_miller_inds = np.dot( A2, np.dot(np.linalg.inv(opt_A),miller_inds.T)).T
                 new_miller_inds = np.round(new_miller_inds, 0).astype(np.int32) 
 
@@ -326,7 +326,7 @@ class RefineLauncher:
                     LOGGER.warning("!!!!!!!!!!!!!!!!!! %d HKLS changed upon shifting to the global unit cell. Removing those from refinement" % nchanged)
                 refl_sel = flex.bool(is_not_000) & flex.bool(is_in_Fhkl_model) & flex.bool(is_not_changed)
                 refls = refls.select(refl_sel)
-            except KeyError:
+            except (ValueError,KeyError):
                 pass
 
             LOGGER.info("EVENT: LOADING ROI DATA")

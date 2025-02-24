@@ -314,7 +314,10 @@ class Script:
                             setattr(self.params.fix, fix_name, [1,1,1])
                         else:
                             setattr(self.params.fix, fix_name, True)
+                    self.params.geometry.fix.panel_rotations=[1,1,1]
+                    self.params.geometry.fix.panel_translations=[1,1,1]
                     self.params.fix.perRoiScale = False
+                    self.params.niter=0
                     Modeler.params = self.params
                     Modeler.set_parameters_for_experiment(best)
                     new_x = np.array([1.]*len(Modeler.P))
@@ -322,10 +325,12 @@ class Script:
                         new_p = Modeler.P[name]
                         old_p = old_P[name]
                         new_x[new_p.xpos] = x[old_p.xpos]
-                        assert not new_p.refine
+                        if not name.startswith("scale_roi"):
+                            assert not new_p.refine
 
                     x = Modeler.Minimize(new_x, SIM, i_shot=i_shot)
 
+                    # set the roi_scale factors here on the reflection tables:
                     # reset the params
                     self.params = old_params
 
@@ -338,7 +343,10 @@ class Script:
                             Modeler.clean_up(SIM)
                             continue
 
-                    # Then repeat minimization, fixing roi fits
+                    # TODO set refined refl scale factors here
+                    # Then repeat minimization
+                    self.params.use_perRoiScale = True
+                    self.params.fix.perRoiScale = True
                     Modeler.params = self.params
                     old_P = deepcopy(Modeler.P)
                     Modeler.set_parameters_for_experiment(best)
@@ -348,6 +356,14 @@ class Script:
                         old_p = old_P[name]
                         new_x[new_p.xpos] = x[old_p.xpos]
                     x = Modeler.Minimize(new_x, SIM, i_shot=i_shot)
+
+                    #use_cuda = os.environ["DIFFBRAGG_USE_CUDA"]
+                    #del os.environ["DIFFBRAGG_USE_CUDA"]
+                    #tracked_fhkl = utils.track_fhkl(Modeler, SIM)
+                    #os.environ['DIFFBRAGG_USE_CUDA'] = use_cuda
+                    #from IPython import embed;embed()
+                    #self.params.fix.perRoiScale = True
+                    #Modeler.params.fix.perRoiScale = True
 
             except StopIteration:
                 x = Modeler.target.x0
@@ -373,9 +389,15 @@ class Script:
             dbg = self.params.debug_mode
             if dbg and COMM.rank > 0 and self.params.debug_mode_rank0_only:
                 dbg = False
+            save_refl = dbg or self.params.save_perRoiScale
+            save_expt = dbg or self.params.save_perRoiScale
             shot_df = Modeler.save_up(x, SIM, rank=COMM.rank, i_shot=i_shot,
-                            save_fhkl_data=dbg, save_refl=dbg, save_modeler_file=dbg,
-                            save_sim_info=dbg, save_pandas=dbg, save_traces=dbg, save_expt=dbg)
+                            save_fhkl_data=dbg, save_refl=save_refl, save_modeler_file=dbg,
+                            save_sim_info=dbg, save_pandas=dbg, save_traces=dbg, save_expt=save_expt,
+                            checker=CHECKER)
+            #shot_df = shot_out["df"]
+            #shot_expt = shot_out["expt"]
+            #shot_refl = shot_out["refl"]
 
             #if self.params.predictions.integrate_phil is not None:
             do_integrate = self.params.predictions.integrate_phil is not None
@@ -673,7 +695,7 @@ class Script:
 
 def save_composite_files(dfs, expts, refls, refls_int, pd_dir, exp_ref_dir, chunk=0):
     df_name = os.path.join(pd_dir, "hopper_results_rank%d_chunk%d.pkl" % (COMM.rank, chunk))
-    expt_name = os.path.join(exp_ref_dir, "hopper_rank%d_chunk%d.expt" % (COMM.rank,chunk))
+    expt_name = os.path.join(exp_ref_dir, "hopper_rank%d_chunk%d_integrated.expt" % (COMM.rank,chunk))
     int_name = os.path.join(exp_ref_dir, "hopper_rank%d_chunk%d_integrated.refl" % (COMM.rank,chunk))
     idx_name = os.path.join(exp_ref_dir, "hopper_rank%d_chunk%d.refl" % (COMM.rank,chunk))
     if dfs:

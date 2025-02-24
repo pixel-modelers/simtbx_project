@@ -4,6 +4,9 @@ import os
 import json
 from copy import deepcopy
 import pandas
+from simtbx.diffBragg.geom_utils import detector_model_derivs, update_detector
+from simtbx.diffBragg.geom_utils import PAN_OFS_IDS, PAN_XYZ_IDS
+from xfel.poly.recompute_mosaic_params import extract_mosaic_parameters_using_lambda_spread
 
 from simtbx.diffBragg import hopper_io
 import numpy as np
@@ -993,7 +996,7 @@ class DataModeler:
                           beta=betas.gonio_angle)
         P.add(p)
 
-        if not self.params.fix.perRoiScale:
+        if not self.params.fix.perRoiScale or self.params.use_perRoiScale:
             self.set_slices("roi_id")  # this creates roi_id_unique
             refls_have_scales = "scale_factor" in list(self.refls.keys())
             for roi_id in self.roi_id_unique:
@@ -1008,11 +1011,14 @@ class DataModeler:
                                   fix=fix.perRoiScale, name="scale_roi%d" % roi_id,
                                   center=1,
                                   beta=1e12)
+                #p.misc_data = {"refl_idx": refl_idx}
                 if isinstance(self.all_q_perpix, np.ndarray) and self.all_q_perpix.size:
                     q = self.all_q_perpix[slc][0]
                     reso = 1./q
                     hkl = self.all_nominal_hkl[slc][0]
-                    p.misc_data = reso, hkl
+                    p.misc_data={}
+                    p.misc_data["reso"]= reso
+                    p.misc_data["hkl"]=hkl
                 P.add(p)
 
         # two parameters for optimizing the spectrum
@@ -1026,6 +1032,53 @@ class DataModeler:
                             name="lambda_scale", center=centers.spec[1] if centers.spec is not None else None,
                             beta=betas.spec[1] if betas.spec is not None else None)
         P.add(p)
+
+        GEO = self.params.geometry
+        DEG_TO_PI = np.pi/180
+        vary_rots = [not fixed_flag for fixed_flag in GEO.fix.panel_rotations]
+        o = RangedParameter(name="group0_RotOrth",
+                            init=0,
+                            sigma=1,  # TODO
+                            minval=GEO.min.panel_rotations[0] * DEG_TO_PI,
+                            maxval=GEO.max.panel_rotations[0] * DEG_TO_PI,
+                            fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
+
+        f = RangedParameter(name="group0_RotFast",
+                            init=0,
+                            sigma=1,  # TODO
+                            minval=GEO.min.panel_rotations[1] * DEG_TO_PI,
+                            maxval=GEO.max.panel_rotations[1] * DEG_TO_PI,
+                            fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
+                            is_global=True)
+
+        s = RangedParameter(name="group0_RotSlow",
+                            init=0,
+                            sigma=1,  # TODO
+                            minval=GEO.min.panel_rotations[2] * DEG_TO_PI,
+                            maxval=GEO.max.panel_rotations[2] * DEG_TO_PI,
+                            fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
+                            is_global=True)
+
+        vary_shifts = [not fixed_flag for fixed_flag in GEO.fix.panel_translations]
+        # vary_shifts = [True]*3
+        x = RangedParameter(name="group0_ShiftX", init=0,
+                            sigma=1,
+                            minval=GEO.min.panel_translations[0] * 1e-3, maxval=GEO.max.panel_translations[0] * 1e-3,
+                            fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
+                            is_global=True)
+        y = RangedParameter(name="group0_ShiftY", init=0,
+                            sigma=1,
+                            minval=GEO.min.panel_translations[1] * 1e-3, maxval=GEO.max.panel_translations[1] * 1e-3,
+                            fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
+                            is_global=True)
+        z = RangedParameter(name="group0_ShiftZ", init=0,
+                            sigma=1,
+                            minval=GEO.min.panel_translations[2] * 1e-3, maxval=GEO.max.panel_translations[2] * 1e-3,
+                            fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
+                            is_global=True)
+        for p in [o,f,s,x,y,z]:
+            P.add(p)
+        P.refining_detector = any(vary_rots + vary_shifts)
 
         # iterating over this dict is time-consuming when refinine Fhkl, so we split up the names here:
         self.non_fhkl_params = [name for name in P if not name.startswith("scale_roi") and not name.startswith("Fhkl_")]
@@ -1148,7 +1201,7 @@ class DataModeler:
 
         maxfev = None
         if self.params.nelder_mead_maxfev is not None:
-            maxfev = self.params.nelder_mead_maxfev * self.npix_total
+            maxfev = self.params.nelder_mead_maxfev #* self.npix_total
 
         at_min = None
         if self.params.logging.show_params_at_minimum:
@@ -1172,6 +1225,10 @@ class DataModeler:
                 SIM.D.refine(ROTZ_ID)
             if self.P["Nabc0"].refine:
                 SIM.D.refine(NCELLS_ID)
+            for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
+                pname = f"group0_{name}"
+                if pname in self.P and self.P[pname].refine:
+                    SIM.D.refine(db_id)
             if self.P["Ndef0"].refine:
                 SIM.D.refine(NCELLS_ID_OFFDIAG)
             if self.P["ucell0"].refine:
@@ -1195,7 +1252,7 @@ class DataModeler:
         else:
             min_kwargs = {'args': (self,SIM, False), "method": method,
                           'callback': callback,
-                          'options': {'maxfev': maxfev,
+                          'options': {'maxiter': maxfev, 'adaptive': True,
                                       'fatol': self.params.nelder_mead_fatol}}
 
         if self.params.global_method=="basinhopping":
@@ -1330,7 +1387,7 @@ class DataModeler:
                 save_refl=True,
                 save_sim_info=True,
                 save_traces=True,
-                save_pandas=True, save_expt=True):
+                save_pandas=True, save_expt=True, checker=None):
         """
 
         :param x: l-bfgs refinement parameters (reparameterized, e.g. unbounded)
@@ -1350,7 +1407,11 @@ class DataModeler:
         assert self.refl_name is not None
         Modeler = self
         LOGGER = logging.getLogger("refine")
-        Modeler.best_model, _ = model(x, Modeler, SIM,  compute_grad=False)
+        if not Modeler.params.fix.perRoiScale or Modeler.params.use_perRoiScale:
+            Modeler.best_model, opt_Jac = model(x, Modeler, SIM,  compute_grad=True, dont_rescale_gradient=True)
+            variance_s = get_variance_s(Modeler, opt_Jac)
+        else:
+            Modeler.best_model, _ = model(x, Modeler, SIM, compute_grad=False)
         Modeler.best_model_includes_background = False
         LOGGER.info("Optimized values for i_shot %d:" % i_shot)
 
@@ -1446,6 +1507,10 @@ class DataModeler:
             Modeler.best_model_includes_background = False
 
         if save_refl:
+
+            Fp1 = SIM.D.Fhkl  # crystal.miller_array
+            Fp1_map = {h: amp for h, amp in zip(Fp1.indices(), Fp1.data())}
+
             rank_refls_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "refls", rank)
             new_refls_file = os.path.join(rank_refls_outdir, "%s_%s_%d_%d.refl"
                                           % (Modeler.params.tag, basename, i_shot, self.exper_idx))
@@ -1454,8 +1519,14 @@ class DataModeler:
             if has_xyzcal:
                 new_refls['dials.xyzcal.px'] = deepcopy(new_refls['xyzcal.px'])
             per_refl_scales = flex.double(len(new_refls), 1)
+            per_refl_variance_s = flex.double(len(new_refls), 1)
+            per_refl_dbI = flex.double(len(new_refls),1)
+            per_refl_dbIvar= flex.double(len(new_refls),1)
+            per_refl_scores = flex.double(len(new_refls), -1)
+            per_refl_ntrust = flex.int(len(new_refls), -1)
+            per_refl_sigz = flex.double(len(new_refls), -1)
             new_xycalcs = flex.vec3_double(len(Modeler.refls), (np.nan, np.nan, np.nan))
-            sigmaZs = []
+            #sigmaZs = []
             for i_roi in range(len(data_subimg)):
                 dat = data_subimg[i_roi]
                 fit = model_subimg[i_roi]
@@ -1468,8 +1539,7 @@ class DataModeler:
                 sigmaZ = np.nan
                 if np.any(trust):
                     sigmaZ = Z[trust].std()
-
-                sigmaZs.append(sigmaZ)
+                #sigmaZs.append(sigmaZ)
                 if bragg_subimg[0] is not None:
                     if np.any(bragg_subimg[i_roi] > 0):
                         ref_idx = Modeler.refls_idx[i_roi]
@@ -1493,17 +1563,78 @@ class DataModeler:
                         ycom = (Y * I).sum() / Isum
                         com = xcom + .5, ycom + .5, 0
                         new_xycalcs[ref_idx] = com
-                        if not Modeler.params.fix.perRoiScale:
+                        if not Modeler.params.fix.perRoiScale or Modeler.params.use_perRoiScale:
                             scale_p = Modeler.P["scale_roi%d" % i_roi]
-                            per_refl_scales[ref_idx] = scale_p.get_val(x[scale_p.xpos])
+                            scale = scale_p.get_val(x[scale_p.xpos])
+                            scale_var = variance_s[scale_p.xpos]
+                            per_refl_scales[ref_idx] = scale
+                            per_refl_variance_s[ref_idx] = scale_var
+                            if "miller_index" in new_refls:
+                                h,k,l = new_refls["miller_index"][ref_idx]
+                                Famp = Fp1_map[(h,k,l)]
+                                I_hkl = (Famp**2) *scale
+                                Ivar_hkl = (I_hkl/scale)**2 * scale_var
+                                per_refl_dbI[ref_idx] = I_hkl
+                                per_refl_dbIvar[ref_idx] = Ivar_hkl
+
+                        if checker is not None:
+                            score = checker.score(dat, fit)
+                            per_refl_scores[ref_idx] = score
+                        per_refl_ntrust[ref_idx] = int(trust.sum())
+                        per_refl_sigz[ref_idx] = sigmaZ
 
             new_refls["xyzcal.px"] = new_xycalcs
-            if not Modeler.params.fix.perRoiScale:
-                new_refls["scale_factor"] = per_refl_scales
+            new_refls["scores"] = per_refl_scores
+            new_refls["ntrust"] = per_refl_ntrust
+            new_refls["sigz"] = per_refl_sigz
+            new_refls["scale_factor"] = per_refl_scales
+            new_refls["intensity.db.value"] = per_refl_dbI
+            new_refls["intensity.db.variance"] = per_refl_dbIvar
+            # TODO : convert to xyzcal.px and xyzobx.px.value to mm
+
+            # try to set new deltapsi.cal
+            E = deepcopy(Modeler.E)
+            E.crystal.set_A(shot_df.Amats.values[0])
+            new_refls["deff"] = flex.double(len(new_refls), -1)
+            new_refls["eta_eff"] = flex.double(len(new_refls), -1)
+            new_refls["dpsi.new"] = flex.double(len(new_refls), 0)
+            for _ in range(10):
+                try:
+                  _, dpsi_new, deff, eta_eff = extract_mosaic_parameters_using_lambda_spread(
+                            E, new_refls, verbose=False, Deff_init=np.random.uniform(100,900))
+                  new_refls["dpsi.new"] = dpsi_new
+                  new_refls["deff"] = flex.double(len(new_refls), deff)
+                  new_refls["eta_eff"] = flex.double(len(new_refls), eta_eff)
+                  break
+                except Exception as err:
+                    pass
+                    #if "Model has diverged" in str(err):
+                    #    continue
             if Modeler.params.filter_unpredicted_refls_in_output:
                 sel = [not np.isnan(x) for x, y, z in new_xycalcs]
                 new_refls = new_refls.select(flex.bool(sel))
-            new_refls.as_file(new_refls_file)
+
+            # filter the diffBragg intensities for wild outliers
+            if not Modeler.params.fix.perRoiScale or Modeler.params.use_perRoiScale:
+                val = new_refls['intensity.db.value'].as_numpy_array()
+                var = new_refls['intensity.db.variance'].as_numpy_array()
+                is_inf_var = np.isinf(var)
+                is_one_val = val==1
+                is_zero_val = val==0
+                is_large_var = var > 1e20
+                goodies = (~is_zero_val) * (~is_inf_var) * (~is_one_val) * (~is_large_var)
+                #baddies = np.logical_or(~is_one_val, ~is_inf_var)
+                #goodies = ~baddies
+                new_refls = new_refls.select(flex.bool(goodies))
+            eid = new_refls.experiment_identifiers()
+            eid_key = list(set(new_refls['id']))
+            if len(eid_key) == 1:
+                eid_key = eid_key[0]
+                eid[eid_key] = new_refls_file
+                new_refls.as_file(new_refls_file)
+                shot_df["save_up_refls"] = os.path.abspath(new_refls_file)
+            else:
+                shot_df["save_up_refls"] = ""
 
         if save_modeler_file:
             rank_imgs_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "imgs", rank)
@@ -1612,6 +1743,14 @@ def print_params(Mod, x):
 def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_spectrum=False,
           update_Fhkl_scales=True):
 
+    if Mod.P.refining_detector:
+        if not hasattr(SIM, "panel_group_from_id"):
+            SIM.panel_group_from_id = {0:0}
+            SIM.panel_groups_refined = {0}
+            SIM.panel_reference_from_id = {0: deepcopy(SIM.detector[0].get_origin())}
+            Mod.group_id_slices = {0: [slice(0, len(Mod.all_data), 1)]}
+            Mod.unique_panel_group_ids = {0}
+        update_detector(x, Mod.P, SIM)
     if Mod.params.logging.parameters:
         print_params(Mod, x)
 
@@ -1676,21 +1815,6 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
         lambda_coef = p0.get_val(x[p0.xpos]), p1.get_val(x[p1.xpos])
         SIM.D.lambda_coefficients = lambda_coef
 
-    #if Mod.refine_gauss_spec:
-    #    amp_params = [Mod.P["gauss_spec_amp%d"%i] for i in range(SIM.n_spec_peaks)]
-    #    wid_params = [Mod.P["gauss_spec_wid%d"%i] for i in range(SIM.n_spec_peaks)]
-    #    amp_vals = [p.get_val(x[p.xpos]) for p in amp_params]
-    #    wid_vals = [p.get_val(x[p.xpos]) for p in wid_params]
-    #    gauss_spec = []
-    #    Mod.nanoBragg_beam_spectrum = guass_spec
-    #    SIM.beam.spectrum = Mod.nanoBragg_beam_spectrum
-    #    SIM.D.xray_beams = SIM.beam.xray_beams
-    #    # update Fhkl channels
-    #    SIM.D.update_gauss_spec_amps(amp_vals)
-    #    SIM.D.update_gauss_spec_wids(wid_vals)
-    #    if Mod.Fhkl_channel_ids is not None:
-    #        SIM.D.update_Fhkl_channels(Mod.Fhkl_channel_ids)
-
     # Mosaic block
     Nabc_params = [Mod.P["Nabc%d" % (i_n,)] for i_n in range(3)]
     Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
@@ -1738,7 +1862,7 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
     model_pix_noRoi = None
 
     # extract the scale factors per ROI, these might correspond to structure factor intensity scale factors, and quite possibly might result in overfits!
-    if not Mod.params.fix.perRoiScale:
+    if not Mod.params.fix.perRoiScale or Mod.params.use_perRoiScale:
         perRoiParams = [Mod.P["scale_roi%d" % roi_id] for roi_id in Mod.roi_id_unique]
         perRoiScaleFactors = [p.get_val(x[p.xpos]) for p in perRoiParams]
         if not isinstance(Mod.roiScalesPerPix, np.ndarray):
@@ -1783,10 +1907,6 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
 
         if model_pix is None:
             model_pix = scale*pix
-            #Mod.best_model = model_pix
-            #dat,model,trust,brg = Mod.get_data_model_pairs()
-            #from IPython import embed;
-            #embed()
             model_pix_noRoi = scale*pix_noRoiScale
         else:
             model_pix += scale*pix
@@ -1853,12 +1973,14 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                     J[p.xpos] += deriv
 
             if DetZ.refine:
+                # Note: do I need to scale the derivs here ? I think so ...
                 d = SIM.D.get_derivative_pixels(DETZ_ID).as_numpy_array()[:npix]
                 d = DetZ.get_deriv(x[DetZ.xpos], d)
                 J[DetZ.xpos] += d
 
             if GonioAng.refine:
-                d = SIM.D.get_gonio_angle_derivative_pixels()[0].as_numpy_array()[:npix]
+                # Note: do I need to scale the derivs here ? I think so ...
+                d = scale*SIM.D.get_gonio_angle_derivative_pixels()[0].as_numpy_array()[:npix]
                 d = GonioAng.get_deriv(x[GonioAng.xpos], d)
                 J[GonioAng.xpos] += d
 
@@ -1867,22 +1989,12 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 lambda_param_names = "lambda_offset", "lambda_scale"
                 for d,name in zip(lambda_derivs, lambda_param_names):
                     p = Mod.P[name]
-                    d = d.as_numpy_array()[:npix]
+                    # Note: do I need to scale the derivs here ? I think so ...
+                    d = scale*d.as_numpy_array()[:npix]
                     d = p.get_deriv(x[p.xpos], d)
                     J[p.xpos] += d
-            #if Mod.refine_gauss_spec:
-            #    amp_p_deriv = SIM.D.get_gauss_spec_amp_deriv_pixels(SIM.n_spec_peaks).as_numpy_array()
-            #    wid_p_deriv = SIM.D.get_gauss_spec_wid_deriv_pixels(SIM.n_spec_peaks).as_numpy_array()
-            #    for i_peak in range(SIM.n_spec_peaks):
-            #        amp_p = Mod.P["gauss_spec_amp%d" % i_peak]
-            #        wid_p = Mod.P["gauss_spec_wid%d" % i_peak]
-            #        deriv_s = slice(i_peak*npix, (i_peak+1)*npix, 1)
-            #        amp_d = amp_p_deriv[deriv_s]
-            #        wid_d = wid_p_deriv[deriv_s]
-            #        J[amp_p.xpos] += amp_d
-            #        J[wid_p.xpos] += wid_d
 
-    if not Mod.params.fix.perRoiScale and compute_grad:
+    if (not Mod.params.fix.perRoiScale or Mod.params.use_perRoiScale) and compute_grad:
         if compute_grad:
             for p in perRoiParams:
                 roi_id = int(p.name.split("scale_roi")[1])
@@ -1892,6 +2004,12 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 else:
                     d = p.get_deriv(x[p.xpos], model_pix_noRoi[slc])
                 J[p.xpos, slc] += d
+
+    if compute_grad and Mod.P.refining_detector:
+        det_Jac = detector_model_derivs(Mod, Mod.P, SIM, x, reduce=False, scale=scale)
+        for pname in det_Jac:
+            p = Mod.P[pname]
+            J[p.xpos] = det_Jac[pname]
 
     return model_pix, J
 
@@ -2034,6 +2152,8 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         # so we dont waste time computing them
         _compute_grad = False
         SIM.D.fix(NCELLS_ID)
+        for db_id in PAN_OFS_IDS + PAN_XYZ_IDS:
+            SIM.D.fix(db_id)
         SIM.D.fix(ROTX_ID)
         SIM.D.fix(ROTY_ID)
         SIM.D.fix(ROTZ_ID)
@@ -2050,6 +2170,10 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         _compute_grad = True
         if mod.P["Nabc0"].refine:
             SIM.D.let_loose(NCELLS_ID)
+        for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
+            pname = f"group0_{name}"
+            if pname in mod.P and mod.P[pname].refine:
+                SIM.D.let_loose(db_id)
         if mod.P["RotXYZ0_xtal0"].refine:
             SIM.D.let_loose(ROTX_ID)
             SIM.D.let_loose(ROTY_ID)
@@ -2169,7 +2293,8 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                 common_grad_slc = common_grad_term_all[slc]
                 Jac_slc = Jac_p[slc]
                 trusted_slc = trusted[slc]
-                g[p.xpos] += (Jac_slc * common_grad_slc)[trusted_slc].sum()
+                g_accum = (Jac_slc * common_grad_slc)[trusted_slc].sum()
+                g[p.xpos] += g_accum
 
         # trusted pixels portion of Jacobian
         #  TODO: determine if this following method of summing over g is optimal in certain scenarios
@@ -2246,7 +2371,6 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
 
 
         gnorm = np.linalg.norm(g)
-
 
     debug_s = "F=%10.7g sigZ=%10.7g (Fracs of F: %s), |g|=%10.7g" \
               % (f, zscore_sigma, restraint_debug_s, gnorm)

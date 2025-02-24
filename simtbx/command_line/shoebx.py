@@ -85,7 +85,12 @@ if not args.scroll:
     try:
         from score_trainer import roi_check
         checker = roi_check.roiCheck()
-        scores = checker.score(data_subimg, model_subimg)
+        scores = []
+        for d,m in zip(data_subimg, model_subimg):
+            score = checker.score(d,m)
+            scores.append(score)
+        #scores = checker.score(data_subimg, model_subimg)
+
     except Exception as err:
         print(str(err))
         pass
@@ -112,8 +117,10 @@ if not args.scroll:
 
             # make label strings for later use...
             spot_sigZ_lab = "%.1f" % sigmaZ
-            spot_res_lab = "%.1f" % (stats["spot_d"][mod_idx])
-            spot_hkl_lab = "%d,%d,%d"% (tuple(stats["spot_hkl"][mod_idx]))
+            spot_d = stats["spot_d"][mod_idx]
+            spot_res_lab = "%.1f" % spot_d if spot_d is not None else ""
+            spot_hkl = stats["spot_hkl"][mod_idx]
+            spot_hkl_lab = "%d,%d,%d"% (tuple(spot_hkl)) if spot_hkl is not None else ""
             spot_pid_cent_lab = "%d,%d,%d"% (tuple(stats["spot_pid_and_cent"][mod_idx]))
             dat_max_lab = mod_max_lab = "nan"
             if trust_im.sum()>0:

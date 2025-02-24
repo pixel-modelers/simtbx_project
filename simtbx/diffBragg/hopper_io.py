@@ -156,6 +156,10 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
     new_expt = Experiment()
     new_expt.crystal = new_cryst
     new_expt.detector = expt.detector
+    if Mod.P.refining_detector:
+        from simtbx.diffBragg.refiners.geometry import get_optimized_detector
+        optD = get_optimized_detector(x, Mod.P, SIM)
+        new_expt.detector = optD
     new_expt.beam = expt.beam
     new_expt.identifier = expt.identifier
     new_expt.imageset = expt.imageset
@@ -192,6 +196,14 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         other_Umats = other_Umats, other_spotscales = other_spotscales,
         num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
                             gonio_angle=gonio_angle)
+
+    df["gonio_axis"] = [SIM.D.spindle_axis]
+
+    if Mod.P.refining_detector:
+        for name in ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]:
+            p = Mod.P["group0_%s" %name]
+            val = p.get_val(x[p.xpos])
+            df[p.name] = val
 
     df['exp_idx'] = exp_idx
 

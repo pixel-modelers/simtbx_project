@@ -30,7 +30,7 @@ def get_equal_partition(weights, partitions):
         load[lightest] += weights[idx]
     return distribution
 
-def prep_dataframe(df, refls_key="predictions", res_ranges_string=None):
+def prep_dataframe(df, refls_key="predictions", res_ranges_string=None, exp_idx_key="exp_idx", exp_key="exp_name"):
     """
 
     :param df: input pandas dataframe for stage2
@@ -50,7 +50,7 @@ def prep_dataframe(df, refls_key="predictions", res_ranges_string=None):
     nshots = len(df)
     df.reset_index(drop=True, inplace=True)
     df['index'] = df.index.values
-    refl_info = df[["index", refls_key, "exp_idx", "exp_name"]].values
+    refl_info = df[["index", refls_key, exp_idx_key, exp_key]].values
 
     # sort and split such that each rank will read many refls from same file
     sorted_names_and_ids = sorted(

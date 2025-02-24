@@ -8,6 +8,7 @@ import pandas
 from simtbx.nanoBragg.utils import flexBeam_sim_colors
 from cctbx import miller
 from cctbx.array_family import flex
+from dxtbx.model import ExperimentList
 
 try:
     from simtbx.gpu import gpu_energy_channels
@@ -69,14 +70,11 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
                           norm_by_spectrum=False,
                           symbol_override=None, quiet=False, reset_Bmatrix=False, nopolar=False,
                           force_no_detector_thickness=False, printout_pix=None, norm_by_nsource=False,
-                          use_exascale_api=False, use_db=False, show_timings=False, perpixel_wavelen=False,
+                          use_db=False, show_timings=False, perpixel_wavelen=False,
                           det_thicksteps=None, from_pdb=None, mosaic_samples_override=None,
-                          no_Nabc_scale=False):
+                          no_Nabc_scale=False, return_sim=False, detector_override=None):
     if perpixel_wavelen and not use_db:
         raise NotImplementedError("to get perpixel wavelengths set use_db=True to use the diffBragg backend")
-    if use_exascale_api:
-        assert gpu_energy_channels is not None, "cant use exascale api if not in a GPU build"
-        assert multipanel_sim is not None, "cant use exascale api if LS49: https://github.com/nksauter/LS49.git  is not configured\n install in the modules folder"
 
     df = pandas_frame.reset_index(drop=True)
 
@@ -94,6 +92,9 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
     if "detz_shift_mm" in columns:  # NOTE, this could also be inside expt_name directly
         expt.detector = utils.shift_panelZ(expt.detector, df.detz_shift_mm.values[0])
 
+    if detector_override is not None:
+        new_det = ExperimentList.from_file(detector_override, False)[0].detector
+        expt.detector = new_det
     if force_no_detector_thickness:
         expt.detector = utils.strip_thickness_from_detector(expt.detector)
     if reset_Bmatrix:
@@ -172,28 +173,7 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
             diffuse_params["gamma_miller_units"] = df.gamma_miller_units.values[0]
 
 
-    if use_exascale_api:
-        #===================
-        gpu_channels_singleton = gpu_energy_channels(deviceId=0)
-        print(gpu_channels_singleton.get_deviceID(), "device")
-        from simtbx.nanoBragg import nanoBragg_crystal
-        C = nanoBragg_crystal.NBcrystal(init_defaults=False)
-        C.miller_array = Famp
-        F_P1 = C.miller_array
-        F_P1 = Famp.expand_to_p1()
-        gpu_channels_singleton.structure_factors_to_GPU_direct(0, F_P1.indices(), F_P1.data())
-        Famp = gpu_channels_singleton
-        #===========
-        results,_,_ = multipanel_sim(CRYSTAL=expt.crystal,
-                                 DETECTOR=expt.detector,
-                                 BEAM=expt.beam, Famp=Famp,
-                                 energies=energies, fluxes=fluxes, Ncells_abc=Ncells_abc,
-                                 beamsize_mm=beamsize_mm, oversample=oversample,
-                                 spot_scale_override=spot_scale, default_F=0, interpolate=0,
-                                 include_background=False,
-                                 profile="gauss", cuda=True, show_params=False)
-        return results, expt
-    elif use_db:
+    if use_db:
         mos_dom = 1
         if "num_mosaicity_samples" in list(df):
             mos_dom = int(df.num_mosaicity_samples.values[0])
@@ -204,9 +184,11 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
         LOGGER.debug("Num energy channels=%d" % len(energies))
         delta_phi = None
         phisteps=1
+        spindle_axis = None
         if "osc_deg" in df:
             delta_phi = df.osc_deg.values[0]
             phisteps = df.phisteps.values[0]
+            spindle_axis = df.gonio_axis.values[0]
         results = diffBragg_forward(CRYSTAL=expt.crystal, DETECTOR=expt.detector, BEAM=expt.beam, Famp=Famp,
                                     fluxes=fluxes, energies=energies, beamsize_mm=beamsize_mm,
                                     Ncells_abc=Ncells_abc, spot_scale_override=spot_scale,
@@ -221,7 +203,8 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
                                     perpixel_wavelen=perpixel_wavelen,
                                     det_thicksteps=det_thicksteps, Ncells_def=Ncells_def,
                                     no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi, 
-                                    num_phi_steps=phisteps)
+                                    num_phi_steps=phisteps, return_sim=return_sim,
+                                    spindle_axis=spindle_axis)
         return results, expt
 
     else:
@@ -255,8 +238,11 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                       show_timings=False,perpixel_wavelen=False,
                       det_thicksteps=None, eta_abc=None, Ncells_def=None,
                       num_phi_steps=1, delta_phi=None, div_mrad=0, divsteps=0,
-                      spindle_axis=(1,0,0), fudge=1, no_Nabc_scale=False):
+                      spindle_axis=None, fudge=1, no_Nabc_scale=False,
+                      return_sim=False):
 
+    if spindle_axis is None:
+        spindle_axis = (1,0,0)
     if cuda:
         os.environ["DIFFBRAGG_USE_CUDA"] = "1"
     CRYSTAL, Famp = nanoBragg_utils.ensure_p1(CRYSTAL, Famp)
@@ -342,14 +328,21 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
         S.D.add_diffBragg_spots(printout_pix)
 
     # free up memory
-    S.D.free_all()
-    S.D.free_Fhkl2()
-    if S.D.gpu_free is not None:
-        S.D.gpu_free()
+    if not return_sim:
+        S.D.free_all()
+        S.D.free_Fhkl2()
+        if S.D.gpu_free is not None:
+            S.D.gpu_free()
+
+    ret_val = data
     if perpixel_wavelen:
-        return data, wavelen_data, hdata, kdata, ldata
+        ret_val = data, wavelen_data, hdata, kdata, ldata
+        if return_sim:
+            ret_val = ret_val + (S,)
     else:
-        return data
+        if return_sim :
+            ret_val = data, S
+    return ret_val
 
 
 if __name__ == "__main__":

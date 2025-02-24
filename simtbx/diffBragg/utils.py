@@ -947,6 +947,7 @@ def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5, spi
     if params is not None:
         delta_phi = params.simulator.gonio.delta_phi
         num_phi_steps = params.simulator.gonio.phi_steps
+        spindle_axis = params.simulator.gonio.axis
 
     if delta_phi is not None:
         SIM.D.spindle_axis = spindle_axis
@@ -1790,13 +1791,14 @@ def get_laue_group_number(sg_symbol=None):
     return lgs[hm_symbols.index(laue_sym)]
 
 
-def track_fhkl(Modeler):
+def track_fhkl(Modeler, SIM):
     try:
         from stream_redirect import Redirect
     except ImportError:
         print("Cannot use track_fhkl unless module stream_redirect is installed: pip install stream-redirect")
         return
-    SIM = Modeler.SIM
+    use_cuda = os.environ["DIFFBRAGG_USE_CUDA"]
+    del os.environ["DIFFBRAGG_USE_CUDA"]
     SIM.D.track_Fhkl = True
     npix = int( len(Modeler.pan_fast_slow)/ 3)
     PFS = np.reshape(Modeler.pan_fast_slow, (npix, 3))
@@ -1821,8 +1823,8 @@ def track_fhkl(Modeler):
             if l.startswith("Pixel"):
                 hkl = l.split()[5]
                 hkl = tuple(map(int, hkl.split(",")))
-                hkl = map_hkl_list([hkl], True, SIM.crystal.space_group_info.type().lookup_symbol())[0]
-                count = int(l.split()[8])
+                #hkl = map_hkl_list([hkl], True, SIM.crystal.space_group_info.type().lookup_symbol())[0]
+                count = float(l.split()[8])
                 if hkl in count_stats:
                     count_stats[hkl] += count
                 else:
@@ -1833,10 +1835,12 @@ def track_fhkl(Modeler):
         for hkl in count_stats:
             frac = 0 if ntot ==0 else count_stats[hkl] / float(ntot)
             h, k, l = hkl
-            print("\tstep hkl %d,%d,%d : frac=%.1f%%" % (h, k, l, frac * 100))
+            #print("\tstep hkl %d,%d,%d : frac=%.1f%%" % (h, k, l, frac * 100))
             count_stats[hkl] = frac
 
         all_count_stats[i_roi] = count_stats
+    os.environ["DIFFBRAGG_USE_CUDA"] = use_cuda
+    SIM.D.track_Fhkl = False
     return all_count_stats
 
 
@@ -1848,6 +1852,9 @@ def load_Fhkl_model_from_params_and_expt(params, expt):
     :return:
     """
     sf = params.simulator.structure_factors
+    default_F = sf.default_F
+    if sf.default_Frange is not None:
+        default_F = np.random.uniform(*sf.default_Frange)
     if sf.mtz_name is None:
         if sf.from_pdb.name is not None:
             wavelength=None
@@ -1862,11 +1869,14 @@ def load_Fhkl_model_from_params_and_expt(params, expt):
             miller_data = miller_data.as_amplitude_array()
 
         else:
+            symbol=expt.crystal.get_space_group().info().type().lookup_symbol()
+            if params.refiner.force_symbol is not None:
+                symbol = params.refiner.force_symbol
             miller_data = make_miller_array(
-                symbol=expt.crystal.get_space_group().info().type().lookup_symbol(),
+                symbol=symbol,
                 unit_cell=expt.crystal.get_unit_cell(), d_min=sf.dmin,
                 d_max=sf.dmax,
-                defaultF=sf.default_F)
+                defaultF=default_F)
     else:
         miller_data = open_mtz(sf.mtz_name, sf.mtz_column)
 
