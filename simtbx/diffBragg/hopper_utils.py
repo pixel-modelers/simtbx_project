@@ -1618,11 +1618,12 @@ class DataModeler:
             if not Modeler.params.fix.perRoiScale or Modeler.params.use_perRoiScale:
                 val = new_refls['intensity.db.value'].as_numpy_array()
                 var = new_refls['intensity.db.variance'].as_numpy_array()
-                is_inf_var = np.isinf(var)
+                #is_inf_var = np.isinf(var)
+                is_neg_var = var < 0
                 is_one_val = val==1
                 is_zero_val = val==0
-                is_large_var = var > 1e20
-                goodies = (~is_zero_val) * (~is_inf_var) * (~is_one_val) * (~is_large_var)
+                is_large_var = var > 1e18
+                goodies = (~is_zero_val) * (~is_neg_var) * (~is_one_val) * (~is_large_var)
                 #baddies = np.logical_or(~is_one_val, ~is_inf_var)
                 #goodies = ~baddies
                 new_refls = new_refls.select(flex.bool(goodies))

@@ -1,4 +1,4 @@
-#!/opt/scratch/simforge/envs/simtbx9/bin/python3.9
+#!/usr/bin/env python
 from __future__ import division, print_function
 
 # LIBTBX_SET_DISPATCHER_NAME diffBragg.integrate
@@ -21,6 +21,7 @@ def get_args():
     parser.add_argument("--filterDupes", action="store_true", help="filter refls with same HKL")
     parser.add_argument("--keepShoeboxes", action="store_true", help="Optionally keep shoeboxes present in the prediction refl tables (can lead to OOM errors)")
     parser.add_argument("--scanWeakFracs", action="store_true", help="optionally stores a variety of inputs for stage2 based filtering different fractions of weak reflections")
+    parser.add_argument("--weakFracs", nargs="+", default=[.3, .6, .9], type=float, help="weak fraction amounts to scan, will save a unique refl table for each one")
     parser.add_argument("--maxProcess", type=int,default=-1, help="maximum number of shots to process before program termination")
     parser.add_argument("--raiseErrors", action="store_true")
 
@@ -448,7 +449,9 @@ if __name__=="__main__":
             #keeps = np.logical_or( pred['is_strong'], weak_sel)
             #printR("Sum keeps=%d; num_strong=%d, num_kept_weak=%d" % (sum(keeps), sum(strong_sel), sum(weak_sel)))
             #pred = pred.select(flex.bool(keeps))
-            pred = predictions.filter_weak_reflections(pred, weak_fraction=params.predictions.weak_fraction)
+            predictions.label_weak_spots_for_integration(params.predictions.weak_fraction, pred)
+            pred = pred.select(pred["is_for_integration"])
+            #pred = predictions.filter_weak_reflections(pred, weak_fraction=params.predictions.weak_fraction)
 
             nstrong = np.sum(strong_sel)
             printR("Will save %d refls (%d strong, %d weak)" % (len(pred), np.sum(pred["is_strong"]), np.sum(pred["is_weak"])))
@@ -539,7 +542,7 @@ if __name__=="__main__":
             pred_file = all_dfs.predictions.values[0]
             n_total_weak = np.sum(all_rank_pred['is_weak'])
             n_total = len(all_rank_pred)
-            weak_fracs = [.11,.22,.33,.44,.55,.66,.77,.88]
+            weak_fracs = args.weakFracs
             labels = []
             for i_frac, weak_frac in enumerate(weak_fracs):
                 filt_refls = predictions.filter_weak_reflections(all_rank_pred, weak_frac)

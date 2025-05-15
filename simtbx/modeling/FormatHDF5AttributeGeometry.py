@@ -50,15 +50,28 @@ class FormatHDF5AttributeGeometry(FormatHDF5, FormatStill):
     def _geometry_define(self):
         det_str = self._image_dset.attrs["dxtbx_detector_string"]
         beam_str = self._image_dset.attrs["dxtbx_beam_string"]
+        is_rot = "dxtbx_gonio_string" in self._image_dset.attrs
+        if is_rot:
+            gonio_str = self._image_dset.attrs["dxtbx_gonio_string"]
+            scan_str = self._image_dset.attrs["dxtbx_scan_string"]
         try:
             det_str = det_str.decode()
             beam_str = beam_str.decode()
+            if is_rot:
+                gonio_str = gonio_str.decode()
+                scan_str = scan_str.decode()
         except AttributeError:
             pass
         det_dict = ast.literal_eval(det_str)
         beam_dict = ast.literal_eval(beam_str)
         self._cctbx_detector = self._detector_factory.from_dict(det_dict)
         self._cctbx_beam = self._beam_factory.from_dict(beam_dict)
+
+        if is_rot:
+            gonio_dict = ast.literal_eval(gonio_str)
+            scan_dict = ast.literal_eval(scan_str)
+            self._cctbx_gonio = self._goniometer_factory.from_dict(gonio_dict)
+            self._cctbx_scan = self._scan_factory.from_dict(scan_dict)
 
     def _check_per_shot_spectra(self):
         keys = list(self._handle.keys())
@@ -89,6 +102,12 @@ class FormatHDF5AttributeGeometry(FormatHDF5, FormatStill):
 
     def get_detector(self, index=None):
         return self._cctbx_detector
+
+    def get_goniometer(self):
+        return self._cctbx_gonio
+
+    def get_scan(self):
+        return self._cctbx_scan
 
     def _get_wavelength(self, index):
         if self._has_spectra:

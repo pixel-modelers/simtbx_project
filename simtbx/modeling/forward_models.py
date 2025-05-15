@@ -239,7 +239,10 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                       det_thicksteps=None, eta_abc=None, Ncells_def=None,
                       num_phi_steps=1, delta_phi=None, div_mrad=0, divsteps=0,
                       spindle_axis=None, fudge=1, no_Nabc_scale=False,
-                      return_sim=False):
+                      return_sim=False, spread_data=None):
+    if spread_data is not None:
+        assert isinstance(spread_data, dict)
+        assert all(k in spread_data for k in ("atoms", "fprime", "fdblprime"))
 
     if spindle_axis is None:
         spindle_axis = (1,0,0)
@@ -308,9 +311,12 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
 
     if delta_phi is not None:
         utils.update_SIM_with_gonio(S, delta_phi=delta_phi, num_phi_steps=num_phi_steps, spindle_axis=spindle_axis)
+    if spread_data is not None:
+        S.D.heavy_atom_data = spread_data["atoms"]
+        S.D.fprime_fdblprime = spread_data["fprime"], spread_data["fdblprime"]
     S.D.add_diffBragg_spots_full()
-    if show_timings or LOGGER.level <= 10:
-        S.D.show_timings()
+    #if show_timings or LOGGER.level <= 10:
+    #    S.D.show_timings()
     t = time.time()
     data = S.D.raw_pixels_roi.as_numpy_array().reshape(img_shape)
     if perpixel_wavelen:

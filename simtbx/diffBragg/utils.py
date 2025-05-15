@@ -961,6 +961,7 @@ def get_complex_fcalc_from_pdb(
         wavelength=None,
         dmin=1,
         dmax=None,
+        fft=True,
         k_sol=0.435, b_sol=46, show_pdb_summary=False):
     """
     produce a structure factor from PDB coords, see mmtbx/programs/fmodel.py for formulation
@@ -971,7 +972,10 @@ def get_complex_fcalc_from_pdb(
     xray_structure = pdb_in.xray_structure_simple()
     if show_pdb_summary:
         xray_structure.show_summary()
+    xray_structure.convert_to_isotropic()
     for sc in xray_structure.scatterers():
+        if sc.element_symbol() == "Fe":
+            sc.occupancy = 1
         if wavelength is not None:
             expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
             sc.fp = expected_henke.fp()
@@ -982,7 +986,7 @@ def get_complex_fcalc_from_pdb(
     params2.low_resolution = dmax
     params2.fmodel.k_sol = k_sol
     params2.fmodel.b_sol = b_sol
-    params2.structure_factors_accuracy.algorithm = 'fft'
+    params2.structure_factors_accuracy.algorithm = 'fft' if fft else 'direct'
     f_model = mmtbx.utils.fmodel_from_xray_structure(
         xray_structure=xray_structure,
         f_obs=None,

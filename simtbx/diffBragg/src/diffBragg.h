@@ -299,9 +299,7 @@ class diffBragg: public nanoBragg{
   af::shared<double> pythony_amplitudes2;
   bool complex_miller;
   double F_cell2; // for storing the imaginary component
-  std::vector<double> fpfdp;
   std::vector<double> fpfdp_derivs;
-  std::vector<double> atom_data;
   void show_heavy_atom_data();
   void show_fp_fdp();
   bool track_Fhkl;

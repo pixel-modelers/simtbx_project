@@ -670,8 +670,8 @@ void diffBragg_sum_over_steps(
                    double S_2 = 1.e-20*(scattering[0]*scattering[0]+scattering[1]*scattering[1]+scattering[2]*scattering[2]);
 
                     // fp is always followed by the fdp value
-                   double val_fp = db_cryst.fpfdp[2*source];
-                   double val_fdp = db_cryst.fpfdp[2*source+1];
+                   //double val_fp = db_cryst.fpfdp[2*source];
+                   //double val_fdp = db_cryst.fpfdp[2*source+1];
 
                    double c_deriv_prime=0;
                    double c_deriv_dblprime=0;
@@ -679,6 +679,7 @@ void diffBragg_sum_over_steps(
                    double d_deriv_dblprime = 0;
                    if (db_flags.refine_fp_fdp){
                    //   currently only supports two parameter model
+                   //   TODO change for multi atom species mode
                        int nsources_times_two = db_cryst.fpfdp.size();
                        int d_idx = 2*source;
                        c_deriv_prime = db_cryst.fpfdp_derivs[d_idx];
@@ -687,17 +688,21 @@ void diffBragg_sum_over_steps(
                        d_deriv_dblprime = db_cryst.fpfdp_derivs[d_idx+1+nsources_times_two];
                    }
                    // 5 valeus per atom: x,y,z,B,occupancy
-                   int num_atoms = db_cryst.atom_data.size()/5;
+                   int num_atoms = db_cryst.atom_data.size()/6;
                    for (int  i_atom=0; i_atom < num_atoms; i_atom++){
                        if (db_flags.verbose>5)
                          printf("Processing atom %d, F_cell=%10.3f\n", i_atom, F_cell);
                        // fractional atomic coordinates
-                       double atom_x = db_cryst.atom_data[i_atom*5];
-                       double atom_y = db_cryst.atom_data[i_atom*5+1];
-                       double atom_z = db_cryst.atom_data[i_atom*5+2];
-                       double B = db_cryst.atom_data[i_atom*5+3]; // B factor
+                       double atom_x = db_cryst.atom_data[i_atom*6];
+                       double atom_y = db_cryst.atom_data[i_atom*6+1];
+                       double atom_z = db_cryst.atom_data[i_atom*6+2];
+                       double B = db_cryst.atom_data[i_atom*6+3]; // B factor
                        B = exp(-B*S_2/4.0); // TODO: speed me up?
-                       double occ = db_cryst.atom_data[i_atom*5+4]; // occupancy
+                       double occ = db_cryst.atom_data[i_atom*6+4]; // occupancy
+                       double atom_species_id = db_cryst.atom_data[i_atom*6+5];
+                       int val_fp_idx = atom_species_id*2*db_beam.number_of_sources + 2*source;
+                       double val_fp = db_cryst.fpfdp[val_fp_idx];
+                       double val_fdp = db_cryst.fpfdp[val_fp_idx+1];
                        double r_dot_h = h0*atom_x + k0*atom_y + l0*atom_z;
                        double phase = 2*M_PI*r_dot_h;
                        double s_rdoth = sin(phase);

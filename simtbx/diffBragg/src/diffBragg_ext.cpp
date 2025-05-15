@@ -203,11 +203,13 @@ namespace boost_python { namespace {
    boost::python::list atom_z = boost::python::extract<boost::python::list>(atom_XYZBO[2]);
    boost::python::list atom_B = boost::python::extract<boost::python::list>(atom_XYZBO[3]);
    boost::python::list atom_O = boost::python::extract<boost::python::list>(atom_XYZBO[4]);
+   boost::python::list atom_Sp = boost::python::extract<boost::python::list>(atom_XYZBO[5]);
     int natoms = boost::python::len(atom_x);
     SCITBX_ASSERT( boost::python::len(atom_y)== natoms);
     SCITBX_ASSERT( boost::python::len(atom_z)== natoms);
     SCITBX_ASSERT( boost::python::len(atom_B)== natoms);
     SCITBX_ASSERT( boost::python::len(atom_O)== natoms);
+    SCITBX_ASSERT( boost::python::len(atom_Sp)== natoms);
     diffBragg.db_cryst.atom_data.clear();
     for (int i=0; i < natoms; i++){
         diffBragg.db_cryst.atom_data.push_back( boost::python::extract<double>(atom_x[i]));
@@ -215,6 +217,7 @@ namespace boost_python { namespace {
         diffBragg.db_cryst.atom_data.push_back(  boost::python::extract<double>(atom_z[i]));
         diffBragg.db_cryst.atom_data.push_back( boost::python::extract<double>(atom_B[i]));
         diffBragg.db_cryst.atom_data.push_back(  boost::python::extract<double>(atom_O[i]));
+        diffBragg.db_cryst.atom_data.push_back(  boost::python::extract<double>(atom_Sp[i]));
     }
   }
 
@@ -247,17 +250,17 @@ namespace boost_python { namespace {
     }
   }
 
-
   static void set_fpfdp(simtbx::nanoBragg::diffBragg & diffBragg,
                 boost::python::tuple const& fprime_fdblprime) {
     boost::python::list fprime = boost::python::extract<boost::python::list>(fprime_fdblprime[0]);
     boost::python::list fdblprime = boost::python::extract<boost::python::list>(fprime_fdblprime[1]);
     int num_fprime = boost::python::len(fprime);
     int num_fdblprime =   boost::python::len(fdblprime);
-    SCITBX_ASSERT(num_fprime==diffBragg.sources);
-    SCITBX_ASSERT(num_fdblprime==diffBragg.sources);
+    // soften the assertion so that num_fprime is a multiple of sources
+    SCITBX_ASSERT(num_fprime % diffBragg.sources == 0);
+    SCITBX_ASSERT(num_fdblprime % diffBragg.sources == 0);
     diffBragg.db_cryst.fpfdp.clear();
-    for (int i=0; i<diffBragg.sources; i++){
+    for (int i=0; i<num_fprime; i++){
         double val = boost::python::extract<double>(fprime[i]);
         diffBragg.db_cryst.fpfdp.push_back(val);
         val = boost::python::extract<double>(fdblprime[i]);

@@ -577,8 +577,8 @@ void gpu_sum_over_steps(
                    CUDAREAL S_2 = 1.e-20*(_scattering[0]*_scattering[0]+_scattering[1]*_scattering[1]+_scattering[2]*_scattering[2]);
 
                     // fp is always followed by the fdp value
-                   CUDAREAL val_fp = fpfdp[2*_source];
-                   CUDAREAL val_fdp = fpfdp[2*_source+1];
+                   //CUDAREAL val_fp = fpfdp[2*_source];
+                   //CUDAREAL val_fdp = fpfdp[2*_source+1];
 
                    CUDAREAL c_deriv_prime=0;
                    CUDAREAL c_deriv_dblprime=0;
@@ -595,16 +595,28 @@ void gpu_sum_over_steps(
 
                    for (int  i_atom=0; i_atom < s_num_atoms; i_atom++){
                         // fractional atomic coordinates
-                       CUDAREAL atom_x = atom_data[i_atom*5];
-                       CUDAREAL atom_y = atom_data[i_atom*5+1];
-                       CUDAREAL atom_z = atom_data[i_atom*5+2];
-                       CUDAREAL B = atom_data[i_atom*5+3]; // B factor
-                       B = exp(-B*S_2/4.0); // TODO: speed me up?
-                       CUDAREAL occ = atom_data[i_atom*5+4]; // occupancy
+                       CUDAREAL atom_x = atom_data[i_atom*6];
+                       CUDAREAL atom_y = atom_data[i_atom*6+1];
+                       CUDAREAL atom_z = atom_data[i_atom*6+2];
+                       CUDAREAL B = atom_data[i_atom*6+3]; // B factor
+                       float exp_arg = -float(B)*float(S_2)/4;
+                       float expB = exp(exp_arg);
+                       B = CUDAREAL(expB);
+
+                       //B = exp(-B*S_2/4.0); // TODO: speed me up?
+                       CUDAREAL occ = atom_data[i_atom*6+4]; // occupancy
+                       CUDAREAL atom_species_id = atom_data[i_atom*6+5]; // occupancy
+                       int val_fp_idx = 2*s_sources*atom_species_id + 2*_source;
+                       CUDAREAL val_fp = fpfdp[val_fp_idx];
+                       CUDAREAL val_fdp = fpfdp[val_fp_idx+1];
                        CUDAREAL r_dot_h = _h0*atom_x + _k0*atom_y + _l0*atom_z;
                        CUDAREAL phase = 2*M_PI*r_dot_h;
-                       CUDAREAL s_rdoth = sin(phase);
-                       CUDAREAL c_rdoth = cos(phase);
+                       float s_rdoth;//sin(phase);
+                       float c_rdoth;//cos(phase);
+                       sincos(float(phase), &s_rdoth, &c_rdoth);
+                       s_rdoth = CUDAREAL(s_rdoth);
+                       c_rdoth = CUDAREAL(c_rdoth);
+
                        CUDAREAL Bocc = B*occ;
                        CUDAREAL BC = B*c_rdoth;
                        CUDAREAL BS = B*s_rdoth;

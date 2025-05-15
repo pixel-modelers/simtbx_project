@@ -582,7 +582,7 @@ def get_gather_name(exper_name, gather_dir):
 def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictions',
                 gather_dir=None, exper_idx_key="exp_idx"):
 
-    work_distribution = prep_dataframe(pandas_table, refls_key,
+    pandas_table, work_distribution = prep_dataframe(pandas_table, refls_key,
                                        res_ranges_string=params.refiner.res_ranges)
     COMM.barrier()
     num_exp = len(pandas_table)

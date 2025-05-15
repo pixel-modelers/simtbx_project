@@ -1354,22 +1354,28 @@ boost::python::tuple diffBragg::get_ncells_values(){
 }
 
 void diffBragg::show_heavy_atom_data(){
-  int natom = atom_data.size()/5;
+  int natom = db_cryst.atom_data.size()/6;
   for (i=0; i<natom;i++){
-    double x =db_cryst.atom_data[i*5];
-    double y =db_cryst.atom_data[i*5+1];
-    double z =db_cryst.atom_data[i*5+2];
-    double B =db_cryst.atom_data[i*5+3];
-    double O =db_cryst.atom_data[i*5+4];
-    printf("Atom %d at position %5.3g,%5.3g,%5.3g, Bfactor=%5.2g Ang^2, Occupancy=%2.3g\n",i,x,y,z,B,O);
+    double x =db_cryst.atom_data[i*6];
+    double y =db_cryst.atom_data[i*6+1];
+    double z =db_cryst.atom_data[i*6+2];
+    double B =db_cryst.atom_data[i*6+3];
+    double O =db_cryst.atom_data[i*6+4];
+    int Sp =db_cryst.atom_data[i*6+5];
+    printf("Atom %d at position %5.3g,%5.3g,%5.3g, Bfactor=%5.2g Ang^2, Occupancy=%2.3g, Species ID=%d\n",i,x,y,z,B,O, Sp);
   }
 }
 
 void diffBragg::show_fp_fdp(){
-  for(int i=0; i< sources; i++){
-    double fp = db_cryst.fpfdp[2*i];
-    double fdp=db_cryst.fpfdp[2*i+1];
-    printf("Source %d, fp=%8.3g, fdp=%8.3g\n", i,fp,fdp);
+  int n_fp_fdp = db_cryst.fpfdp.size();
+  int n_atom_species = n_fp_fdp / (2*sources);
+  for (int i_atom=0; i_atom < n_atom_species; i_atom++){
+      for(int i=0; i< sources; i++){
+         int idx = i_atom*2*sources + 2*i;
+        double fp = db_cryst.fpfdp[idx];
+        double fdp=db_cryst.fpfdp[idx+1];
+        printf("Atom Species %d, Source %d, fp=%8.3g, fdp=%8.3g\n", i_atom, i,fp,fdp);
+      }
   }
 }
 

@@ -220,7 +220,8 @@ def get_xray_beams(spectrum, beam):
 
 class H5AttributeGeomWriter:
 
-  def __init__(self, filename, image_shape, num_images, detector, beam, dtype=None, compression_args=None, detector_and_beam_are_dicts=False):
+  def __init__(self, filename, image_shape, num_images, detector, beam, dtype=None, compression_args=None, detector_and_beam_are_dicts=False,
+               goniometer=None, scan=None):
     """
     Simple class for writing dxtbx compatible HDF5 files
 
@@ -236,18 +237,24 @@ class H5AttributeGeomWriter:
           compression_args={"compression": "lzf"}  # Python only
           comression_args = {"compression": "gzip", "compression_opts":9}
     :param detector_and_beam_are_dicts:
+    :param goniometer:
+    :param scan:
     """
     if compression_args is None:
       compression_args = {}
     self.file_handle = h5py.File(filename, 'w')
     self.beam = beam
     self.detector = detector
+    self.goniometer = goniometer
+    self.scan = scan
     self.detector_and_beam_are_dicts = detector_and_beam_are_dicts
     if dtype is None:
       dtype = np.float64
     dset_shape = (
                    num_images,) + tuple(image_shape)
-    self.image_dset = (self.file_handle.create_dataset)('images', shape=dset_shape, dtype=dtype, **compression_args)
+    self.image_dset = (self.file_handle.create_dataset)('images', shape=dset_shape,
+                                                        chunks=(1,) + image_shape,
+                                                        dtype=dtype, **compression_args)
     self._write_geom()
     self._counter = 0
 
@@ -268,6 +275,16 @@ class H5AttributeGeomWriter:
       det = det.to_dict()
     self.image_dset.attrs['dxtbx_beam_string'] = json.dumps(beam)
     self.image_dset.attrs['dxtbx_detector_string'] = json.dumps(det)
+
+    if self.goniometer is not None:
+      gonio = self.goniometer
+      if not isinstance(gonio, dict):
+        gonio = gonio.to_dict()
+      self.image_dset.attrs['dxtbx_gonio_string'] = json.dumps(gonio)
+      scan = self.scan
+      if not isinstance(scan, dict):
+        scan = scan.to_dict()
+        self.image_dset.attrs['dxtbx_scan_string'] = json.dumps(scan)
 
   def __exit__(self, exc_type, exc_val, exc_tb):
     self.file_handle.close()

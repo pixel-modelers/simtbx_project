@@ -1377,7 +1377,7 @@ predictions {
     .type = bool
     .help = whether to use the mtz supplied to diffBragg for prediction
   Nabc_override = None
-    .type = ints(size=3)
+    .type = floats(size=3)
     .help = use this value of mosaic block size for every shot, useful to get more predicted spots
     .expert_level=10
   pink_stride_override = None

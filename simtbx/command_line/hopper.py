@@ -257,6 +257,8 @@ class Script:
                     MAIN_LOGGER.debug("%.4f %.4f %.4f %.4f %.4f %.4f" % xtal.get_unit_cell().parameters())
             if self.params.record_device_timings and COMM.rank >0:
                 self.params.record_device_timings = False  # only record for rank 0 otherwise there's too much output
+            if self.params.simulator.gonio.delta_phi is None:
+                self.params.simulator.gonio.delta_phi = self.params.init.gonio_angle
             SIM = hopper_utils.get_simulator_for_data_modelers(Modeler)
             Modeler.set_parameters_for_experiment(best)
             MAIN_LOGGER.debug("Set parameters for experiment")
