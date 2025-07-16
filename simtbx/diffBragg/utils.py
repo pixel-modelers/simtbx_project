@@ -20,7 +20,7 @@ from simtbx.nanoBragg.nanoBragg_beam import NBbeam
 from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
 from simtbx.diffBragg import phil
 from simtbx.nanoBragg.utils import ENERGY_CONV
-from simtbx.diffBragg.refiners.crystal_systems import OrthorhombicManager, TetragonalManager, MonoclinicManager, HexagonalManager
+from simtbx.diffBragg.refiners.crystal_systems import OrthorhombicManager, TetragonalManager, MonoclinicManager, HexagonalManager, TriclinicManager
 from dxtbx.imageset import MemReader
 from dxtbx.imageset import ImageSet, ImageSetData
 from dxtbx.model.experiment_list import ExperimentListFactory
@@ -1161,7 +1161,9 @@ def manager_from_params(ucell_p):
         manager = MonoclinicManager(a=a, b=b, c=c, beta=be*np.pi/180.)
 
     else:
-        raise NotImplementedError("Not yet implemented for crystal model")
+        print("Warning, crystal system not determined, assuming triclinic")
+        manager = TriclinicManager(a=a, b=b, c=c, alpha=al*np.pi/180., beta=be*np.pi/180., gamma=ga*np.pi/180.)
+        #raise NotImplementedError("Not yet implemented for crystal model")
 
     return manager
 

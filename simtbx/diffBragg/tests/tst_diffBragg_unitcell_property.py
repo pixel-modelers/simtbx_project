@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("--plot", action='store_true')
 parser.add_argument("--crystalsystem", default='tetragonal',
-                    choices=["monoclinic", "tetragonal", "hexagonal"])
+                    choices=["monoclinic", "tetragonal", "hexagonal", "triclinic"])
 parser.add_argument("--curvatures", action='store_true')
 parser.add_argument("--kokkos", action="store_true")
 args = parser.parse_args()
@@ -39,9 +39,13 @@ with DeviceWrapper(0) as _:
     elif args.crystalsystem=="hexagonal":
         ucell = (55, 55, 77, 90, 90, 120)
         symbol = "P6522"
-    else:  # args.crystalsystem == "monoclinic"
+    elif args.crystalsystem == "monoclinic":
         ucell = (70, 60, 50, 90.0, 110, 90.0)
         symbol = "C121"
+    else: # else triclinic
+        ucell = (27, 32, 34, 88.0, 108, 112)
+        symbol = "P1"
+        
 
     a_real, b_real, c_real = sqr(uctbx.unit_cell(ucell).orthogonalization_matrix()).transpose().as_list_of_lists()
     C = Crystal(a_real, b_real, c_real, symbol)
