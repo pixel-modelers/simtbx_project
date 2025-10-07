@@ -103,11 +103,16 @@ class FormatHDF5AttributeGeometry(FormatHDF5, FormatStill):
     def get_detector(self, index=None):
         return self._cctbx_detector
 
-    def get_goniometer(self):
+    def get_goniometer(self, index=None):
         return self._cctbx_gonio
 
-    def get_scan(self):
-        return self._cctbx_scan
+    def get_scan(self, index=None):
+        if index is not None:
+            scan = deepcopy(self._cctbx_scan)
+            scan.set_image_range((index,index))
+            return scan
+        else:
+            return self._cctbx_scan
 
     def _get_wavelength(self, index):
         if self._has_spectra:
