@@ -194,9 +194,8 @@ def PAR_from_params(params, experiment, best=None):
             else:
                 cent = params.centers.ucell_gamma
                 beta = params.betas.ucell_gamma
-            assert cent is not None
-            assert beta is not None
-            cent = cent * np.pi / 180.
+            if cent is not None:
+                cent = cent * np.pi / 180.
 
         p = ParameterType(init=val, minval=minval, maxval=maxval, fix=params.fix.ucell, sigma=params.sigmas.ucell[i_uc],
                           center=cent, beta=beta)

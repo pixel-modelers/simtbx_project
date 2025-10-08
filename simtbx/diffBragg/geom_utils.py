@@ -3,6 +3,7 @@ import time
 import numpy as np
 from dxtbx.model import Panel, Detector, Experiment, ExperimentList
 from simtbx.diffBragg import psf
+from copy import copy
 
 # diffBragg internal indices for derivative manager
 ROTXYZ_ID = 0, 1, 2
@@ -91,6 +92,8 @@ def update_detector(x, ref_params, SIM, save=None, rank=0, force=False):
     :param save: optional name to save the detector
     """
     det = SIM.detector
+    # NOTE: update_dxtbx_geoms does not preserve spindle_axis!
+    spindle_vec = copy(SIM.D.spindle_axis)
     if save is not None:
         new_det = Detector()
     for pid in range(len(det)):
@@ -132,6 +135,7 @@ def update_detector(x, ref_params, SIM, save=None, rank=0, force=False):
             panel_dict["slow_axis"] = sdet
             panel_dict["origin"] = origin
             new_det.add_panel(Panel.from_dict(panel_dict))
+    SIM.D.spindle_axis = spindle_vec
 
     if save is not None and rank==0:
         t = time.time()

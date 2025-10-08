@@ -20,7 +20,9 @@ from simtbx.diffBragg import utils, hopper_utils, ensemble_refine_launcher
 from simtbx.diffBragg.refiners.parameters import RangedParameter, Parameters
 from simtbx.diffBragg import psf
 from simtbx.diffBragg.prep_stage2_input import prep_dataframe
-from simtbx.diffBragg.geom_utils import convolve_model_with_psf, detector_model_derivs, PAN_OFS_IDS, PAN_XYZ_IDS, update_detector
+from simtbx.diffBragg.geom_utils import (
+    convolve_model_with_psf,
+    detector_model_derivs, PAN_OFS_IDS, PAN_XYZ_IDS, update_detector)
 from cctbx import miller
 
 
@@ -360,7 +362,6 @@ class Target:
             print("Final Iteration %d:\n\tResid=%f, sigmaZ %f" % (self.iternum, f, self.sigmaZ))
 
 
-
 def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     """
 
@@ -441,7 +442,7 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
 
     # update gonio, TODO: free up gonio axis
     utils.update_SIM_with_gonio(SIM, delta_phi=Modeler.osc_deg,
-                                num_phi_steps=Modeler.phisteps)
+                                num_phi_steps=Modeler.phisteps, spindle_axis=SIM.D.spindle_axis)
 
     # update the Bmatrix
     Modeler.ucell_man.variables = [p.get_val(x[p.xpos]) for p in ucell_pars]
@@ -546,7 +547,7 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     # Umat gradients
     for i_rot, rot in enumerate([rotX, rotY, rotZ]):
         if not rot.fix:
-            rot_db_id = ROTXYZ_ID[i_rot]
+            rot_db_id = hopper_utils.ROTXYZ_ID[i_rot]
             rot_grad = scale*SIM.D.get_derivative_pixels(rot_db_id).as_numpy_array()[:npix]
             rot_grad = rot.get_deriv(x[rot.xpos], rot_grad)
             rot_grad = convolve_model_with_psf(rot_grad, **conv_args)
@@ -850,6 +851,7 @@ def geom_min(params):
                          exp_idx_key="geom_exp_idx",
                          work_distribution=work_distribution)
 
+
     for i_shot in launcher.Modelers:
         Modeler = launcher.Modelers[i_shot]
         set_group_id_slices(Modeler, launcher.panel_group_from_id)
@@ -900,7 +902,7 @@ def geom_min(params):
     # configure diffBragg instance for gradient computation
     if not params.fix.RotXYZ:
         for i_rot in range(3):
-            launcher.SIM.D.refine(ROTXYZ_ID[i_rot])
+            launcher.SIM.D.refine(hopper_utils.ROTXYZ_ID[i_rot])
     if not params.fix.spec:
         launcher.SIM.D.refine(hopper_utils.LAMBDA_IDS[0])
         launcher.SIM.D.refine(hopper_utils.LAMBDA_IDS[1])

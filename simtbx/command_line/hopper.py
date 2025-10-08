@@ -363,7 +363,6 @@ class Script:
                     #del os.environ["DIFFBRAGG_USE_CUDA"]
                     #tracked_fhkl = utils.track_fhkl(Modeler, SIM)
                     #os.environ['DIFFBRAGG_USE_CUDA'] = use_cuda
-                    #from IPython import embed;embed()
                     #self.params.fix.perRoiScale = True
                     #Modeler.params.fix.perRoiScale = True
 
@@ -400,7 +399,7 @@ class Script:
             #shot_df = shot_out["df"]
             #shot_expt = shot_out["expt"]
             #shot_refl = shot_out["refl"]
-
+            
             #if self.params.predictions.integrate_phil is not None:
             do_integrate = self.params.predictions.integrate_phil is not None
             Rstrong = None
