@@ -436,9 +436,9 @@ def get_roi_deltaQ(refls, delta_Q, experiment, centroid='obs'):
 # TODO: pass params object directly to this method
 def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_edge_reflections=False,
                                    reject_roi_with_hotpix=True, background_mask=None, hotpix_mask=None,
-                                   bg_thresh=3.5, set_negative_bg_to_zero=False,
-                                   pad_for_background_estimation=None, use_robust_estimation=True, sigma_rdout=3.,
-                                   min_trusted_pix_per_roi=4, deltaQ=None, experiment=None, weighted_fit=True,
+                                   bg_thresh=3.5, set_negative_bg_to_zero=True,
+                                   pad_for_background_estimation=None, use_robust_estimation=False, sigma_rdout=3.,
+                                   min_trusted_pix_per_roi=4, deltaQ=None, experiment=None, weighted_fit=False,
                                    ret_cov=False, allow_overlaps=False, skip_roi_with_negative_bg=True,
                                    only_high=True, centroid='obs'):
     """
