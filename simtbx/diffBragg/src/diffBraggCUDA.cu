@@ -705,8 +705,17 @@ void freedom(diffBragg_cudaPointers& cp){
         gpuErr(cudaFree(cp.Fhkl_scale_deriv));
         cp.Fhkl_grad_arrays_allocated=false;
     }
-    gpuErr(cudaFree(cp.cu_sourceI_scale));
-    gpuErr(cudaFree(cp.cu_sourceI_grad));
+    if (cp.previous_nsource != 0) {
+        if (cp.cu_sourceI_scale) {
+            gpuErr(cudaFree(cp.cu_sourceI_scale));
+            cp.cu_sourceI_scale = nullptr;
+        }
+        if (cp.cu_sourceI_grad) {
+            gpuErr(cudaFree(cp.cu_sourceI_grad));
+            cp.cu_sourceI_grad = nullptr;
+        }
+        cp.previous_nsource = 0;
+    }
     if (cp.grad_arrays_allocated){
         gpuErr(cudaFree(cp.data_trusted));
         gpuErr(cudaFree(cp.data_freq));
