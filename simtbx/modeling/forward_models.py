@@ -337,7 +337,7 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
     if not return_sim:
         S.D.free_all()
         S.D.free_Fhkl2()
-        if S.D.gpu_free is not None:
+        if cuda and S.D.gpu_free is not None:
             S.D.gpu_free()
 
     ret_val = data
