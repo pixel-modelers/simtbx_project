@@ -695,7 +695,7 @@ class SimData:
                       fast=(1, 0, 0), slow=(0, -1, 0)):
     from dxtbx.model.detector import DetectorFactory
     import numpy as np
-    trusted_range = 0, 2e14
+    trusted_range = -2e14, 2e14
     detsize_s = image_shape[0]*pixelsize_mm
     detsize_f = image_shape[1]*pixelsize_mm
     cent_s = (detsize_s + pixelsize_mm*2)/2.

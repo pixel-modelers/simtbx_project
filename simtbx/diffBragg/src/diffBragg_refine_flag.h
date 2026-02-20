@@ -54,7 +54,8 @@ enum refine_flag : uint32_t {
     REFINE_ETA = (1u << 22),
     REFINE_LAMBDA1 = (1u << 23),
     REFINE_LAMBDA2 = (1u << 24),
-    REFINE_ICELL = (1u << 25)
+    REFINE_ICELL = (1u << 25),
+    REFINE_BFACTOR = (1u << 26)
 };
 
 constexpr unsigned int REFINE_BMAT = REFINE_BMAT1 | REFINE_BMAT2 | REFINE_BMAT3 | REFINE_BMAT4 | REFINE_BMAT5 | REFINE_BMAT6;

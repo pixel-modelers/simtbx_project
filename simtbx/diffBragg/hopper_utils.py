@@ -50,6 +50,8 @@ FHKL_ID = 11
 ETA_ID = 19
 DIFFUSE_ID = 23
 GONIO_ANGLE_ID = 24
+BFACTOR_ID = 25
+BFACTOR_ANISO_ID = 26
 LAMBDA_IDS = 12, 13
 
 DEG = 180 / np.pi
@@ -901,23 +903,58 @@ class DataModeler:
 
         if self.params.init.random_Nabcs is not None:
             init.Nabc = np.random.choice(self.params.init.random_Nabcs, replace=True, size=3)
+
+        self.use_cholesky_Nabc = getattr(self.params, 'use_cholesky_Nabc', False)
+
+        if self.use_cholesky_Nabc:
+            # Cholesky mode: parameterize NABC = L^T * L with 6 lower-triangular elements
+            # L = [[L11,  0,   0 ],
+            #      [L21, L22,  0 ],
+            #      [L31, L32, L33]]
+            # Initialize from diagonal Nabc: L11=sqrt(Na), L22=sqrt(Nb), L33=sqrt(Nc), off-diag=0
+            if init.cholesky is not None:
+                chol_init = list(init.cholesky)
+            else:
+                chol_init = [np.sqrt(init.Nabc[0]), 0, np.sqrt(init.Nabc[1]),
+                             0, 0, np.sqrt(init.Nabc[2])]
+            chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+            for ii in range(6):
+                p = ParameterType(init=chol_init[ii], sigma=sigma.cholesky[ii],
+                                  minval=mins.cholesky[ii], maxval=maxs.cholesky[ii],
+                                  fix=fix.Nabc,  # reuse fix.Nabc to control Cholesky refinement
+                                  name=chol_names[ii],
+                                  center=centers.cholesky[ii] if centers.cholesky is not None else None,
+                                  beta=betas.cholesky[ii] if betas.cholesky is not None else None)
+                P.add(p)
+            # Still need Nabc and Ndef params as fixed placeholders (for code that reads them)
+            for ii in range(3):
+                p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
+                                  minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
+                                  fix=True, name="Nabc%d" % (ii,))
+                P.add(p)
+                p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
+                                  minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
+                                  fix=True, name="Ndef%d" % (ii,))
+                P.add(p)
+        else:
+            for ii in range(3):
+                # Mosaic domain tensor
+                p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
+                                  minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
+                                  fix=fix_Nabc[ii], name="Nabc%d" % (ii,),
+                                  center=centers.Nabc[ii] if centers.Nabc is not None else None,
+                                  beta=betas.Nabc[ii] if betas.Nabc is not None else None)
+                P.add(p)
+
+                p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
+                                  minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
+                                  fix=fix.Ndef, name="Ndef%d" % (ii,),
+                                  center=centers.Ndef[ii] if centers.Ndef is not None else None,
+                                  beta=betas.Ndef[ii] if betas.Ndef is not None else None)
+                P.add(p)
+
+        # diffuse gamma, sigma, and mosaic spread (shared by both Cholesky and legacy modes)
         for ii in range(3):
-            # Mosaic domain tensor
-            p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
-                              minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
-                              fix=fix_Nabc[ii], name="Nabc%d" % (ii,),
-                              center=centers.Nabc[ii] if centers.Nabc is not None else None,
-                              beta=betas.Nabc[ii] if betas.Nabc is not None else None)
-            P.add(p)
-
-            p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
-                              minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
-                              fix=fix.Ndef, name="Ndef%d" % (ii,),
-                              center=centers.Ndef[ii] if centers.Ndef is not None else None,
-                              beta=betas.Ndef[ii] if betas.Ndef is not None else None)
-            P.add(p)
-
-            # diffuse gamma and sigma
             p = ParameterTypes[types.diffuse_gamma](init=init.diffuse_gamma[ii], sigma=sigma.diffuse_gamma[ii],
                               minval=mins.diffuse_gamma[ii], maxval=maxs.diffuse_gamma[ii],
                               fix=fix_difgam[ii], name="diffuse_gamma%d" % (ii,),
@@ -995,6 +1032,23 @@ class DataModeler:
                           center=centers.gonio_angle,
                           beta=betas.gonio_angle)
         P.add(p)
+
+        # per-image B-factor
+        p = ParameterType(init=init.B, sigma=sigma.B,
+                          minval=mins.B, maxval=maxs.B,
+                          fix=fix.B, name="Bfactor",
+                          center=centers.B,
+                          beta=betas.B)
+        P.add(p)
+
+        # anisotropic B-factor (6 components: β11, β22, β33, β12, β13, β23)
+        for ii in range(6):
+            p = ParameterType(init=init.Baniso[ii], sigma=sigma.Baniso[ii],
+                              minval=mins.Baniso[ii], maxval=maxs.Baniso[ii],
+                              fix=fix.Baniso, name="Baniso%d" % ii,
+                              center=centers.Baniso[ii] if centers.Baniso is not None else None,
+                              beta=betas.Baniso[ii] if betas.Baniso is not None else None)
+            P.add(p)
 
         if not self.params.fix.perRoiScale or self.params.use_perRoiScale:
             self.set_slices("roi_id")  # this creates roi_id_unique
@@ -1177,6 +1231,43 @@ class DataModeler:
         else:
             return ret_subimgs
 
+    def set_diffBragg_refinement_flags(self, SIM):
+        """Tell diffBragg which parameters will be refined (must be called before first GPU kernel)."""
+        if self.P["lambda_offset"].refine:
+            for lam_id in LAMBDA_IDS:
+                SIM.D.refine(lam_id)
+        if self.P["RotXYZ0_xtal0"].refine:
+            SIM.D.refine(ROTX_ID)
+            SIM.D.refine(ROTY_ID)
+            SIM.D.refine(ROTZ_ID)
+        if getattr(self, 'use_cholesky_Nabc', False) and "chol_L11" in self.P and self.P["chol_L11"].refine:
+            SIM.D.refine(NCELLS_ID)
+            SIM.D.refine(NCELLS_ID_OFFDIAG)
+        else:
+            if self.P["Nabc0"].refine:
+                SIM.D.refine(NCELLS_ID)
+            if self.P["Ndef0"].refine:
+                SIM.D.refine(NCELLS_ID_OFFDIAG)
+        for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
+            pname = f"group0_{name}"
+            if pname in self.P and self.P[pname].refine:
+                SIM.D.refine(db_id)
+        if self.P["ucell0"].refine:
+            for i_ucell in range(len(self.ucell_man.variables)):
+                SIM.D.refine(UCELL_ID_OFFSET + i_ucell)
+        if self.P["eta_abc0"].refine:
+            SIM.D.refine(ETA_ID)
+        if self.P["detz_shift"].refine:
+            SIM.D.refine(DETZ_ID)
+        if self.P["gonio_angle"].refine:
+            SIM.D.refine(GONIO_ANGLE_ID)
+        if SIM.D.use_diffuse:
+            SIM.D.refine(DIFFUSE_ID)
+        if self.P["Bfactor"].refine:
+            SIM.D.refine(BFACTOR_ID)
+        if self.P["Baniso0"].refine:
+            SIM.D.refine(BFACTOR_ANISO_ID)
+
     def Minimize(self, x0, SIM, i_shot=0):
         self.target = target = TargetFunc(SIM=SIM, niter_per_J=self.params.niter_per_J, profile=self.params.profile)
 
@@ -1216,32 +1307,7 @@ class DataModeler:
         target.terminate_after_n_converged_iterations = self.params.terminate_after_n_converged_iter
         target.percent_change_of_converged = self.params.converged_param_percent_change
         if method in ["L-BFGS-B", "BFGS", "CG", "dogleg", "SLSQP", "Newton-CG", "trust-ncg", "trust-krylov", "trust-exact", "trust-ncg"]:
-            if self.P["lambda_offset"].refine:
-                for lam_id in LAMBDA_IDS:
-                    SIM.D.refine(lam_id)
-            if self.P["RotXYZ0_xtal0"].refine:
-                SIM.D.refine(ROTX_ID)
-                SIM.D.refine(ROTY_ID)
-                SIM.D.refine(ROTZ_ID)
-            if self.P["Nabc0"].refine:
-                SIM.D.refine(NCELLS_ID)
-            for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
-                pname = f"group0_{name}"
-                if pname in self.P and self.P[pname].refine:
-                    SIM.D.refine(db_id)
-            if self.P["Ndef0"].refine:
-                SIM.D.refine(NCELLS_ID_OFFDIAG)
-            if self.P["ucell0"].refine:
-                for i_ucell in range(len(self.ucell_man.variables)):
-                    SIM.D.refine(UCELL_ID_OFFSET + i_ucell)
-            if self.P["eta_abc0"].refine:
-                SIM.D.refine(ETA_ID)
-            if self.P["detz_shift"].refine:
-                SIM.D.refine(DETZ_ID)
-            if self.P["gonio_angle"].refine:
-                SIM.D.refine(GONIO_ANGLE_ID)
-            if SIM.D.use_diffuse:
-                SIM.D.refine(DIFFUSE_ID)
+            self.set_diffBragg_refinement_flags(SIM)
 
             min_kwargs = {'args': (self,SIM, True), "method": method, "jac": target.jac,
                           'hess': self.params.hess, 'callback':callback}
@@ -1768,7 +1834,11 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
     if SIM.refining_Fhkl and update_Fhkl_scales:  # once per iteration
         nscales = SIM.Num_ASU*SIM.num_Fhkl_channels
         current_Fhkl_xvals = x[-nscales:]
-        SIM.Fhkl_scales = SIM.Fhkl_scales_init * np.exp( Mod.params.sigmas.Fhkl *(current_Fhkl_xvals-1))
+        if SIM.Fhkl_linear:
+            SIM.Fhkl_amplitudes = np.sqrt(SIM.Fhkl_scales_init) + SIM.Fhkl_sigmas * (current_Fhkl_xvals - 1)
+            SIM.Fhkl_scales = SIM.Fhkl_amplitudes ** 2
+        else:
+            SIM.Fhkl_scales = SIM.Fhkl_scales_init * np.exp(SIM.Fhkl_sigmas * (current_Fhkl_xvals - 1))
         SIM.D.update_Fhkl_scale_factors(SIM.Fhkl_scales, SIM.num_Fhkl_channels)
 
     # get the unit cell variables
@@ -1818,18 +1888,46 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
 
     # Mosaic block
     Nabc_params = [Mod.P["Nabc%d" % (i_n,)] for i_n in range(3)]
-    Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
-    if SIM.D.isotropic_ncells:
-        Nb = Na
-        Nc = Na
-    SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
-
     Ndef_params = [Mod.P["Ndef%d" % (i_n,)] for i_n in range(3)]
-    Nd, Ne, Nf = [n_param.get_val(x[n_param.xpos]) for n_param in Ndef_params]
-    if SIM.D.isotropic_ncells:
-        Ne = Nd
-        Nf = Nd
-    SIM.D.Ncells_def = Nd, Ne, Nf
+
+    use_cholesky = getattr(Mod, 'use_cholesky_Nabc', False)
+    chol_params = None
+    if use_cholesky:
+        chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+        chol_params = [Mod.P[n] for n in chol_names]
+        L11, L21, L22, L31, L32, L33 = [p.get_val(x[p.xpos]) for p in chol_params]
+        # NABC = L^T * L (positive definite)
+        Na = L11*L11
+        Nb = L21*L21 + L22*L22
+        Nc = L31*L31 + L32*L32 + L33*L33
+        Nd = L11*L21
+        Ne = L21*L31 + L22*L32
+        Nf = L11*L31
+        SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
+        SIM.D.Ncells_def = Nd, Ne, Nf
+    else:
+        Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
+        if SIM.D.isotropic_ncells:
+            Nb = Na
+            Nc = Na
+        SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
+
+        Nd, Ne, Nf = [n_param.get_val(x[n_param.xpos]) for n_param in Ndef_params]
+        if SIM.D.isotropic_ncells:
+            Ne = Nd
+            Nf = Nd
+        SIM.D.Ncells_def = Nd, Ne, Nf
+
+    # per-image B-factor
+    Bfac_param = Mod.P["Bfactor"]
+    Bfac_val = Bfac_param.get_val(x[Bfac_param.xpos])
+    SIM.D.Bfactor_image = Bfac_val
+
+    # anisotropic B-factor
+    Baniso_params = [Mod.P["Baniso%d" % i] for i in range(6)]
+    if Baniso_params[0].refine:
+        Baniso_vals = tuple(p.get_val(x[p.xpos]) for p in Baniso_params)
+        SIM.D.Bfactor_aniso = Baniso_vals
 
     # diffuse signals
     if SIM.D.use_diffuse:
@@ -1856,7 +1954,8 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
     J = None
     if compute_grad:
         # This should be all params save the Fhkl params
-        J = np.zeros((nparam-SIM.Num_ASU*SIM.num_Fhkl_channels, npix))  # gradients
+        nfhkl = SIM.Num_ASU*SIM.num_Fhkl_channels if SIM.refining_Fhkl else 0
+        J = np.zeros((nparam - nfhkl, npix))  # gradients
 
     model_pix = None
     #TODO check roiScales mode and if its broken, git rid of it!
@@ -1926,23 +2025,64 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                     rot_grad = rot_p.get_deriv(x[rot_p.xpos], rot_grad)
                     J[rot_p.xpos] += rot_grad
 
-            if Nabc_params[0].refine:
+            if use_cholesky and chol_params is not None and chol_params[0].refine:
+                # Cholesky chain-rule: dI/dLij from kernel's dI/dNa..dI/dNf
                 Nabc_grads = SIM.D.get_ncells_derivative_pixels()
-                for i_n in range(3):
-                    N_grad = scale*(Nabc_grads[i_n][:npix].as_numpy_array())
-                    p = Nabc_params[i_n]
-                    N_grad = p.get_deriv(x[p.xpos], N_grad)
-                    J[p.xpos] += N_grad
-                    if SIM.D.isotropic_ncells:
-                        break
-
-            if Ndef_params[0].refine:
                 Ndef_grads = SIM.D.get_ncells_def_derivative_pixels()
-                for i_n in range(3):
-                    N_grad = scale * (Ndef_grads[i_n][:npix].as_numpy_array())
-                    p = Ndef_params[i_n]
-                    N_grad = p.get_deriv(x[p.xpos], N_grad)
-                    J[p.xpos] += N_grad
+                dI_dNa = scale * Nabc_grads[0][:npix].as_numpy_array()
+                dI_dNb = scale * Nabc_grads[1][:npix].as_numpy_array()
+                dI_dNc = scale * Nabc_grads[2][:npix].as_numpy_array()
+                dI_dNd = scale * Ndef_grads[0][:npix].as_numpy_array()
+                dI_dNe = scale * Ndef_grads[1][:npix].as_numpy_array()
+                dI_dNf = scale * Ndef_grads[2][:npix].as_numpy_array()
+                # Chain rule: NABC = L^T*L where L is lower triangular
+                # Na=L11^2, Nb=L21^2+L22^2, Nc=L31^2+L32^2+L33^2
+                # Nd=L11*L21, Ne=L21*L31+L22*L32, Nf=L11*L31
+                dI_dL = [
+                    dI_dNa * 2*L11 + dI_dNd * L21 + dI_dNf * L31,     # dI/dL11
+                    dI_dNd * L11 + dI_dNb * 2*L21 + dI_dNe * L31,     # dI/dL21
+                    dI_dNb * 2*L22 + dI_dNe * L32,                      # dI/dL22
+                    dI_dNf * L11 + dI_dNe * L21 + dI_dNc * 2*L31,     # dI/dL31
+                    dI_dNe * L22 + dI_dNc * 2*L32,                      # dI/dL32
+                    dI_dNc * 2*L33,                                      # dI/dL33
+                ]
+                for i_chol in range(6):
+                    p = chol_params[i_chol]
+                    chol_grad = p.get_deriv(x[p.xpos], dI_dL[i_chol])
+                    J[p.xpos] += chol_grad
+            else:
+                if Nabc_params[0].refine:
+                    Nabc_grads = SIM.D.get_ncells_derivative_pixels()
+                    for i_n in range(3):
+                        N_grad = scale*(Nabc_grads[i_n][:npix].as_numpy_array())
+                        p = Nabc_params[i_n]
+                        N_grad = p.get_deriv(x[p.xpos], N_grad)
+                        J[p.xpos] += N_grad
+                        if SIM.D.isotropic_ncells:
+                            break
+
+                if Ndef_params[0].refine:
+                    Ndef_grads = SIM.D.get_ncells_def_derivative_pixels()
+                    for i_n in range(3):
+                        N_grad = scale * (Ndef_grads[i_n][:npix].as_numpy_array())
+                        p = Ndef_params[i_n]
+                        N_grad = p.get_deriv(x[p.xpos], N_grad)
+                        J[p.xpos] += N_grad
+
+            # per-image B-factor gradient
+            if Bfac_param.refine:
+                Bfac_grad = scale * SIM.D.get_Bfactor_derivative_pixels().as_numpy_array()[:npix]
+                Bfac_grad = Bfac_param.get_deriv(x[Bfac_param.xpos], Bfac_grad)
+                J[Bfac_param.xpos] += Bfac_grad
+
+            # anisotropic B-factor gradients
+            if Baniso_params[0].refine:
+                Baniso_grads = SIM.D.get_Bfactor_aniso_derivative_pixels()
+                for i_ba in range(6):
+                    ba_grad = scale * Baniso_grads[i_ba][:npix].as_numpy_array()
+                    p = Baniso_params[i_ba]
+                    ba_grad = p.get_deriv(x[p.xpos], ba_grad)
+                    J[p.xpos] += ba_grad
 
             if SIM.D.use_diffuse:
                 for t in ['gamma','sigma']:
@@ -2032,11 +2172,23 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     RotXYZ = [Mod.P["RotXYZ%d_xtal%d" % (i, i_xtal)] for i in range(3)]
     rotX, rotY, rotZ = [r.get_val(x[r.xpos]) for r in RotXYZ]
 
-    Nabc = [Mod.P["Nabc%d" % (i, )] for i in range(3)]
-    Na, Nb, Nc = [p.get_val(x[p.xpos]) for p in Nabc]
+    use_cholesky = getattr(Mod, 'use_cholesky_Nabc', False)
+    if use_cholesky and "chol_L11" in Mod.P:
+        chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+        chol_vals = [Mod.P[n].get_val(x[Mod.P[n].xpos]) for n in chol_names]
+        L11, L21, L22, L31, L32, L33 = chol_vals
+        Na = L11*L11
+        Nb = L21*L21 + L22*L22
+        Nc = L31*L31 + L32*L32 + L33*L33
+        Nd = L11*L21
+        Ne = L21*L31 + L22*L32
+        Nf = L11*L31
+    else:
+        Nabc = [Mod.P["Nabc%d" % (i, )] for i in range(3)]
+        Na, Nb, Nc = [p.get_val(x[p.xpos]) for p in Nabc]
 
-    Ndef = [Mod.P["Ndef%d" % (i, )] for i in range(3)]
-    Nd, Ne, Nf = [p.get_val(x[p.xpos]) for p in Ndef]
+        Ndef = [Mod.P["Ndef%d" % (i, )] for i in range(3)]
+        Nd, Ne, Nf = [p.get_val(x[p.xpos]) for p in Ndef]
 
     diff_gam_abc = [Mod.P["diffuse_gamma%d" % i] for i in range(3)]
     diff_gam_a, diff_gam_b, diff_gam_c = [p.get_val(x[p.xpos]) for p in diff_gam_abc]
@@ -2056,13 +2208,18 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     GonioAng = Mod.P["gonio_angle"]
     gonio_angle = GonioAng.get_val(x[GonioAng.xpos])
 
+    Bfac_p = Mod.P["Bfactor"]
+    Bfactor = Bfac_p.get_val(x[Bfac_p.xpos])
+
     if as_dict:
-        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
-        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_bvals = f_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle'
+        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
+        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_b', 'diff_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle', 'Bfactor'
         param_dict = dict(zip(keys, vals))
+        if use_cholesky and "chol_L11" in Mod.P:
+            param_dict['cholesky'] = chol_vals
         return param_dict
     else:
-        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
+        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
 
 
 class TargetFunc:
@@ -2148,11 +2305,13 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     trusted = mod.all_trusted
     background = mod.all_background
     params = mod.params
+    use_cholesky = getattr(mod, 'use_cholesky_Nabc', False)
     if udpate_terms is not None:
         # if approximating the gradients, then fix the parameter refinment managers in diffBragg
         # so we dont waste time computing them
         _compute_grad = False
         SIM.D.fix(NCELLS_ID)
+        SIM.D.fix(NCELLS_ID_OFFDIAG)
         for db_id in PAN_OFS_IDS + PAN_XYZ_IDS:
             SIM.D.fix(db_id)
         SIM.D.fix(ROTX_ID)
@@ -2166,11 +2325,20 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         SIM.D.fix(ETA_ID)
         SIM.D.fix(DIFFUSE_ID)
         SIM.D.fix(GONIO_ANGLE_ID)
+        SIM.D.fix(BFACTOR_ID)
+        SIM.D.fix(BFACTOR_ANISO_ID)
     elif compute_grad:
         # actually compute the gradients
         _compute_grad = True
-        if mod.P["Nabc0"].refine:
+        if use_cholesky and "chol_L11" in mod.P and mod.P["chol_L11"].refine:
+            # Cholesky mode: need both diagonal and off-diagonal kernel gradients
             SIM.D.let_loose(NCELLS_ID)
+            SIM.D.let_loose(NCELLS_ID_OFFDIAG)
+        else:
+            if mod.P["Nabc0"].refine:
+                SIM.D.let_loose(NCELLS_ID)
+            if mod.P["Ndef0"].refine:
+                SIM.D.let_loose(NCELLS_ID_OFFDIAG)
         for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
             pname = f"group0_{name}"
             if pname in mod.P and mod.P[pname].refine:
@@ -2191,6 +2359,10 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         if mod.P["lambda_offset"].refine:
             for lam_id in LAMBDA_IDS:
                 SIM.D.let_loose(lam_id)
+        if mod.P["Bfactor"].refine:
+            SIM.D.let_loose(BFACTOR_ID)
+        if mod.P["Baniso0"].refine:
+            SIM.D.let_loose(BFACTOR_ANISO_ID)
     else:
         _compute_grad = False
     model_bragg, Jac = model(x, mod, SIM, compute_grad=_compute_grad)
@@ -2215,17 +2387,25 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     resid = data - model_pix
 
     # data contributions to target function
-    V = model_pix + sigma_rdout**2
+    V_model = model_pix + sigma_rdout**2
+    use_fixed_V = params.correct_Fhkl_gradient_bias and SIM.refining_Fhkl and hasattr(mod, 'V_fixed')
+    V = mod.V_fixed if use_fixed_V else V_model
     # TODO:what if V is allowed to be negative? The logarithm/sqrt will explore below
-    # TODO ignore overflow encountered here ? 
+    # TODO ignore overflow encountered here ?
     resid_square = resid**2
-    fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+    if use_fixed_V:
+        # Pure weighted chi-squared with FIXED variance from initial model.
+        # Fixed V eliminates both the log(V) bias and the resid^2/V^2 bias
+        # that arise when V depends on the parameters being optimized.
+        fLogLike = (.5 * resid_square / V)
+    else:
+        fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
     if params.roi.allow_overlapping_spots:
         fLogLike /= mod.all_freq
     fLogLike = fLogLike[trusted].sum()   # negative log Likelihood target
 
     # width of z-score should decrease as refinement proceeds
-    zscore_per = resid/np.sqrt(V)
+    zscore_per = resid/np.sqrt(V_model)
     zscore_sigma = np.std(zscore_per[trusted])
 
     restraint_terms = {}
@@ -2258,6 +2438,43 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
             fhkl_grad_channels[i_chan] = fhkl_restraint_grad
             restraint_terms["Fhkl_chan%d"% i_chan] = fhkl_restraint_f
 
+    # Fhkl restraint toward targets (fixed or resolution-bin averages)
+    snr_restraint_delta = None
+    if SIM.refining_Fhkl and hasattr(SIM, 'Fhkl_restraint_weights') and SIM.Fhkl_restraint_weights is not None:
+        current_scales = SIM.Fhkl_scales
+        if hasattr(SIM, 'Fhkl_restraint_targets') and SIM.Fhkl_restraint_targets is not None:
+            targets = SIM.Fhkl_restraint_targets
+        else:
+            bin_avg = np.zeros(SIM.Fhkl_reso_n_bins)
+            for b in range(SIM.Fhkl_reso_n_bins):
+                in_bin = SIM.Fhkl_reso_bins == b
+                if in_bin.any():
+                    bin_avg[b] = current_scales[in_bin].mean()
+            targets = bin_avg[SIM.Fhkl_reso_bins]
+        snr_restraint_delta = current_scales - targets
+        restraint_terms["Fhkl_snr"] = 0.5 * np.sum(SIM.Fhkl_restraint_weights * snr_restraint_delta**2)
+
+    # Wilson prior on Fhkl intensities: -log P_Wilson(I) where I = scale * |F_mtz|^2
+    wilson_grad = None
+    if SIM.refining_Fhkl and hasattr(SIM, 'wilson_sigma') and SIM.wilson_sigma is not None:
+        I_current = SIM.Fhkl_scales * SIM.wilson_F_sq  # current intensity per HKL
+        is_cent = SIM.is_centric_full
+        is_acent = ~is_cent
+        sigma = SIM.wilson_sigma
+        # Acentric: -log P = I/Sigma
+        wilson_f = np.zeros(len(I_current))
+        wilson_f[is_acent] = I_current[is_acent] / sigma[is_acent]
+        # Centric: -log P = I/(2*Sigma) - 0.5*log(I)  (only for I > 0)
+        cent_pos = is_cent & (I_current > 1e-30)
+        wilson_f[cent_pos] = (I_current[cent_pos] / (2 * sigma[cent_pos])
+                              - 0.5 * np.log(I_current[cent_pos]))
+        restraint_terms["Wilson"] = wilson_f.sum()
+        # Gradient w.r.t. scale: d/ds [-log P]
+        wilson_grad = np.zeros(len(I_current))
+        wilson_grad[is_acent] = SIM.wilson_F_sq[is_acent] / sigma[is_acent]
+        wilson_grad[cent_pos] = (SIM.wilson_F_sq[cent_pos] / (2 * sigma[cent_pos])
+                                 - 0.5 / SIM.Fhkl_scales[cent_pos])
+
 #   accumulate target function
     f_restraints = 0
     if restraint_terms:
@@ -2274,7 +2491,12 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     g = None  # gradient vector
     gnorm = -1  # norm of gradient vector
     if compute_grad:
-        common_grad_term_all = (0.5 /V * (1-2*resid - resid_square / V))
+        if use_fixed_V:
+            # Exact gradient of 0.5*resid^2/V_fixed w.r.t. model m (V_fixed is constant):
+            # df/dm = -resid/V_fixed
+            common_grad_term_all = -resid / V
+        else:
+            common_grad_term_all = (0.5 /V * (1-2*resid - resid_square / V))
         if params.roi.allow_overlapping_spots:
             common_grad_term_all /= mod.all_freq
         common_grad_term = common_grad_term_all[trusted]
@@ -2360,13 +2582,31 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
             fhkl_grad = SIM.D.add_Fhkl_gradients(pfs, resid, V, trusted,
                                                  mod.all_freq, SIM.num_Fhkl_channels, G)
 
+            if params.correct_Fhkl_gradient_bias:
+                # The C++ kernel gradient includes a log(V) bias term (the "1" in Gterm=1-2u-u^2/V).
+                # Subtract it by computing the gradient at zero residual (where only the bias survives).
+                fhkl_bias = SIM.D.add_Fhkl_gradients(pfs, np.zeros_like(resid), V, trusted,
+                                                      mod.all_freq, SIM.num_Fhkl_channels, G)
+                fhkl_grad -= fhkl_bias
+
             if params.betas.Fhkl is not None:
                 for i_chan in range(SIM.num_Fhkl_channels):
                     restraint_contribution_to_grad = fhkl_grad_channels[i_chan]
                     fhkl_slice = slice(i_chan*SIM.Num_ASU, (i_chan+1)*SIM.Num_ASU, 1)
                     np.add.at(fhkl_grad, fhkl_slice, restraint_contribution_to_grad)
 
-            fhkl_grad *= SIM.Fhkl_scales*params.sigmas.Fhkl  # sigma is always 1 for now..
+            # SNR-adaptive restraint gradient: d/ds [0.5 * w * (s - target)^2] = w * (s - target)
+            if snr_restraint_delta is not None:
+                fhkl_grad += SIM.Fhkl_restraint_weights * snr_restraint_delta
+
+            # Wilson prior gradient (in scale-space, before chain rule)
+            if wilson_grad is not None:
+                fhkl_grad += wilson_grad
+
+            if SIM.Fhkl_linear:
+                fhkl_grad *= 2 * SIM.Fhkl_amplitudes * SIM.Fhkl_sigmas
+            else:
+                fhkl_grad *= SIM.Fhkl_scales * SIM.Fhkl_sigmas
 
             g = np.append(g, fhkl_grad)
 
@@ -2397,12 +2637,79 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     Modeler.set_parameters_for_experiment(best=best)
     SIM.D.device_Id = gpu_device
 
+    # Set refinement flags before any GPU kernel call (auto-sigma, bias-correct)
+    # so the GPU allocates memory for all needed gradients upfront
+    Modeler.set_diffBragg_refinement_flags(SIM)
+
     nparam = len(Modeler.P)
     if SIM.refining_Fhkl:
         nparam += SIM.Num_ASU*SIM.num_Fhkl_channels
     x0 = [1] * nparam
 
-    x = Modeler.Minimize(x0, SIM)
+    if SIM.refining_Fhkl and params.correct_Fhkl_gradient_bias:
+        # Precompute fixed variance from initial model for unbiased WLS objective.
+        # Using V_fixed (constant w.r.t. parameters) eliminates the resid^2/V^2 bias
+        # that arises when V = model + sigma^2 depends on the parameters being optimized.
+        model_init, _ = model(np.ones(nparam), Modeler, SIM, compute_grad=False)
+        Modeler.V_fixed = model_init + Modeler.all_background + Modeler.all_sigma_rdout**2
+
+    if SIM.refining_Fhkl:
+        print("Fhkl parameterization: %s" % ("linear" if SIM.Fhkl_linear else "exponential"))
+
+    # Check if any non-Fhkl parameters are being refined (G, Nabc, etc.)
+    has_free_non_fhkl = any(
+        p.refine for name, p in Modeler.P.items()
+        if not name.startswith("scale_roi") and not name.startswith("Fhkl_"))
+
+    if SIM.refining_Fhkl and params.auto_Fhkl_sigma:
+        if has_free_non_fhkl:
+            # Two-pass strategy: when G and Fhkl are jointly refined (ill-conditioned
+            # due to G*F^2 degeneracy), first converge with uniform sigma (which L-BFGS-B
+            # handles well), then compute auto-sigma at the converged point and do a
+            # fine-tuning pass. Computing auto-sigma before convergence gives wrong
+            # curvatures because the operating point (G, Fhkl) is far from the solution.
+            print("Auto-sigma pass 1: uniform sigma, converging G+Fhkl jointly...")
+            x_pass1 = Modeler.Minimize(x0, SIM)
+
+            print("Computing per-Fhkl sigmas from curvatures at converged operating point...")
+            _compute_fhkl_sigmas_from_curvatures(Modeler, SIM, x0=x_pass1)
+
+            # Remap Fhkl x values to preserve actual scale factors under new sigma.
+            # scale = init * exp(sigma * (x-1)), so to keep the same scale:
+            #   x_new = 1 + (old_sigma / new_sigma) * (x_old - 1)
+            nscales = SIM.Num_ASU * SIM.num_Fhkl_channels
+            old_sigma = float(params.sigmas.Fhkl)
+            x_pass1 = np.array(x_pass1, dtype=np.float64)
+            x_fhkl = x_pass1[-nscales:]
+            new_sigmas = SIM.Fhkl_sigmas
+            has_signal = new_sigmas > 0
+            x_fhkl[has_signal] = 1.0 + (old_sigma / new_sigmas[has_signal]) * (x_fhkl[has_signal] - 1.0)
+            x_pass1[-nscales:] = x_fhkl
+            print("Remapped %d Fhkl x-values to preserve scale factors under new sigma" % has_signal.sum())
+
+            # Recompute V_fixed at converged operating point if bias correction is on
+            if params.correct_Fhkl_gradient_bias:
+                model_pass1, _ = model(x_pass1, Modeler, SIM, compute_grad=False)
+                Modeler.V_fixed = model_pass1 + Modeler.all_background + Modeler.all_sigma_rdout**2
+
+            print("Auto-sigma pass 2: per-Fhkl sigma, fine-tuning...")
+            x0 = list(x_pass1)
+        else:
+            print("Computing per-Fhkl sigmas from curvatures...")
+            _compute_fhkl_sigmas_from_curvatures(Modeler, SIM)
+    else:
+        if SIM.refining_Fhkl:
+            print("Using uniform Fhkl sigma=%.4g (auto_Fhkl_sigma=%s)" % (params.sigmas.Fhkl, params.auto_Fhkl_sigma))
+
+    if SIM.refining_Fhkl and params.Fhkl_wilson_prior:
+        _setup_wilson_prior(Modeler, SIM)
+
+    if SIM.refining_Fhkl and params.Fhkl_two_stage_threshold is not None:
+        x = _two_stage_fhkl_refine(Modeler, SIM, params, x0)
+    else:
+        if SIM.refining_Fhkl and params.Fhkl_restraint_snr_sigma is not None:
+            _setup_fhkl_snr_restraint(Modeler, SIM)
+        x = Modeler.Minimize(x0, SIM)
     compute_grad = params.method=="L-BFGS-B"
     Modeler.best_model, best_Jac = model(x, Modeler, SIM, compute_grad=compute_grad, dont_rescale_gradient=True)
     Modeler.best_model_includes_background = False
@@ -2445,7 +2752,7 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
 
 
 def update_detector_from_x(Mod, SIM, x):
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _,_ = get_param_from_x(x, Mod)
     detz_shift_mm = detz_shift*1e3
     det = SIM.detector
     det = utils.shift_panelZ(det, detz_shift_mm)
@@ -2486,7 +2793,7 @@ def update_crystal_from_x(Mod, SIM, x):
     :param x: parameters returned by hopper_utils (instance of simtbx.diffBragg.refiners.parameters.Parameters()
     :return: a new dxtbx.model.Crystal object with updated unit cell and orientation matrix
     """
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _,_ = get_param_from_x(x, Mod)
     ucparam = a, b, c, al, be, ga
     return new_cryst_from_rotXYZ_and_ucell((rotX,rotY,rotZ), ucparam, SIM.crystal.dxtbx_crystal)
 
@@ -2902,6 +3209,8 @@ def _set_Fhkl_refinement_flags(params, SIM):
 
         num_unique_hkl = len(asu_map)
         SIM.Fhkl_scales_init = np.ones(num_unique_hkl * SIM.num_Fhkl_channels)
+        SIM.Fhkl_sigmas = np.full(num_unique_hkl * SIM.num_Fhkl_channels, float(params.sigmas.Fhkl))
+        SIM.Fhkl_linear = params.Fhkl_linear_parameterization
         SIM.refining_Fhkl = True
         SIM.Num_ASU = num_unique_hkl  # TODO replace with diffBragg property
         if params.betas.Fhkl is not None or params.betas.Finit is not None:
@@ -2924,6 +3233,382 @@ def _set_Fhkl_refinement_flags(params, SIM):
                 SIM.is_centric[idx] = is_centric
 
             SIM.where_is_centric = np.where(SIM.is_centric)[0]
+
+
+def _compute_fhkl_sigmas_from_curvatures(Modeler, SIM, x0=None):
+    """Compute per-Fhkl sigma from diagonal Hessian at a given operating point.
+
+    Runs a forward model at x0 (default: all ones), computes exact diagonal Hessian via
+    add_Fhkl_gradients(errors=True), sets SIM.Fhkl_sigmas = 1/sqrt(|H_ii|).
+
+    If x0 is provided (e.g. from a warm-up pass), the Hessian is computed at that
+    operating point rather than the initial point, giving more accurate curvatures
+    when non-Fhkl parameters (G, Nabc) have been pre-converged.
+    """
+    nscales = SIM.Num_ASU * SIM.num_Fhkl_channels
+    nparam = len(Modeler.P) + nscales
+    if x0 is None:
+        x0 = np.ones(nparam)
+    else:
+        x0 = np.array(x0, dtype=np.float64)
+        if len(x0) < nparam:
+            # x0 has only non-Fhkl params; append Fhkl params at x=1
+            x0 = np.concatenate([x0, np.ones(nscales)])
+
+    # Always evaluate model fresh at the given operating point
+    model_bragg, _ = model(x0, Modeler, SIM, compute_grad=False)
+    model_pix = model_bragg + Modeler.all_background
+    resid = Modeler.all_data - model_pix
+    V = model_pix + Modeler.all_sigma_rdout ** 2
+
+    G = Modeler.P["G_xtal0"].get_val(x0[Modeler.P["G_xtal0"].xpos])
+
+    # Diagonal Hessian from C++ kernel
+    hessian_diag = SIM.D.add_Fhkl_gradients(
+        Modeler.pan_fast_slow, resid, V, Modeler.all_trusted, Modeler.all_freq,
+        SIM.num_Fhkl_channels, G, errors=True)
+
+    # sigma_i = 1/sqrt(|H_ii|), with floor for unobserved reflections
+    # For squared-amplitude (linear) parameterization, ds/dx = 2*a*sigma at x=1 (a=1),
+    # so H_xx = 4*sigma^2*H_ss. To get H_xx=1: sigma = 1/(2*sqrt(H_ss)).
+    abs_hess = np.abs(hessian_diag)
+    has_signal = abs_hess > 1e-12
+    sigmas = np.full(nscales, float(Modeler.params.sigmas.Fhkl))  # default for no-signal
+    raw_sigmas = np.full(nscales, 0.0)
+    raw_sigmas[has_signal] = 1.0 / np.sqrt(abs_hess[has_signal])
+    if SIM.Fhkl_linear:
+        raw_sigmas[has_signal] *= 0.5  # correct for ds/dx = 2*a*sigma chain rule
+    sigmas[has_signal] = raw_sigmas[has_signal]
+
+    # Rescale: preserve relative curvature ratios, but match default sigma magnitude.
+    # This ensures Fhkl gradients remain comparable to other parameters (Nabc, G, etc.)
+    # when jointly refined — without this, auto-sigma makes Fhkl gradients too small
+    # and the optimizer converges on non-Fhkl params before Fhkl can move.
+    if has_signal.any():
+        hs = abs_hess[has_signal]
+        rs = raw_sigmas[has_signal]
+        print("Fhkl Hessian (observed): min=%.4g, max=%.4g, median=%.4g"
+              % (hs.min(), hs.max(), np.median(hs)))
+        print("Fhkl raw sigma (before rescale): min=%.4g, max=%.4g, median=%.4g"
+              % (rs.min(), rs.max(), np.median(rs)))
+        median_observed = float(np.median(sigmas[has_signal]))
+        default_sigma = float(Modeler.params.sigmas.Fhkl)
+        scale_factor = default_sigma / median_observed
+        print("Fhkl sigma rescale: factor=%.4g (default=%.4g / median=%.4g)"
+              % (scale_factor, default_sigma, median_observed))
+        sigmas[has_signal] *= scale_factor
+        print("Fhkl sigma after rescale (observed): min=%.4g, max=%.4g, median=%.4g"
+              % (sigmas[has_signal].min(), sigmas[has_signal].max(), np.median(sigmas[has_signal])))
+
+    sigmas = np.clip(sigmas, 1e-4, 100)
+
+    SIM.Fhkl_sigmas = sigmas
+    SIM.Fhkl_hessian_diag = hessian_diag  # store for SNR-adaptive restraints
+    print("Fhkl auto-sigma (final): min=%.4g, max=%.4g, median=%.4g, num_with_signal=%d/%d"
+          % (sigmas.min(), sigmas.max(), np.median(sigmas), has_signal.sum(), nscales))
+    MAIN_LOGGER.info("Fhkl auto-sigma: min=%.4g, max=%.4g, median=%.4g"
+                     % (sigmas.min(), sigmas.max(), np.median(sigmas)))
+
+
+def _setup_wilson_prior(Modeler, SIM):
+    """Set up Wilson statistics prior for Fhkl refinement.
+
+    Computes Sigma(d) per resolution bin (expected intensity under Wilson distribution)
+    and centric flags. These are used in target_func to add a Bayesian prior:
+      acentric: -log P(I) = I/Sigma
+      centric:  -log P(I) = I/(2*Sigma) - 0.5*log(I)
+    """
+    from cctbx import uctbx, crystal, miller
+    from cctbx.array_family import flex
+
+    nscales = SIM.Num_ASU * SIM.num_Fhkl_channels
+
+    # Get centric flags (recompute if not already set)
+    if not hasattr(SIM, 'is_centric') or SIM.is_centric is None:
+        sym = crystal.symmetry(SIM.D.unit_cell_tuple, Modeler.params.space_group)
+        hkl_flex = flex.miller_index(list(SIM.asu_map_int.keys()))
+        mset = miller.set(sym, hkl_flex, True)
+        cent = mset.centric_flags()
+        cent_map = {h: flag for h, flag in zip(cent.indices(), cent.data())}
+        SIM.is_centric = np.zeros(SIM.Num_ASU, bool)
+        for h, idx in SIM.asu_map_int.items():
+            SIM.is_centric[idx] = cent_map[h]
+
+    # Get |F|^2 from the MTZ (these are the perturbed/input structure factors)
+    Fp1 = SIM.D.Fhkl
+    Fp1_map = {h: amp for h, amp in zip(Fp1.indices(), Fp1.data())}
+    F_sq = np.zeros(SIM.Num_ASU)  # |F_mtz|^2 per ASU index
+    idx_to_asu = {idx: asu for asu, idx in SIM.asu_map_int.items()}
+    for idx in range(SIM.Num_ASU):
+        if idx in idx_to_asu:
+            hkl = idx_to_asu[idx]
+            if hkl in Fp1_map:
+                F_sq[idx] = Fp1_map[hkl] ** 2
+
+    # Compute d-spacings for resolution binning
+    uc = uctbx.unit_cell(SIM.D.unit_cell_tuple)
+    d_spacings = np.zeros(SIM.Num_ASU)
+    for idx in range(SIM.Num_ASU):
+        if idx in idx_to_asu:
+            d_spacings[idx] = uc.d(idx_to_asu[idx])
+
+    # Compute Sigma(d) = <|F|^2> per resolution bin
+    n_bins = Modeler.params.Fhkl_restraint_n_bins
+    valid = d_spacings > 0
+    if valid.sum() < n_bins:
+        n_bins = max(1, valid.sum() // 3)
+    d_valid = d_spacings[valid]
+    bin_edges = np.percentile(np.sort(d_valid), np.linspace(0, 100, n_bins + 1))
+    bin_edges[0] -= 1e-6
+    bin_edges[-1] += 1e-6
+    bin_assignments = np.digitize(d_spacings, bin_edges) - 1
+    bin_assignments = np.clip(bin_assignments, 0, n_bins - 1)
+
+    # Sigma = mean |F|^2 per bin (Wilson expectation)
+    sigma_wilson = np.ones(n_bins)
+    for b in range(n_bins):
+        in_bin = (bin_assignments == b) & valid & (F_sq > 0)
+        if in_bin.sum() > 0:
+            sigma_wilson[b] = F_sq[in_bin].mean()
+
+    # Store per-HKL: Sigma(d) for this HKL, and F_sq
+    wilson_sigma = sigma_wilson[bin_assignments]  # Sigma(d) per HKL
+
+    # Handle multi-channel case
+    if SIM.num_Fhkl_channels > 1:
+        wilson_sigma = np.tile(wilson_sigma, SIM.num_Fhkl_channels)
+        F_sq = np.tile(F_sq, SIM.num_Fhkl_channels)
+        SIM.is_centric_full = np.tile(SIM.is_centric, SIM.num_Fhkl_channels)
+    else:
+        SIM.is_centric_full = SIM.is_centric
+
+    SIM.wilson_sigma = wilson_sigma
+    SIM.wilson_F_sq = F_sq
+
+    n_cent = SIM.is_centric_full.sum()
+    print("Wilson prior: %d bins, %d centric / %d acentric HKLs"
+          % (n_bins, n_cent, nscales - n_cent))
+    print("Wilson Sigma per bin: %s" % ", ".join(["%.1f" % s for s in sigma_wilson]))
+
+
+def _setup_fhkl_snr_restraint(Modeler, SIM):
+    """Set up per-Fhkl restraints toward resolution-bin averages, weighted by SNR.
+
+    Low-SNR reflections (small Hessian) get strong restraints toward their
+    resolution-bin average, preventing noise-driven overfitting. High-SNR
+    reflections are free to refine.
+    """
+    from cctbx import uctbx
+
+    nscales = SIM.Num_ASU * SIM.num_Fhkl_channels
+    sigma = Modeler.params.Fhkl_restraint_snr_sigma
+    n_bins = Modeler.params.Fhkl_restraint_n_bins
+
+    # Compute Hessian if not already done (e.g. auto_Fhkl_sigma was not enabled)
+    if not hasattr(SIM, 'Fhkl_hessian_diag'):
+        nparam = len(Modeler.P) + nscales
+        if hasattr(Modeler, 'V_fixed'):
+            V = Modeler.V_fixed
+            resid = Modeler.all_data - (V - Modeler.all_sigma_rdout ** 2)
+        else:
+            x0 = np.ones(nparam)
+            model_bragg, _ = model(x0, Modeler, SIM, compute_grad=False)
+            model_pix = model_bragg + Modeler.all_background
+            resid = Modeler.all_data - model_pix
+            V = model_pix + Modeler.all_sigma_rdout ** 2
+        G = Modeler.P["G_xtal0"].get_val(1.0)
+        SIM.Fhkl_hessian_diag = SIM.D.add_Fhkl_gradients(
+            Modeler.pan_fast_slow, resid, V, Modeler.all_trusted, Modeler.all_freq,
+            SIM.num_Fhkl_channels, G, errors=True)
+
+    abs_hess = np.abs(SIM.Fhkl_hessian_diag)
+    has_signal = abs_hess > 1e-12
+
+    if has_signal.sum() < 2:
+        MAIN_LOGGER.warning("Too few signal-bearing HKLs for SNR restraint (%d)" % has_signal.sum())
+        SIM.Fhkl_restraint_weights = None
+        return
+
+    # Compute d-spacings for all ASU HKLs
+    uc = uctbx.unit_cell(SIM.D.unit_cell_tuple)
+    idx_to_asu = {idx: asu for asu, idx in SIM.asu_map_int.items()}
+    d_spacings = np.zeros(SIM.Num_ASU)
+    for idx in range(SIM.Num_ASU):
+        if idx in idx_to_asu:
+            d_spacings[idx] = uc.d(idx_to_asu[idx])
+
+    # Extend to full nscales for multi-channel
+    if SIM.num_Fhkl_channels > 1:
+        d_full = np.tile(d_spacings, SIM.num_Fhkl_channels)
+    else:
+        d_full = d_spacings
+
+    # Create resolution bins from signal-bearing HKLs
+    d_signal = d_full[has_signal]
+    actual_n_bins = min(n_bins, max(1, len(d_signal) // 2))
+    bin_edges = np.percentile(np.sort(d_signal), np.linspace(0, 100, actual_n_bins + 1))
+    bin_edges[0] -= 1e-6
+    bin_edges[-1] += 1e-6
+
+    # Assign each HKL to a bin
+    bin_assignments = np.digitize(d_full, bin_edges) - 1
+    bin_assignments = np.clip(bin_assignments, 0, actual_n_bins - 1)
+
+    # Per-HKL restraint weight in the scale of the likelihood.
+    # The likelihood Hessian for HKL k is |H_kk|. The restraint penalty is
+    #   f_restraint_k = 0.5 * w_k * (s_k - target_k)^2
+    # We want the restraint to be comparable to the data-driven curvature, but
+    # stronger for low-SNR reflections. Parameterize by sigma (allowed scale deviation):
+    #   w_k = |H_kk| / sigma^2      for all HKLs with signal
+    # For a median HKL: w = H_median/sigma^2. For low-SNR: H_low/sigma^2 (but H_low is
+    # small, so the restraint is relatively stronger vs. the data term for that HKL).
+    # Actually, we want low-SNR to be MORE restrained relative to their data term, so
+    # we use the inverse SNR weighting:
+    #   w_k = H_median^2 / (sigma^2 * |H_kk|)
+    # This means: for median HKL, w = H_median/sigma^2 (matches data curvature at sigma=1).
+    # For low-SNR HKL (small H_kk), w >> H_kk, so restraint dominates.
+    # For high-SNR HKL (large H_kk), w << H_kk, so data dominates.
+    H_median = np.median(abs_hess[has_signal])
+    weights = np.zeros(nscales)
+    weights[has_signal] = H_median**2 / (sigma**2 * abs_hess[has_signal])
+    # No-signal HKLs: very strong restraint (lock to target)
+    weights[~has_signal] = H_median**2 / (sigma**2 * 1e-12)
+    # Clip to prevent numerical issues
+    max_weight = H_median**2 / (sigma**2 * 1e-12)
+    weights = np.clip(weights, 0, max_weight)
+
+    SIM.Fhkl_restraint_weights = weights
+    SIM.Fhkl_reso_bins = bin_assignments
+    SIM.Fhkl_reso_n_bins = actual_n_bins
+
+    print("Fhkl SNR restraint: %d bins, sigma=%.4g, H_median=%.4g, %d/%d with signal"
+          % (actual_n_bins, sigma, H_median, has_signal.sum(), nscales))
+    # Show weight range for signal-bearing HKLs
+    w_sig = weights[has_signal]
+    print("  weights (signal): min=%.4g, max=%.4g, median=%.4g"
+          % (w_sig.min(), w_sig.max(), np.median(w_sig)))
+
+
+def _two_stage_fhkl_refine(Modeler, SIM, params, x0):
+    """Two-stage Fhkl refinement: strong HKLs first, then weak with restraints.
+
+    Stage 1: Freeze weak HKLs (sigma=0), refine strong.
+    Stage 2: Fix strong at stage 1 values, refine weak restrained to
+             resolution-bin averages from stage 1.
+    """
+    from cctbx import uctbx
+
+    nscales = SIM.Num_ASU * SIM.num_Fhkl_channels
+    nparam = len(Modeler.P) + nscales
+    threshold = params.Fhkl_two_stage_threshold
+
+    # Ensure we have Hessian
+    if not hasattr(SIM, 'Fhkl_hessian_diag'):
+        _compute_fhkl_sigmas_from_curvatures(Modeler, SIM)
+
+    abs_hess = np.abs(SIM.Fhkl_hessian_diag)
+    has_signal = abs_hess > 1e-12
+
+    if has_signal.sum() < 2:
+        MAIN_LOGGER.warning("Too few signal-bearing HKLs for two-stage refinement")
+        return Modeler.Minimize(x0, SIM)
+
+    H_median = np.median(abs_hess[has_signal])
+    is_weak = abs_hess < threshold * H_median
+    is_weak[~has_signal] = True  # no-signal HKLs are always weak
+    is_strong = ~is_weak
+
+    n_weak = is_weak.sum()
+    n_strong = is_strong.sum()
+    n_weak_signal = (is_weak & has_signal).sum()
+
+    print("Two-stage Fhkl: %d strong, %d weak (%d with signal), cutoff=%.2f"
+          % (n_strong, n_weak, n_weak_signal, threshold * H_median))
+
+    # Save original state
+    original_sigmas = SIM.Fhkl_sigmas.copy()
+    original_init = SIM.Fhkl_scales_init.copy()
+
+    # === STAGE 1: refine strong HKLs only ===
+    SIM.Fhkl_sigmas[is_weak] = 0  # freeze weak
+    print("=== Stage 1: refining %d strong HKLs ===" % is_strong.sum())
+    x_stage1 = Modeler.Minimize(x0, SIM)
+
+    # Apply stage 1 to get optimized scales
+    model(x_stage1, Modeler, SIM, compute_grad=False)
+    stage1_scales = SIM.Fhkl_scales.copy()
+
+    # Compute resolution bins from strong HKLs
+    uc = uctbx.unit_cell(SIM.D.unit_cell_tuple)
+    idx_to_asu = {idx: asu for asu, idx in SIM.asu_map_int.items()}
+    d_spacings = np.zeros(SIM.Num_ASU)
+    for idx in range(SIM.Num_ASU):
+        if idx in idx_to_asu:
+            d_spacings[idx] = uc.d(idx_to_asu[idx])
+
+    if SIM.num_Fhkl_channels > 1:
+        d_full = np.tile(d_spacings, SIM.num_Fhkl_channels)
+    else:
+        d_full = d_spacings
+
+    n_bins = params.Fhkl_restraint_n_bins
+    d_strong = d_full[is_strong & (d_full > 0)]
+    if len(d_strong) == 0:
+        MAIN_LOGGER.warning("No strong HKLs with valid d-spacing for stage 2")
+        return x_stage1
+
+    # At least 5 strong HKLs per bin for robust averages
+    actual_n_bins = min(n_bins, max(1, len(d_strong) // 5))
+    bin_edges = np.percentile(np.sort(d_strong), np.linspace(0, 100, actual_n_bins + 1))
+    bin_edges[0] -= 1e-6
+    bin_edges[-1] += 1e-6
+    bin_assignments = np.digitize(d_full, bin_edges) - 1
+    bin_assignments = np.clip(bin_assignments, 0, actual_n_bins - 1)
+
+    # Bin averages from strong HKLs only
+    bin_avg = np.ones(actual_n_bins)
+    for b in range(actual_n_bins):
+        in_bin_strong = (bin_assignments == b) & is_strong
+        if in_bin_strong.any():
+            bin_avg[b] = stage1_scales[in_bin_strong].mean()
+    targets = bin_avg[bin_assignments]
+
+    # Overall mean correction from strong HKLs (fallback for no-signal)
+    overall_mean = stage1_scales[is_strong].mean()
+    print("Stage 1 done. %d bins, overall mean=%.4f, bin averages: %s"
+          % (actual_n_bins, overall_mean,
+             ", ".join(["%.4f" % v for v in bin_avg])))
+
+    # === STAGE 2: refine weak HKLs restrained to bin averages ===
+    # Update init: strong at optimized values, weak-with-signal at bin average
+    new_init = stage1_scales.copy()
+    new_init[is_weak & has_signal] = targets[is_weak & has_signal]
+    # No-signal HKLs: keep at original init (no data to guide them)
+    new_init[is_weak & ~has_signal] = original_init[is_weak & ~has_signal]
+    SIM.Fhkl_scales_init = new_init
+
+    # Fix strong (sigma=0), restore weak-with-signal sigmas, freeze no-signal
+    SIM.Fhkl_sigmas = original_sigmas.copy()
+    SIM.Fhkl_sigmas[is_strong] = 0
+    SIM.Fhkl_sigmas[is_weak & ~has_signal] = 0  # no data → freeze
+
+    # Restraint: pull weak-with-signal HKLs toward bin averages from strong
+    # Weight = H_median so restraint dominates for low-SNR HKLs
+    weights = np.zeros(nscales)
+    weights[is_weak & has_signal] = H_median
+    # no-signal HKLs: frozen (sigma=0), no restraint needed
+    SIM.Fhkl_restraint_weights = weights
+    SIM.Fhkl_restraint_targets = targets  # fixed targets from stage 1
+
+    # Build x0 for stage 2: keep non-Fhkl params from stage 1, Fhkl at 1.0
+    nP = len(Modeler.P)
+    x0_stage2 = np.ones(nparam)
+    x0_stage2[:nP] = x_stage1[:nP]
+
+    print("=== Stage 2: refining %d weak HKLs with restraints ===" % n_weak)
+    x_stage2 = Modeler.Minimize(x0_stage2, SIM)
+
+    return x_stage2
 
 
 def get_variance_s(Mod, Jac):

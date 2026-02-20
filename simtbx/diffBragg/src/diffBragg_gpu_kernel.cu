@@ -78,12 +78,18 @@ void gpu_sum_over_steps(
         const int* __restrict__ FhklLinear_ASUid,
         const CUDAREAL* __restrict__ Fhkl_channels,
         const CUDAREAL* __restrict__ Fhkl_scale, CUDAREAL* Fhkl_scale_deriv,
-        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle)
+        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle,
+        CUDAREAL Bfactor_image, bool refine_Bfactor, CUDAREAL* d_Bfactor_images,
+        const CUDAREAL* __restrict__ Bfactor_aniso, bool refine_Bfactor_aniso, CUDAREAL* d_Bfactor_aniso_images)
 { // BEGIN GPU kernel
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_stride = blockDim.x * gridDim.x;
     __shared__ bool s_refine_gonio_angle;
+    __shared__ bool s_refine_Bfactor;
+    __shared__ CUDAREAL s_Bfactor_image;
+    __shared__ bool s_refine_Bfactor_aniso;
+    __shared__ CUDAREAL s_Bfactor_aniso[6];
     __shared__ CUDAREAL s_phi0, s_phistep, gx,gy,gz;
     __shared__ int s_phisteps;
     __shared__ bool s_gaussian_star_shape;
@@ -150,6 +156,10 @@ void gpu_sum_over_steps(
 
     if (threadIdx.x==0){ // TODO can we get speed gains by dividing up the following definitions over more threads ?
         s_refine_gonio_angle = refine_gonio_angle;
+        s_refine_Bfactor = refine_Bfactor;
+        s_Bfactor_image = Bfactor_image;
+        s_refine_Bfactor_aniso = refine_Bfactor_aniso;
+        for (int i=0; i<6; i++) s_Bfactor_aniso[i] = Bfactor_aniso[i];
         s_phisteps = phisteps;
         s_phi0 = phi0;
         s_phistep = phistep;
@@ -357,6 +367,8 @@ void gpu_sum_over_steps(
         double lambda_manager_dI2[2] = {0,0};
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_diffuse[6] = {0,0,0,0,0,0};
+        double dI_Bfactor = 0;
+        double dI_Bfac_aniso[6] = {0,0,0,0,0,0};
 
         for(int _subS=0;_subS<s_oversample;++_subS){
         for(int _subF=0;_subF<s_oversample;++_subF){
@@ -467,6 +479,13 @@ void gpu_sum_over_steps(
 
             VEC3 q_vec(_scattering[0], _scattering[1], _scattering[2]);
             q_vec *= 1e-10;
+
+            // sin(theta)/lambda is half the scattering vector length (in m^-1)
+            CUDAREAL stol = 0.5 * _scattering.norm();
+            CUDAREAL stol_sqr_Ang = stol * stol * 1e-20;
+            CUDAREAL Bfac_term = 1.0;
+            if (s_Bfactor_image != 0)
+                Bfac_term = exp(-s_Bfactor_image * stol_sqr_Ang);
 
             // TODO rename
             CUDAREAL texture_scale= 1;
@@ -655,10 +674,26 @@ void gpu_sum_over_steps(
                 Fhkl_channel = Fhkl_channels[_source];
             if (s_Fhkl_have_scale_factors)
                 s_hkl = Fhkl_scale[i_hklasu + Fhkl_channel*s_Num_ASU];
+            // Anisotropic B-factor in fractional hkl space (depends on _h,_k,_l from mosaic loop)
+            bool use_Baniso = (s_Bfactor_aniso[0] != 0 || s_Bfactor_aniso[1] != 0 ||
+                               s_Bfactor_aniso[2] != 0 || s_Bfactor_aniso[3] != 0 ||
+                               s_Bfactor_aniso[4] != 0 || s_Bfactor_aniso[5] != 0 ||
+                               s_refine_Bfactor_aniso);
+            CUDAREAL Bfac_aniso_val = 1.0;
+            CUDAREAL Baniso_term = 0;
+            if (use_Baniso) {
+                Baniso_term = s_Bfactor_aniso[0]*_h*_h + s_Bfactor_aniso[1]*_k*_k
+                            + s_Bfactor_aniso[2]*_l*_l
+                            + 2*s_Bfactor_aniso[3]*_h*_k
+                            + 2*s_Bfactor_aniso[4]*_h*_l
+                            + 2*s_Bfactor_aniso[5]*_k*_l;
+                Bfac_aniso_val = exp(-Baniso_term);
+            }
+
             if (s_gradient_mode && s_calc_Fhkl_gradients){
                 CUDAREAL Fhkl_deriv_scale = s_overall_scale*polar_for_grad;
                 CUDAREAL I_noFcell=texture_scale*I0;
-                CUDAREAL dfhkl = I_noFcell*_I_cell * Fhkl_deriv_scale;
+                CUDAREAL dfhkl = I_noFcell*_I_cell * Fhkl_deriv_scale * Bfac_term * Bfac_aniso_val;
                 CUDAREAL grad_incr = dfhkl*deriv_coef;
                 int fhkl_grad_idx=i_hklasu + Fhkl_channel*s_Num_ASU;
 
@@ -675,6 +710,9 @@ void gpu_sum_over_steps(
 
             CUDAREAL _I_total = s_hkl*_I_cell *I0;
             CUDAREAL Iincrement = _I_total*texture_scale;
+            Iincrement *= Bfac_term;
+            if (use_Baniso)
+                Iincrement *= Bfac_aniso_val;
             if (s_gradient_mode && s_calc_sourceI_gradients){
                 CUDAREAL sourceI_deriv_scale = s_overall_scale*polar_for_grad;
                 CUDAREAL dsourceI = Iincrement / sI_scale *sourceI_deriv_scale;
@@ -684,6 +722,17 @@ void gpu_sum_over_steps(
             if (s_gradient_mode)
                 continue;
             _I += Iincrement;
+            if (s_refine_Bfactor){
+                dI_Bfactor += Iincrement * (-stol_sqr_Ang);
+            }
+            if (s_refine_Bfactor_aniso){
+                dI_Bfac_aniso[0] += Iincrement * (-_h*_h);
+                dI_Bfac_aniso[1] += Iincrement * (-_k*_k);
+                dI_Bfac_aniso[2] += Iincrement * (-_l*_l);
+                dI_Bfac_aniso[3] += Iincrement * (-2*_h*_k);
+                dI_Bfac_aniso[4] += Iincrement * (-2*_h*_l);
+                dI_Bfac_aniso[5] += Iincrement * (-2*_k*_l);
+            }
             if (save_wavelenimage){
                 Ilambda += Iincrement*lambda_ang;
                 Imiller_h += Iincrement*_h;
@@ -1113,6 +1162,15 @@ void gpu_sum_over_steps(
         if (s_refine_gonio_angle){
             CUDAREAL value = _scale_term * dI_gonio_angle;
             d_gonio_angle_images[i_pix] = value;
+        }
+
+        // update the B-factor derivative image
+        if (s_refine_Bfactor){
+            d_Bfactor_images[i_pix] = _scale_term * dI_Bfactor;
+        }
+        if (s_refine_Bfactor_aniso){
+            for (int i_ba=0; i_ba<6; i_ba++)
+                d_Bfactor_aniso_images[i_ba*Npix_to_model + i_pix] = _scale_term * dI_Bfac_aniso[i_ba];
         }
 
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){

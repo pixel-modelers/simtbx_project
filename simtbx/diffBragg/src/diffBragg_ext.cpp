@@ -168,6 +168,17 @@ namespace boost_python { namespace {
       return boost::python::make_tuple(diffBragg.Nd, diffBragg.Ne, diffBragg.Nf);
   }
 
+  static void set_Baniso(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::tuple const& values) {
+      for (int i=0; i<6; i++)
+          diffBragg.Bfactor_aniso[i] = boost::python::extract<double>(values[i]);
+  }
+
+  static boost::python::tuple get_Baniso(simtbx::nanoBragg::diffBragg const& diffBragg) {
+      return boost::python::make_tuple(
+          diffBragg.Bfactor_aniso[0], diffBragg.Bfactor_aniso[1], diffBragg.Bfactor_aniso[2],
+          diffBragg.Bfactor_aniso[3], diffBragg.Bfactor_aniso[4], diffBragg.Bfactor_aniso[5]);
+  }
+
   static void  set_Nabc_aniso(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::tuple const& values) {
       diffBragg.isotropic_ncells=false;
       diffBragg.set_ncells_values(values);
@@ -593,6 +604,10 @@ namespace boost_python { namespace {
 
       .def("get_gonio_angle_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_gonio_angle_derivative_pixels, "get derivatives of intensity w.r.t. goniometer angle")
 
+      .def("get_Bfactor_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_Bfactor_derivative_pixels, "get derivatives of intensity w.r.t. per-image B-factor")
+
+      .def("get_Bfactor_aniso_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_Bfactor_aniso_derivative_pixels, "get derivatives of intensity w.r.t. anisotropic B-factor (6-tuple)")
+
       .def("get_fp_fdp_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_fp_fdp_derivative_pixels, "get derivatives of intensity w.r.t c,d that describe fprime and fdblprime (see diffBragg.utils)")
 
       .def("get_ncells_def_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_ncells_def_derivative_pixels, "get derivatives of intensity w.r.t (Nd, Ne, Nf)")
@@ -747,6 +762,16 @@ namespace boost_python { namespace {
                      make_getter(&simtbx::nanoBragg::diffBragg::no_Nabc_scale,rbv()),
                      make_setter(&simtbx::nanoBragg::diffBragg::no_Nabc_scale,dcp()),
                     "toggle off the Nabc scale factor in the forward model (such that it is replaced entirely by spot_scale)")
+
+      .add_property("Bfactor_image",
+                     make_getter(&simtbx::nanoBragg::diffBragg::Bfactor_image,rbv()),
+                     make_setter(&simtbx::nanoBragg::diffBragg::Bfactor_image,dcp()),
+                    "per-image isotropic B-factor in Angstrom^2, applied as exp(-B*stol^2)")
+
+      .add_property("Bfactor_aniso",
+             make_function(&get_Baniso,rbv()),
+             make_function(&set_Baniso,dcp()),
+             "anisotropic B-factor tensor (b11,b22,b33,b12,b13,b23) in fractional hkl coords")
 
       .add_property("__number_of_pixels_modeled_using_diffBragg", // protect this by making it a long name
                      make_getter(&simtbx::nanoBragg::diffBragg::Npix_to_model,rbv()),

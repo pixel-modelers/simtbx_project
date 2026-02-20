@@ -374,6 +374,7 @@ diffBragg::diffBragg(const dxtbx::model::Detector& detector, const dxtbx::model:
     Nd = 0;
     Ne = 0;
     Nf = 0;
+    Bfactor_image = 0;
 
     db_cryst.anisoG << 50,0,0,
                        0,50,0,
@@ -919,6 +920,10 @@ void diffBragg::let_loose(int refine_id){
         db_flags.refine_diffuse = true;
     if (refine_id==24)
         db_flags.refine_gonio_angle = true;
+    if (refine_id==25)
+        db_flags.refine_Bfactor = true;
+    if (refine_id==26)
+        db_flags.refine_Bfactor_aniso = true;
 }
 
 void diffBragg::fix(int refine_id){
@@ -993,6 +998,10 @@ void diffBragg::fix(int refine_id){
         db_flags.refine_diffuse = false;
     if (refine_id==24)
         db_flags.refine_gonio_angle = false;
+    if (refine_id==25)
+        db_flags.refine_Bfactor = false;
+    if (refine_id==26)
+        db_flags.refine_Bfactor_aniso = false;
 }
 
 
@@ -1105,6 +1114,10 @@ void diffBragg::refine(int refine_id){
         db_flags.refine_diffuse = true;
     if (refine_id==24)
         db_flags.refine_gonio_angle = true;
+    if (refine_id==25)
+        db_flags.refine_Bfactor = true;
+    if (refine_id==26)
+        db_flags.refine_Bfactor_aniso = true;
 }
 
 void diffBragg::print_if_refining(){
@@ -1575,6 +1588,33 @@ boost::python::tuple diffBragg::get_gonio_angle_derivative_pixels(){
     return derivative_pixels;
 }
 
+
+af::flex_double diffBragg::get_Bfactor_derivative_pixels(){
+    SCITBX_ASSERT(db_flags.refine_Bfactor);
+    af::flex_double raw_pixels_Bfac = af::flex_double(Npix_to_model);
+    double* floatimage_Bfac = raw_pixels_Bfac.begin();
+    for (int ii=0; ii< Npix_to_model; ii++){
+        floatimage_Bfac[ii] = first_deriv_imgs.Bfactor[ii];
+    }
+    return raw_pixels_Bfac;
+}
+
+boost::python::tuple diffBragg::get_Bfactor_aniso_derivative_pixels(){
+    SCITBX_ASSERT(db_flags.refine_Bfactor_aniso);
+    af::flex_double d0(Npix_to_model), d1(Npix_to_model), d2(Npix_to_model),
+                    d3(Npix_to_model), d4(Npix_to_model), d5(Npix_to_model);
+    double *p0=d0.begin(), *p1=d1.begin(), *p2=d2.begin(),
+           *p3=d3.begin(), *p4=d4.begin(), *p5=d5.begin();
+    for (int ii=0; ii< Npix_to_model; ii++){
+        p0[ii] = first_deriv_imgs.Bfactor_aniso[0*Npix_to_model + ii];
+        p1[ii] = first_deriv_imgs.Bfactor_aniso[1*Npix_to_model + ii];
+        p2[ii] = first_deriv_imgs.Bfactor_aniso[2*Npix_to_model + ii];
+        p3[ii] = first_deriv_imgs.Bfactor_aniso[3*Npix_to_model + ii];
+        p4[ii] = first_deriv_imgs.Bfactor_aniso[4*Npix_to_model + ii];
+        p5[ii] = first_deriv_imgs.Bfactor_aniso[5*Npix_to_model + ii];
+    }
+    return boost::python::make_tuple(d0, d1, d2, d3, d4, d5);
+}
 
 boost::python::tuple diffBragg::get_ncells_def_derivative_pixels(){
     SCITBX_ASSERT(Ncells_managers[3]->refine_me);
@@ -2072,6 +2112,8 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     db_cryst.Nd = Nd;
     db_cryst.Ne = Ne;
     db_cryst.Nf = Nf;
+    db_cryst.Bfactor_image = Bfactor_image;
+    for (int i=0; i<6; i++) db_cryst.Bfactor_aniso[i] = Bfactor_aniso[i];
     db_cryst.xtal_shape = xtal_shape;
 
     db_beam.number_of_sources = sources;
@@ -2154,6 +2196,12 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     }
     if (db_flags.refine_gonio_angle){
         first_deriv_imgs.gonio_angle.resize(Npix_to_model*1,0);
+    }
+    if (db_flags.refine_Bfactor){
+        first_deriv_imgs.Bfactor.resize(Npix_to_model,0);
+    }
+    if (db_flags.refine_Bfactor_aniso){
+        first_deriv_imgs.Bfactor_aniso.resize(Npix_to_model*6,0);
     }
     gettimeofday(&t4,0 );
     double time_make_images = (1000000.0*(t4.tv_sec-t3.tv_sec) + t4.tv_usec-t3.tv_usec)/1000.0;

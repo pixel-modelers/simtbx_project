@@ -82,6 +82,8 @@ struct images{
     image_type diffuse_gamma; // diffuse gamma gradients
     image_type diffuse_sigma; // diffuse sigma gradients
     image_type gonio_angle; // goniometer angle gradients
+    image_type Bfactor; // per-image B-factor gradients
+    image_type Bfactor_aniso; // 6 * Npix: anisotropic B-factor gradients (β11,β22,β33,β12,β13,β23)
 };
 
 
@@ -161,6 +163,8 @@ struct flags{
                                 // such that one could use those gradients as part of a refinement protocol to optimize I_cell
 
     bool gamma_miller_units = false; // use Miller index units for diffuse gamma matrix
+    bool refine_Bfactor = false; // per-image B-factor refinement
+    bool refine_Bfactor_aniso = false; // anisotropic B-factor refinement (6 components)
 };
 
 struct crystal{
@@ -182,6 +186,8 @@ struct crystal{
     Eigen::Matrix3d anisoU;
     int mosaic_domains; // number of mosaic domains to model
     CUDAREAL Na, Nb, Nc, Nd, Ne, Nf; // mosaic domain terms
+    CUDAREAL Bfactor_image = 0; // per-image isotropic B-factor (Angstrom^2), applied as exp(-B*stol^2)
+    CUDAREAL Bfactor_aniso[6] = {0,0,0,0,0,0}; // β11,β22,β33,β12,β13,β23 in fractional hkl coords
     CUDAREAL phi0; // gonio
     CUDAREAL phistep;
     int phisteps;

@@ -95,7 +95,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
 
     scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf,\
         diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, \
-        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle = \
+        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle, Bfactor = \
         hopper_utils.get_param_from_x(x, Mod)
 
     scale_p = Mod.P["G_xtal0"]
@@ -195,7 +195,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         ncells_init=Nabc_init, spot_scales_init=scale_init,
         other_Umats = other_Umats, other_spotscales = other_spotscales,
         num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
-                            gonio_angle=gonio_angle)
+                            gonio_angle=gonio_angle, Bfactor=Bfactor)
 
     df["gonio_axis"] = [SIM.D.spindle_axis]
 
@@ -230,7 +230,7 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
                        spec_file, spec_stride,flux, beamsize_mm,
                        orig_exp_name, opt_exp_name, spec_from_imageset, oversample,
                        opt_det, stg1_refls, stg1_img_path, ncells_init=None, spot_scales_init = None,
-                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None):
+                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None, Bfactor=None):
     """
 
     :param xtal_scale:
@@ -296,6 +296,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         "be_init": be_init, "ga_init": ga_init})
     if gonio_angle is not None:
         df["gonio_angle"] = gonio_angle
+    if Bfactor is not None:
+        df["Bfactor"] = Bfactor
     if spec_file is not None:
         spec_file = os.path.abspath(spec_file)
     df["spectrum_filename"] = spec_file

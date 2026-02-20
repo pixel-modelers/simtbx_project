@@ -183,6 +183,12 @@ void diffBragg_sum_over_steps_cuda(
         if (db_flags.refine_gonio_angle){
             gpuErr(cudaMallocManaged(&cp.cu_d_gonio_angle_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
         }
+        if (db_flags.refine_Bfactor){
+            gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
+        }
+        if (db_flags.refine_Bfactor_aniso){
+            gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_aniso_images, db_cu_flags.Npix_to_allocate*6*sizeof(CUDAREAL)));
+        }
         if (db_flags.refine_fcell){
             gpuErr(cudaMallocManaged(&cp.cu_d_fcell_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
             gpuErr(cudaMallocManaged(&cp.cu_d2_fcell_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
@@ -218,8 +224,17 @@ void diffBragg_sum_over_steps_cuda(
         //time = (1000000.0*(t4.tv_sec-t3.tv_sec) + t4.tv_usec-t3.tv_usec)/1000.0;
         //printf("TIME SPENT ALLOCATING (IMAGES ONLY):  %3.10f ms \n", time);
         gpuErr(cudaMallocManaged(&cp.cu_panels_fasts_slows, db_cu_flags.Npix_to_allocate*3*sizeof(panels_fasts_slows[0])));
+        gpuErr(cudaMallocManaged(&cp.cu_Bfactor_aniso, 6*sizeof(CUDAREAL)));
         cp.npix_allocated = db_cu_flags.Npix_to_allocate;
     } // END of allocation
+
+    // Lazy allocation for gradient images that may be enabled after initial device allocation
+    if (db_flags.refine_Bfactor && cp.cu_d_Bfactor_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_Bfactor_aniso && cp.cu_d_Bfactor_aniso_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_aniso_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
+    }
 
     bool ALLOC = !cp.device_is_allocated; // shortcut variable
 
@@ -233,6 +248,9 @@ void diffBragg_sum_over_steps_cuda(
 //  BEGIN COPYING DATA
     gettimeofday(&t1, 0);
     bool FORCE_COPY=true;
+
+//  Copy Bfactor_aniso parameters to device
+    for (int i=0; i<6; i++) cp.cu_Bfactor_aniso[i] = db_cryst.Bfactor_aniso[i];
 
 //  END step position
     if (db_flags.gradient_mode){
@@ -515,7 +533,9 @@ void diffBragg_sum_over_steps_cuda(
         cp.Fhkl_channels,
         cp.Fhkl_scale, cp.Fhkl_scale_deriv,
         db_cryst.xtal_shape==GAUSS_STAR,
-        db_cryst.xtal_shape==SQUARE, db_flags.refine_gonio_angle
+        db_cryst.xtal_shape==SQUARE, db_flags.refine_gonio_angle,
+        db_cryst.Bfactor_image, db_flags.refine_Bfactor, cp.cu_d_Bfactor_images,
+        cp.cu_Bfactor_aniso, db_flags.refine_Bfactor_aniso, cp.cu_d_Bfactor_aniso_images
         );
 
     error_msg(cudaGetLastError(), "after kernel call");
@@ -539,6 +559,14 @@ void diffBragg_sum_over_steps_cuda(
     if (db_flags.refine_gonio_angle){
         for (int i=0; i< Npix_to_model; i++)
             d_image.gonio_angle[i] = cp.cu_d_gonio_angle_images[i];
+    }
+    if (db_flags.refine_Bfactor){
+        for (int i=0; i< Npix_to_model; i++)
+            d_image.Bfactor[i] = cp.cu_d_Bfactor_images[i];
+    }
+    if (db_flags.refine_Bfactor_aniso){
+        for (int i=0; i< 6*Npix_to_model; i++)
+            d_image.Bfactor_aniso[i] = cp.cu_d_Bfactor_aniso_images[i];
     }
     if(db_flags.wavelength_img){
         for (int i=0; i< 4*Npix_to_model; i++){
@@ -647,6 +675,9 @@ void freedom(diffBragg_cudaPointers& cp){
         gpuErr(cudaFree( cp.cu_d_sausage_XYZ_scale_images));
         gpuErr(cudaFree( cp.cu_d_fp_fdp_images));
         gpuErr(cudaFree(cp.cu_d_gonio_angle_images));
+        gpuErr(cudaFree(cp.cu_d_Bfactor_images));
+        gpuErr(cudaFree(cp.cu_d_Bfactor_aniso_images));
+        gpuErr(cudaFree(cp.cu_Bfactor_aniso));
 
         gpuErr(cudaFree(cp.cu_Fhkl));
         gpuErr(cudaFree(cp.cu_Fhkl2));
@@ -705,8 +736,10 @@ void freedom(diffBragg_cudaPointers& cp){
         gpuErr(cudaFree(cp.Fhkl_scale_deriv));
         cp.Fhkl_grad_arrays_allocated=false;
     }
-    gpuErr(cudaFree(cp.cu_sourceI_scale));
-    gpuErr(cudaFree(cp.cu_sourceI_grad));
+    if (cp.previous_nsource > 0){
+        gpuErr(cudaFree(cp.cu_sourceI_scale));
+        gpuErr(cudaFree(cp.cu_sourceI_grad));
+    }
     if (cp.grad_arrays_allocated){
         gpuErr(cudaFree(cp.data_trusted));
         gpuErr(cudaFree(cp.data_freq));

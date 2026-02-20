@@ -401,6 +401,8 @@ void diffBragg_sum_over_steps(
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_latt_diffuse[6] = {0,0,0,0,0,0};
         double dI_gonio_ang = 0;
+        double dI_Bfactor = 0;
+        double dI_Bfac_aniso[6] = {0,0,0,0,0,0};
 
         // compute unit cell volume
         // TODO: this should be computed using the P1 unit cell
@@ -765,8 +767,24 @@ void diffBragg_sum_over_steps(
                 s_hkl = d_image.Fhkl_scale[i_hklasu + Fhkl_channel*db_cryst.Num_ASU];
 
             if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
+                double Fhkl_Bfac = 1.0;
+                if (db_cryst.Bfactor_image != 0)
+                    Fhkl_Bfac = exp(-db_cryst.Bfactor_image * stol*stol*1e-20);
+                // anisotropic B-factor applied to Fhkl gradient path
+                bool use_Baniso = (db_cryst.Bfactor_aniso[0] != 0 || db_cryst.Bfactor_aniso[1] != 0 ||
+                                   db_cryst.Bfactor_aniso[2] != 0 || db_cryst.Bfactor_aniso[3] != 0 ||
+                                   db_cryst.Bfactor_aniso[4] != 0 || db_cryst.Bfactor_aniso[5] != 0 ||
+                                   db_flags.refine_Bfactor_aniso);
+                if (use_Baniso) {
+                    double Baniso_term = db_cryst.Bfactor_aniso[0]*h*h + db_cryst.Bfactor_aniso[1]*k*k
+                                       + db_cryst.Bfactor_aniso[2]*l*l
+                                       + 2*db_cryst.Bfactor_aniso[3]*h*k
+                                       + 2*db_cryst.Bfactor_aniso[4]*h*l
+                                       + 2*db_cryst.Bfactor_aniso[5]*k*l;
+                    Fhkl_Bfac *= exp(-Baniso_term);
+                }
                 double Fhkl_deriv_scale = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar_for_Fhkl_grad/db_steps.Nsteps;
-                double dfhkl = I_noFcell*I_cell * Fhkl_deriv_scale;
+                double dfhkl = I_noFcell*I_cell * Fhkl_deriv_scale * Fhkl_Bfac;
                 double grad_incr = dfhkl*gradient_coef;
                 int fhkl_grad_idx=i_hklasu + Fhkl_channel*db_cryst.Num_ASU;
                 if (db_flags.track_Fhkl_indices)
@@ -784,6 +802,47 @@ void diffBragg_sum_over_steps(
             }
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
+
+            // per-image isotropic B-factor: exp(-B * stol^2) where stol is sin(theta)/lambda
+            // stol is in m^-1 in the kernel, B is in Angstrom^2, so convert: stol_A^2 = stol^2 * 1e-20
+            double Bfac_term = 1.0;
+            double stol_sqr_Ang = stol*stol*1e-20;
+            if (db_cryst.Bfactor_image != 0){
+                Bfac_term = exp(-db_cryst.Bfactor_image * stol_sqr_Ang);
+                Iincrement *= Bfac_term;
+            }
+            if (db_flags.refine_Bfactor){
+                // dI/dB = Iincrement * (-stol^2_Ang)  (Iincrement already includes Bfac_term)
+                dI_Bfactor += Iincrement * (-stol_sqr_Ang);
+            }
+
+            // Anisotropic B-factor: T = exp(-(β11*h² + β22*k² + β33*l² + 2*β12*h*k + 2*β13*h*l + 2*β23*k*l))
+            // h,k,l are continuous fractional coords from H_vec (already computed above)
+            {
+                bool use_Baniso = (db_cryst.Bfactor_aniso[0] != 0 || db_cryst.Bfactor_aniso[1] != 0 ||
+                                   db_cryst.Bfactor_aniso[2] != 0 || db_cryst.Bfactor_aniso[3] != 0 ||
+                                   db_cryst.Bfactor_aniso[4] != 0 || db_cryst.Bfactor_aniso[5] != 0 ||
+                                   db_flags.refine_Bfactor_aniso);
+                if (use_Baniso) {
+                    double Baniso_term = db_cryst.Bfactor_aniso[0]*h*h + db_cryst.Bfactor_aniso[1]*k*k
+                                       + db_cryst.Bfactor_aniso[2]*l*l
+                                       + 2*db_cryst.Bfactor_aniso[3]*h*k
+                                       + 2*db_cryst.Bfactor_aniso[4]*h*l
+                                       + 2*db_cryst.Bfactor_aniso[5]*k*l;
+                    double Bfac_aniso = exp(-Baniso_term);
+                    Iincrement *= Bfac_aniso;
+                }
+                if (db_flags.refine_Bfactor_aniso) {
+                    // dI/dβ_ij: Iincrement already includes the aniso Bfac
+                    dI_Bfac_aniso[0] += Iincrement * (-h*h);      // dI/dβ11
+                    dI_Bfac_aniso[1] += Iincrement * (-k*k);      // dI/dβ22
+                    dI_Bfac_aniso[2] += Iincrement * (-l*l);      // dI/dβ33
+                    dI_Bfac_aniso[3] += Iincrement * (-2*h*k);    // dI/dβ12
+                    dI_Bfac_aniso[4] += Iincrement * (-2*h*l);    // dI/dβ13
+                    dI_Bfac_aniso[5] += Iincrement * (-2*k*l);    // dI/dβ23
+                }
+            }
+
             if (db_flags.track_Fhkl){
                 std::string hkl_s ;
                 hkl_s = std::to_string(h0) + ","+ std::to_string(k0) + "," + std::to_string(l0);
@@ -1277,6 +1336,15 @@ void diffBragg_sum_over_steps(
                 d_image.Ncells[idx] = value;
                 d2_image.Ncells[idx] = value2;
             }
+        }
+        /*update the B-factor derivative image*/
+        if (db_flags.refine_Bfactor){
+            d_image.Bfactor[i_pix] = scale_term*dI_Bfactor;
+        }
+        /*update the anisotropic B-factor derivative images*/
+        if (db_flags.refine_Bfactor_aniso){
+            for (int i_ba=0; i_ba<6; i_ba++)
+                d_image.Bfactor_aniso[i_ba*Npix_to_model + i_pix] = scale_term * dI_Bfac_aniso[i_ba];
         }
 
         /* update Fcell derivative image */

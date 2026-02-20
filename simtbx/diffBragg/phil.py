@@ -268,6 +268,9 @@ betas
   Ndef = None
     .type = floats(size=3)
     .help = restraint factor for the ncells def
+  cholesky = None
+    .type = floats(size=6)
+    .help = restraint factor for Cholesky factors
   diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint factor for diffuse sigma
@@ -280,6 +283,9 @@ betas
   B = None
     .type = float
     .help = restraint factor for Bfactor
+  Baniso = None
+    .type = floats(size=6)
+    .help = restraint factor for anisotropic B-factor components
   eta_abc = None
     .type = floats(size=3)
     .help = restrain factor for mosaic spread angles
@@ -348,6 +354,9 @@ centers
   Ndef = None
     .type = floats(size=3)
     .help = restraint target for Ndef
+  cholesky = None
+    .type = floats(size=6)
+    .help = restraint target for Cholesky factors
   diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint target for diffuse sigma
@@ -360,6 +369,9 @@ centers
   B = None
     .type = float
     .help = restraint target for Bfactor
+  Baniso = None
+    .type = floats(size=6)
+    .help = restraint target for anisotropic B-factor components
   eta_abc = None
     .type = floats(size=3)
     .help = restraint target for mosaic spread angles in degrees
@@ -458,6 +470,9 @@ sigmas
   Ndef = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity for Ndef
+  cholesky = [1,1,1,1,1,1]
+    .type = floats(size=6)
+    .help = sensitivity for Cholesky factors
   diffuse_sigma = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity for diffuse sigma
@@ -473,6 +488,9 @@ sigmas
   B = 1
     .type = float
     .help = sensitivity for Bfactor
+  Baniso = [1,1,1,1,1,1]
+    .type = floats(size=6)
+    .help = sensitivity for anisotropic B-factor components
   eta_abc = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity of mosaic spread parameters
@@ -483,6 +501,34 @@ sigmas
     .type = float
     .help = sensitivity for structure factors
 }
+auto_Fhkl_sigma = False
+  .type = bool
+  .help = compute per-Fhkl sigma from diagonal Hessian at the initial point for optimal step sizes
+correct_Fhkl_gradient_bias = False
+  .type = bool
+  .help = subtract the log(V) bias from the Fhkl gradient to prevent systematic downward bias in scale factors
+Fhkl_restraint_snr_sigma = None
+  .type = float
+  .help = when set, apply per-Fhkl restraints toward resolution-bin averages weighted by SNR. \
+          Value is the allowed scale deviation for a median-SNR reflection (sigma=1 matches data \
+          curvature). Try 0.1 for strong, 1.0 for moderate. Lower = stronger restraint.
+Fhkl_restraint_n_bins = 10
+  .type = int
+  .help = number of resolution bins for SNR-adaptive Fhkl restraint targets
+Fhkl_two_stage_threshold = None
+  .type = float
+  .help = Hessian fraction for two-stage Fhkl refinement. Stage 1 refines HKLs with \
+          |H_kk|/H_median > threshold. Stage 2 refines the rest restrained to resolution-bin \
+          averages from stage 1. Try 0.5 to restrain weak reflections.
+Fhkl_linear_parameterization = False
+  .type = bool
+  .help = use linear Fhkl parameterization (scale = init + sigma*(x-1)) instead of exponential \
+          (scale = init * exp(sigma*(x-1))). Linear allows negative scales and avoids overflow.
+Fhkl_wilson_prior = False
+  .type = bool
+  .help = apply Wilson statistics as a Bayesian prior on Fhkl intensities. Regularizes weak \
+          reflections toward expected Wilson distribution values. Uses different priors for \
+          acentric (exponential) and centric (half-normal) reflections.
 init
   .help = initial value of model parameter (will be overrided if best pickle is provided)
   .expert_level=0
@@ -508,6 +554,9 @@ init
   Ndef = [0,0,0]
     .type = floats(size=3)
     .help = init for Ndef
+  cholesky = None
+    .type = floats(size=6)
+    .help = "init for Cholesky factors (L11, L21, L22, L31, L32, L33). If None, initialized from sqrt(Nabc)."
   diffuse_sigma = [.01,.01,.01]
     .type = floats(size=3)
     .help = init diffuse sigma
@@ -523,6 +572,9 @@ init
   B = 0
     .type = float
     .help = init for B factor
+  Baniso = [0,0,0,0,0,0]
+    .type = floats(size=6)
+    .help = init for anisotropic B (b11,b22,b33,b12,b13,b23) in fractional hkl coords
   eta_abc = [0,0,0]
     .type = floats(size=3)
     .help = "initial values (in degrees) for anisotropic mosaic spread about the 3 crystal axes a,b,c"
@@ -544,6 +596,9 @@ mins
   Ndef = [-200,-200,-200]
     .type = floats(size=3)
     .help = min for Ndef
+  cholesky = [-300,-300,-300,-300,-300,-300]
+    .type = floats(size=6)
+    .help = min for Cholesky factors (L11, L21, L22, L31, L32, L33). Note L11,L22,L33 are diagonal and should be positive for a proper decomposition.
   diffuse_sigma = [0,0,0]
     .type = floats(size=3)
     .help = min diffuse sigma
@@ -559,6 +614,9 @@ mins
   B = 0
     .type = float
     .help = min for Bfactor
+  Baniso = [-1,-1,-1,-1,-1,-1]
+    .type = floats(size=6)
+    .help = min for anisotropic B-factor components
   Fhkl = 0
     .type = float
     .help = min for structure factors
@@ -588,6 +646,9 @@ maxs
   Ndef = [200,200,200]
     .type = floats(size=3)
     .help = max for Ndef
+  cholesky = [300,300,300,300,300,300]
+    .type = floats(size=6)
+    .help = max for Cholesky factors (L11, L21, L22, L31, L32, L33)
   diffuse_sigma = [20,20,20]
     .type = floats(size=3)
     .help = max diffuse sigma
@@ -603,6 +664,9 @@ maxs
   B = 1e3
     .type = float
     .help = max for Bfactor
+  Baniso = [1,1,1,1,1,1]
+    .type = floats(size=6)
+    .help = max for anisotropic B-factor components
   eta_abc = [10,10,10]
     .type = floats(size=3)
     .help = maximum value (in degrees) for mosaic spread angles
@@ -635,6 +699,9 @@ fix
   B = True
     .type = bool
     .help = fix the Bfactor during refinement
+  Baniso = True
+    .type = bool
+    .help = fix the anisotropic B-factor during refinement
   eta_abc = True
     .type = bool
     .help = fix the mosaic spread parameters during refinement
@@ -676,6 +743,13 @@ no_Nabc_scale = False
   .type = bool
   .help = toggle Nabc scaling of the intensity
   .expert_level = 10
+use_cholesky_Nabc = True
+  .type = bool
+  .help = "If True, parameterize the NABC mosaic domain size matrix via a Cholesky decomposition"
+          "NABC = L^T * L where L is lower-triangular with 6 parameters (L11, L21, L22, L31, L32, L33)."
+          "This guarantees the NABC matrix is positive-definite. When True, the Ndef parameters are"
+          "replaced by the Cholesky factors."
+  .expert_level = 0
 use_diffuse_models = False
   .type = bool
   .help = "if True, let the values of init.diffuse_sigma and init.diffuse_gamma"

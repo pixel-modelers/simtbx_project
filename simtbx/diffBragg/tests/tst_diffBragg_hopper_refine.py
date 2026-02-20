@@ -306,7 +306,7 @@ with DeviceWrapper(0) as _:
     if SIM_used_by_hopper.D.record_timings:
         SIM_used_by_hopper.D.show_timings(MPI_RANK=0)
 
-    G, rotX,rotY, rotZ, Na,Nb,Nc,_,_,_,_,_,_,_,_,_,a,b,c,al,be,ga,detz_shift,gonio_ang = hopper_utils.get_param_from_x(x, Mod)
+    G, rotX,rotY, rotZ, Na,Nb,Nc,_,_,_,_,_,_,_,_,_,a,b,c,al,be,ga,detz_shift,gonio_ang,_ = hopper_utils.get_param_from_x(x, Mod)
     if "gonio" in args.perturb:
         assert np.round(gonio_ang,1) == delta_phi_gt
     eta_abc_opt = hopper_utils.get_mosaicity_from_x(x, Mod, SIM_used_by_hopper)

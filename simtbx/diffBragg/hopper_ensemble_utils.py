@@ -124,19 +124,29 @@ def target_func(x, modelers):
         resid = shot_modeler.all_data - model_pix
 
         # data contributions to target function
-        V = model_pix + shot_modeler.all_sigma_rdout**2
+        V_model = model_pix + shot_modeler.all_sigma_rdout**2
+        use_fixed_V = (modelers.params.correct_Fhkl_gradient_bias
+                       and modelers.SIM.refining_Fhkl
+                       and hasattr(shot_modeler, 'V_fixed'))
+        V = shot_modeler.V_fixed if use_fixed_V else V_model
         resid_square = resid**2
-        shot_fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+        if use_fixed_V:
+            shot_fLogLike = (.5 * resid_square / V)
+        else:
+            shot_fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
         if shot_modeler.params.roi.allow_overlapping_spots:
             shot_fLogLike /= shot_modeler.all_freq
         shot_fLogLike = shot_fLogLike[shot_modeler.all_trusted].sum()   # negative log Likelihood target
         f += shot_fLogLike
 
-        zscore_sig = np.std((resid / np.sqrt(V))[shot_modeler.all_trusted])
+        zscore_sig = np.std((resid / np.sqrt(V_model))[shot_modeler.all_trusted])
         zscore_sigs.append(zscore_sig)
 
         # get this shots contribution to the gradient
-        common_grad_term_all = (0.5 / V * (1 - 2 * resid - resid_square / V))
+        if use_fixed_V:
+            common_grad_term_all = -resid / V
+        else:
+            common_grad_term_all = (0.5 / V * (1 - 2 * resid - resid_square / V))
         if shot_modeler.params.roi.allow_overlapping_spots:
             common_grad_term_all /= shot_modeler.all_freq
         common_grad_term = common_grad_term_all[shot_modeler.all_trusted]
@@ -153,6 +163,12 @@ def target_func(x, modelers):
         g_fhkl += modelers.SIM.D.add_Fhkl_gradients(
             shot_modeler.pan_fast_slow, resid, V, shot_modeler.all_trusted,
             shot_modeler.all_freq, modelers.SIM.num_Fhkl_channels, G)
+
+        if modelers.params.correct_Fhkl_gradient_bias:
+            fhkl_bias = modelers.SIM.D.add_Fhkl_gradients(
+                shot_modeler.pan_fast_slow, np.zeros_like(resid), V, shot_modeler.all_trusted,
+                shot_modeler.all_freq, modelers.SIM.num_Fhkl_channels, G)
+            g_fhkl -= fhkl_bias
 
     # add up target and gradients across all ranks
     f = COMM.bcast(COMM.reduce(f))
@@ -187,7 +203,10 @@ def target_func(x, modelers):
     f = COMM.bcast(f)
     g_fhkl = COMM.bcast(g_fhkl)
 
-    g_fhkl *= modelers.SIM.Fhkl_scales*modelers.params.sigmas.Fhkl  # need to rescale the Fhkl gradient according to the reparameterization on Fhkl scale factord
+    if modelers.SIM.Fhkl_linear:
+        g_fhkl *= 2 * modelers.SIM.Fhkl_amplitudes * modelers.SIM.Fhkl_sigmas
+    else:
+        g_fhkl *= modelers.SIM.Fhkl_scales * modelers.SIM.Fhkl_sigmas  # need to rescale the Fhkl gradient according to the reparameterization on Fhkl scale factors
 
     g = np.append(g, g_fhkl)
 
@@ -352,10 +371,15 @@ class DataModelers:
             self.SIM.D.refine(hopper_utils.ROTX_ID)
             self.SIM.D.refine(hopper_utils.ROTY_ID)
             self.SIM.D.refine(hopper_utils.ROTZ_ID)
-        if P["Nabc0"].refine:
+        use_cholesky = getattr(self.data_modelers[0], 'use_cholesky_Nabc', False)
+        if use_cholesky and "chol_L11" in P and P["chol_L11"].refine:
             self.SIM.D.refine(hopper_utils.NCELLS_ID)
-        if P["Ndef0"].refine:
             self.SIM.D.refine(hopper_utils.NCELLS_ID_OFFDIAG)
+        else:
+            if P["Nabc0"].refine:
+                self.SIM.D.refine(hopper_utils.NCELLS_ID)
+            if P["Ndef0"].refine:
+                self.SIM.D.refine(hopper_utils.NCELLS_ID_OFFDIAG)
         if P["ucell0"].refine:
             for i_ucell in range(num_ucell_p):
                 self.SIM.D.refine(hopper_utils.UCELL_ID_OFFSET + i_ucell)
@@ -365,11 +389,127 @@ class DataModelers:
             self.SIM.D.refine(hopper_utils.DETZ_ID)
         if self.SIM.D.use_diffuse:
             self.SIM.D.refine(hopper_utils.DIFFUSE_ID)
+        if P["Bfactor"].refine:
+            self.SIM.D.refine(hopper_utils.BFACTOR_ID)
+        if P["Baniso0"].refine:
+            self.SIM.D.refine(hopper_utils.BFACTOR_ANISO_ID)
 
         self._vary = vary
 
+        if self.params.correct_Fhkl_gradient_bias and self.SIM.refining_Fhkl:
+            self._compute_V_fixed()
+
+        if self.params.auto_Fhkl_sigma:
+            # Check if any non-Fhkl per-shot parameters are being refined
+            has_free_non_fhkl = any(
+                p.refine for name, p in P.items()
+                if not name.startswith("scale_roi") and not name.startswith("Fhkl_"))
+
+            if has_free_non_fhkl:
+                # Two-pass: first converge with uniform sigma (handles G*F^2 degeneracy),
+                # then compute auto-sigma at the converged point for fine-tuning.
+                if COMM.rank == 0:
+                    print("Ensemble auto-sigma pass 1: uniform sigma, converging G+Fhkl jointly...")
+                x_pass1 = self.Minimize(save=False)
+                self._warmup_xinit = x_pass1
+                if COMM.rank == 0:
+                    print("Computing per-Fhkl sigmas from curvatures at converged operating point...")
+
+                # Recompute V_fixed at converged operating point if bias correction is on
+                if self.params.correct_Fhkl_gradient_bias:
+                    self._compute_V_fixed()  # TODO: evaluate at pass1 x
+
+                self._compute_fhkl_sigmas_from_curvatures(x_warmup=x_pass1)
+
+                # Remap Fhkl x values to preserve actual scale factors under new sigma.
+                # scale = init * exp(sigma * (x-1)), so to keep the same scale:
+                #   x_new = 1 + (old_sigma / new_sigma) * (x_old - 1)
+                nscales = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+                old_sigma = float(self.params.sigmas.Fhkl)
+                x_pass1 = np.array(x_pass1, dtype=np.float64)
+                x_fhkl = x_pass1[-nscales:]
+                new_sigmas = self.SIM.Fhkl_sigmas
+                has_signal = new_sigmas > 0
+                x_fhkl[has_signal] = 1.0 + (old_sigma / new_sigmas[has_signal]) * (x_fhkl[has_signal] - 1.0)
+                x_pass1[-nscales:] = x_fhkl
+                self._warmup_xinit = x_pass1
+                if COMM.rank == 0:
+                    print("Remapped %d Fhkl x-values to preserve scale factors under new sigma"
+                          % has_signal.sum())
+                    print("Ensemble auto-sigma pass 2: per-Fhkl sigma, fine-tuning...")
+            else:
+                self._compute_fhkl_sigmas_from_curvatures()
+
         self._set_mtz_data()
         self.set_device_id()
+
+    def _compute_V_fixed(self):
+        """Compute and store fixed variance from initial model for each shot."""
+        nscales = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+        for ii, i_shot in enumerate(self):
+            mod = self[i_shot]
+            x_shot = np.ones(len(mod.P) + nscales)
+            model_bragg, _ = hopper_utils.model(
+                x_shot, mod, self.SIM,
+                compute_grad=False, update_Fhkl_scales=(ii == 0))
+            mod.V_fixed = model_bragg + mod.all_background + mod.all_sigma_rdout ** 2
+
+    def _compute_fhkl_sigmas_from_curvatures(self, x_warmup=None):
+        """Accumulate diagonal Hessian across all shots, set per-Fhkl sigma.
+
+        If x_warmup is provided (full ensemble x vector from a warm-up pass),
+        per-shot params are extracted from it so curvatures are computed at the
+        converged operating point rather than at x=1.
+        """
+        nscales = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+        num_shot_params = self.num_param_per_shot
+        hessian_total = np.zeros(nscales)
+        for ii, i_shot in enumerate(self):
+            mod = self[i_shot]
+            if x_warmup is not None:
+                # Extract per-shot params from warm-up result
+                per_shot_params = x_warmup[self.x_slices[i_shot]]
+                x_shot = np.concatenate([per_shot_params, np.ones(nscales)])
+            else:
+                x_shot = np.ones(len(mod.P) + nscales)
+            model_bragg, _ = hopper_utils.model(
+                x_shot, mod, self.SIM,
+                compute_grad=False, update_Fhkl_scales=(ii == 0))
+            model_pix = model_bragg + mod.all_background
+            resid = mod.all_data - model_pix
+            V = model_pix + mod.all_sigma_rdout ** 2
+            G = mod.P["G_xtal0"].get_val(x_shot[mod.P["G_xtal0"].xpos])
+            hessian_total += self.SIM.D.add_Fhkl_gradients(
+                mod.pan_fast_slow, resid, V, mod.all_trusted, mod.all_freq,
+                self.SIM.num_Fhkl_channels, G, errors=True)
+        hessian_total = COMM.bcast(COMM.reduce(hessian_total))
+        abs_hess = np.abs(hessian_total)
+        has_signal = abs_hess > 1e-12
+        sigmas = np.full(nscales, float(self.params.sigmas.Fhkl))
+        raw_sigmas = 1.0 / np.sqrt(abs_hess[has_signal])
+        sigmas[has_signal] = raw_sigmas
+
+        # Rescale: preserve relative curvature ratios, but match default sigma magnitude
+        if has_signal.any():
+            if COMM.rank == 0:
+                print("Ensemble Fhkl Hessian (observed): min=%.4g, max=%.4g, median=%.4g"
+                      % (abs_hess[has_signal].min(), abs_hess[has_signal].max(), np.median(abs_hess[has_signal])))
+                print("Ensemble Fhkl raw sigma: min=%.4g, max=%.4g, median=%.4g"
+                      % (raw_sigmas.min(), raw_sigmas.max(), np.median(raw_sigmas)))
+            median_observed = np.median(sigmas[has_signal])
+            if median_observed > 0:
+                scale_factor = float(self.params.sigmas.Fhkl) / float(median_observed)
+                sigmas[has_signal] *= scale_factor
+                if COMM.rank == 0:
+                    print("Ensemble Fhkl sigma rescale: factor=%.4g" % scale_factor)
+                    print("Ensemble Fhkl sigma after rescale (observed): min=%.4g, max=%.4g, median=%.4g"
+                          % (sigmas[has_signal].min(), sigmas[has_signal].max(), np.median(sigmas[has_signal])))
+
+        sigmas = np.clip(sigmas, 1e-4, 100)
+        self.SIM.Fhkl_sigmas = sigmas
+        if COMM.rank == 0:
+            print("Ensemble Fhkl auto-sigma (final): min=%.4g, max=%.4g, median=%.4g, num_with_signal=%d/%d"
+                  % (sigmas.min(), sigmas.max(), np.median(sigmas), has_signal.sum(), nscales))
 
     def alloc_max_pix_per_shot(self):
         self._mpi_set_allocation_volume()
@@ -426,14 +566,27 @@ class DataModelers:
         """
         assert self._vary is not None, "call prep_for_refinement() first..."
 
-        target = TargetFuncEnsemble(self._vary)
+        xinit = getattr(self, '_warmup_xinit', None)
+        target = TargetFuncEnsemble(self._vary, xinit=xinit)
         x0_for_refinement = target.x0[self._vary]
 
-        fhkl_is_varied = self._get_fhkl_vary_flags()
-        num_fhkl_refined = int(np.sum(fhkl_is_varied))
+        # Only set Fhkl bounds if Fhkl params are actually being varied
+        num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+        fhkl_actually_varied = self._vary[-num_fhkl_param:].any()
         bounds = [(None, None)] * len(x0_for_refinement)
-        for i in np.arange(num_fhkl_refined, 0, -1):
-            bounds[-i] = (None, 8)
+        if fhkl_actually_varied:
+            fhkl_is_varied = self._get_fhkl_vary_flags()
+            num_fhkl_refined = int(np.sum(fhkl_is_varied))
+            if self.params.auto_Fhkl_sigma:
+                # With per-parameter sigma, scale bounds to preserve the same physical range:
+                # original bound x=8 with sigma=1 allows exp(7)~1097x physical scale
+                fhkl_sigmas_varied = self.SIM.Fhkl_sigmas[fhkl_is_varied.astype(bool)]
+                for i, sigma_i in enumerate(fhkl_sigmas_varied):
+                    if sigma_i > 0:
+                        bounds[-(len(fhkl_sigmas_varied) - i)] = (None, 1 + 7.0 / sigma_i)
+            else:
+                for i in np.arange(num_fhkl_refined, 0, -1):
+                    bounds[-i] = (None, 8)
         min_kwargs = {
             "args": (self,),
             "method": "L-BFGS-B",
@@ -482,6 +635,16 @@ class DataModelers:
         if self.cell_for_mtz is None:
             cell_for_mtz = tuple(self.mpi_get_ave_cell())
         sym = crystal.symmetry(cell_for_mtz, self.params.space_group)
+
+        # Determine which ASU HKLs were actually observed in any shot
+        observed_asu = set()
+        for mod in self.data_modelers.values():
+            for h in mod.hi_asu_perpix:
+                if h in self.SIM.asu_map_int:
+                    observed_asu.add(self.SIM.asu_map_int[h])
+        observed_asu = COMM.bcast(COMM.reduce(list(observed_asu)))
+        self._observed_asu_mask = np.zeros(self.SIM.Num_ASU, bool)
+        self._observed_asu_mask[list(set(observed_asu))] = True
 
         Fhkl_scale_hessian = np.zeros(self.SIM.Num_ASU * self.SIM.num_Fhkl_channels)
         for i_shot, mod in self.data_modelers.items():
@@ -538,9 +701,15 @@ class DataModelers:
                 #is_finite = ~np.isinf(channel_scales_var.astype(np.float32))  # should be finite float32
                 is_reasonable = channel_scales_var < self.max_sigma
                 is_positive = channel_hessian > 0
-                sel = is_positive & is_finite & is_reasonable
+                has_good_sigma = is_positive & is_finite & is_reasonable
+
+                # Output observed HKLs (determined from reflection tables, not Hessian)
+                # Use Hessian-based sigma where reliable, fallback sigma=-1 otherwise
+                sel = self._observed_asu_mask
                 optimized_data = channel_scales[sel] * self.initial_intens[sel]
-                optimized_sigmas = np.sqrt(channel_scales_var[sel]) * self.initial_intens[sel]
+                optimized_sigmas = np.full(sel.sum(), -1.0)
+                good_within_sel = has_good_sigma[sel]
+                optimized_sigmas[good_within_sel] = np.sqrt(channel_scales_var[sel][good_within_sel]) * self.initial_intens[sel][good_within_sel]
                 channel_inds = self.flex_asu.select(flex.bool(sel))
 
                 assert not np.any(np.isnan(optimized_sigmas)), "should be no nans here"

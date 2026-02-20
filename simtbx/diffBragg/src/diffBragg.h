@@ -245,6 +245,8 @@ class diffBragg: public nanoBragg{
   boost::python::tuple get_diffuse_gamma_derivative_pixels();
   boost::python::tuple get_diffuse_sigma_derivative_pixels();
   boost::python::tuple get_gonio_angle_derivative_pixels();
+  af::flex_double get_Bfactor_derivative_pixels();
+  boost::python::tuple get_Bfactor_aniso_derivative_pixels();
   boost::python::tuple get_ncells_def_derivative_pixels();
   boost::python::tuple get_ncells_def_second_derivative_pixels();
   boost::python::tuple get_ncells_second_derivative_pixels();
@@ -318,6 +320,8 @@ class diffBragg: public nanoBragg{
   Eigen::Matrix3d NABC;
 
   bool use_lambda_coefficients;
+  double Bfactor_image; // per-image B-factor in Angstrom^2
+  double Bfactor_aniso[6] = {0,0,0,0,0,0}; // aniso B tensor (β11,β22,β33,β12,β13,β23) in fractional hkl coords
 
   void set_close_distances();
 
