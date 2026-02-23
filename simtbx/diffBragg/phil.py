@@ -66,6 +66,9 @@ debug_mode = False
 debug_mode_rank0_only = True
   .type = bool
   .help = if debug_mode is True, then only set it for rank0
+save_spot_diagnostics = True
+  .type = bool
+  .help = Write per-spot diagnostic CSV files for each shot. Lightweight compared to debug_mode.
 nominal_Fhkl_only = True
   .type = bool
   .help = if refining Fhkls, only refine the ones that are assigned to a reflection table...
@@ -569,6 +572,9 @@ init
   G = 1
     .type = float
     .help = init for scale factor
+  auto_G = True
+    .type = bool
+    .help = auto-estimate G from data/model ratio before refinement
   B = 0
     .type = float
     .help = init for B factor
@@ -611,7 +617,7 @@ mins
   G = 0
     .type = float
     .help = min for scale G
-  B = 0
+  B = -1
     .type = float
     .help = min for Bfactor
   Baniso = [-1,-1,-1,-1,-1,-1]
@@ -749,6 +755,12 @@ use_cholesky_Nabc = True
           "NABC = L^T * L where L is lower-triangular with 6 parameters (L11, L21, L22, L31, L32, L33)."
           "This guarantees the NABC matrix is positive-definite. When True, the Ndef parameters are"
           "replaced by the Cholesky factors."
+  .expert_level = 0
+cholesky_bounds_from_Nabc = True
+  .type = bool
+  .help = "When True and use_cholesky_Nabc=True, auto-compute mins/maxs.cholesky from mins/maxs.Nabc."
+          "Diagonal: L_ii in [sqrt(N_min), sqrt(N_max)]. Off-diagonal: [-sqrt(N_max), sqrt(N_max)]"
+          "where N_max is the max of the corresponding Nabc bounds. Set False to use explicit cholesky bounds."
   .expert_level = 0
 use_diffuse_models = False
   .type = bool
@@ -926,6 +938,10 @@ simulator {
     num_mos_axes = 10
       .type = int
       .help = number of sampled rot axes if doing a uniform mosaicity sampling
+    xtal_shape = *gauss square gauss_star
+      .type = choice
+      .help = shape function for the mosaic domain interference (F_latt). gauss = Gaussian approx, \
+              square = exact sinc (parallelepiped), gauss_star = Gaussian in reciprocal Angstrom
     mosaicity_method = 2
       .type = int
       .help = 1 or 2. 1 is random sampling, 2 is even sampling
@@ -981,6 +997,11 @@ simulator {
               "during simulation, for example if the mtz is incomplete. Also, if mtz_name and"
               "from_pdb.name are both None, then a structure factor array will be created with this"
               "value as every amplitude."
+    auto_complete = True
+      .type = bool
+      .help = "Automatically complete an incomplete MTZ by filling missing reflections using"
+              "d-spacing interpolation from existing data. Prints a coverage warning if"
+              "reflections are missing."
     default_Frange = None
       .type = floats(size=2)
       .help = "Range of values sorted ascending, e.g. [1000,2000] and Fcalcs will be randomly drawn from there."
@@ -1011,6 +1032,13 @@ simulator {
     size_mm = 1
       .type = float
       .help = diameter of the beam in mm
+    divergence_mrad = 0
+      .type = float
+      .help = beam divergence cone half-angle in milliradians
+    divsteps = 0
+      .type = int
+      .help = number of divergence steps per direction (will be squared). Must be even. \
+              Each step creates an additional source, so total sources = divsteps^2 * n_wavelengths
   }
   detector {
     thick = None
@@ -1308,6 +1336,10 @@ roi {
     .type = bool
     .help = "If a region of interest contains negative background model, then skip entire region,else"
             "mask the pixels with negative background model."
+  fraction = None
+    .type = float
+    .help = "Randomly subsample ROIs to this fraction (0-1). E.g. 0.1 uses ~10%% of ROIs per shot."
+            "Useful for speeding up sigma tuning (hopper_heatup). None uses all ROIs."
 }
 
 geometry {

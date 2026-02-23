@@ -286,6 +286,15 @@ class DataModeler:
         for i_channel, (en1, en2) in enumerate(zip(SIM.Fhkl_channel_bounds, SIM.Fhkl_channel_bounds[1:])):
             sel = (energies >= en1) * (energies < en2)
             Fhkl_channel_ids[sel] = i_channel
+        # With beam divergence, sources = n_div_angles * n_wavelengths.
+        # The source ordering is: for each div angle, all wavelengths.
+        # Tile the per-wavelength channel IDs for each divergence angle.
+        n_sources = SIM.D.xray_beams.size()
+        n_wavelengths = len(energies)
+        if n_sources > n_wavelengths:
+            assert n_sources % n_wavelengths == 0, \
+                "sources (%d) not a multiple of wavelengths (%d)" % (n_sources, n_wavelengths)
+            Fhkl_channel_ids = np.tile(Fhkl_channel_ids, n_sources // n_wavelengths)
         if set_in_diffBragg:
             SIM.D.update_Fhkl_channels(Fhkl_channel_ids)
         self.Fhkl_channel_ids = Fhkl_channel_ids
@@ -607,6 +616,18 @@ class DataModeler:
             else:
                 self.Hi_asu = self.Hi
 
+        # Random ROI subsampling (e.g. for hopper_heatup speed)
+        roi_frac = getattr(self.params.roi, 'fraction', None)
+        if roi_frac is not None and 0 < roi_frac < 1:
+            selected_idx = np.where(self.selection_flags)[0]
+            n_keep = max(1, int(round(len(selected_idx) * roi_frac)))
+            if n_keep < len(selected_idx):
+                rng = np.random.RandomState(42)  # reproducible across trials
+                drop_idx = rng.choice(selected_idx, size=len(selected_idx) - n_keep, replace=False)
+                self.selection_flags[drop_idx] = False
+                MAIN_LOGGER.info("ROI subsampling: kept %d/%d ROIs (fraction=%.2f)"
+                                 % (n_keep, len(selected_idx), roi_frac))
+
         if sum(self.selection_flags) == 0:
             MAIN_LOGGER.info("No pixels slected, continuing")
             return False
@@ -917,10 +938,46 @@ class DataModeler:
             else:
                 chol_init = [np.sqrt(init.Nabc[0]), 0, np.sqrt(init.Nabc[1]),
                              0, 0, np.sqrt(init.Nabc[2])]
+
+            # Auto-compute cholesky bounds from Nabc bounds
+            # NABC = L^T * L, so: Na = L11^2, Nb = L21^2 + L22^2, Nc = L31^2 + L32^2 + L33^2
+            # Diagonal: L_ii in [sqrt(N_min_i), sqrt(N_max_i)]
+            # Off-diagonal: [-sqrt(N_max_j), sqrt(N_max_j)] where j is the row
+            chol_mins = list(mins.cholesky)
+            chol_maxs = list(maxs.cholesky)
+            if getattr(self.params, 'cholesky_bounds_from_Nabc', True):
+                Na_min, Nb_min, Nc_min = mins.Nabc
+                Na_max, Nb_max, Nc_max = maxs.Nabc
+                # L11: sqrt(Na) range
+                chol_mins[0] = np.sqrt(max(0, Na_min))   # L11 min
+                chol_maxs[0] = np.sqrt(Na_max)            # L11 max
+                # L21: off-diag for row 2, bounded by sqrt(Nb_max)
+                chol_mins[1] = -np.sqrt(Nb_max)           # L21 min
+                chol_maxs[1] = np.sqrt(Nb_max)            # L21 max
+                # L22: sqrt(Nb) range (but L21 also contributes, so allow full range)
+                chol_mins[2] = np.sqrt(max(0, Nb_min)) * 0.1  # allow shrinkage since L21 contributes
+                chol_maxs[2] = np.sqrt(Nb_max)            # L22 max
+                # L31: off-diag for row 3, bounded by sqrt(Nc_max)
+                chol_mins[3] = -np.sqrt(Nc_max)           # L31 min
+                chol_maxs[3] = np.sqrt(Nc_max)            # L31 max
+                # L32: off-diag for row 3, bounded by sqrt(Nc_max)
+                chol_mins[4] = -np.sqrt(Nc_max)           # L32 min
+                chol_maxs[4] = np.sqrt(Nc_max)            # L32 max
+                # L33: sqrt(Nc) range
+                chol_mins[5] = np.sqrt(max(0, Nc_min)) * 0.1  # allow shrinkage since L31,L32 contribute
+                chol_maxs[5] = np.sqrt(Nc_max)            # L33 max
+                if self.params.logging.rank0_level == "high":
+                    print("RANK%04d | Cholesky bounds from Nabc: Na=[%.1f,%.1f] Nb=[%.1f,%.1f] Nc=[%.1f,%.1f]" % (
+                        self.rank, Na_min, Na_max, Nb_min, Nb_max, Nc_min, Nc_max))
+                    print("RANK%04d |   L11=[%.2f,%.2f] L21=[%.2f,%.2f] L22=[%.2f,%.2f] L31=[%.2f,%.2f] L32=[%.2f,%.2f] L33=[%.2f,%.2f]" % (
+                        self.rank, chol_mins[0], chol_maxs[0], chol_mins[1], chol_maxs[1],
+                        chol_mins[2], chol_maxs[2], chol_mins[3], chol_maxs[3],
+                        chol_mins[4], chol_maxs[4], chol_mins[5], chol_maxs[5]))
+
             chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
             for ii in range(6):
                 p = ParameterType(init=chol_init[ii], sigma=sigma.cholesky[ii],
-                                  minval=mins.cholesky[ii], maxval=maxs.cholesky[ii],
+                                  minval=chol_mins[ii], maxval=chol_maxs[ii],
                                   fix=fix.Nabc,  # reuse fix.Nabc to control Cholesky refinement
                                   name=chol_names[ii],
                                   center=centers.cholesky[ii] if centers.cholesky is not None else None,
@@ -1721,6 +1778,156 @@ class DataModeler:
         if Modeler.params.refiner.debug_pixel_panelfastslow is not None:
             # TODO separate diffBragg logger
             utils.show_diffBragg_state(SIM.D, Modeler.params.refiner.debug_pixel_panelfastslow)
+
+        # Per-spot diagnostic CSV (lightweight, does not require debug_mode)
+        if getattr(Modeler.params, 'save_spot_diagnostics', False):
+            rank_diag_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "spot_diagnostics", rank)
+            diag_path = os.path.join(rank_diag_outdir, "%s_%s_%d_%d_spots.csv"
+                                     % (Modeler.params.tag, basename, i_shot, self.exper_idx))
+
+            # Extract refined shot-level parameters (same for all ROIs in this shot)
+            G_val = Modeler.P["G_xtal0"].get_val(x[Modeler.P["G_xtal0"].xpos])
+            B_val = Modeler.P["Bfactor"].get_val(x[Modeler.P["Bfactor"].xpos])
+            rot_names = ["RotXYZ%d_xtal0" % i for i in range(3)]
+            rot_vals = [Modeler.P[n].get_val(x[Modeler.P[n].xpos]) for n in rot_names]
+            chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+            if chol_names[0] in Modeler.P:
+                L_vals = [Modeler.P[n].get_val(x[Modeler.P[n].xpos]) for n in chol_names]
+                Na = L_vals[0]**2
+                Nb = L_vals[1]**2 + L_vals[2]**2
+                Nc = L_vals[3]**2 + L_vals[4]**2 + L_vals[5]**2
+            else:
+                Na_p, Nb_p, Nc_p = Modeler.P["Nabc0"], Modeler.P["Nabc1"], Modeler.P["Nabc2"]
+                Na = Na_p.get_val(x[Na_p.xpos])
+                Nb = Nb_p.get_val(x[Nb_p.xpos])
+                Nc = Nc_p.get_val(x[Nc_p.xpos])
+
+            # Refined unit cell parameters
+            try:
+                nucell = len(Modeler.ucell_man.variables)
+                ucell_p = [Modeler.P["ucell%d" % i] for i in range(nucell)]
+                ucell_var = [p.get_val(x[p.xpos]) for p in ucell_p]
+                Modeler.ucell_man.variables = ucell_var
+                uc_params = Modeler.ucell_man.unit_cell_parameters
+                uc_a, uc_b, uc_c = uc_params[0], uc_params[1], uc_params[2]
+                uc_al, uc_be, uc_ga = uc_params[3], uc_params[4], uc_params[5]
+            except Exception:
+                uc_a = uc_b = uc_c = uc_al = uc_be = uc_ga = np.nan
+
+            # Detector geometry for lab-frame coordinates
+            det = Modeler.E.detector
+
+            rows = []
+            for i_roi in range(len(data_subimg)):
+                dat = data_subimg[i_roi]
+                fit = model_subimg[i_roi]
+                trust = trusted_subimg[i_roi]
+                # sigma_z
+                if sigma_rdout_subimg is not None:
+                    sig = np.sqrt(fit + sigma_rdout_subimg[i_roi] ** 2)
+                else:
+                    sig = np.sqrt(fit + Modeler.nominal_sigma_rdout ** 2)
+                Z = (dat - fit) / sig
+                sigmaZ = np.nan
+                ntrust = 0
+                if np.any(trust):
+                    sigmaZ = Z[trust].std()
+                    ntrust = int(trust.sum())
+                # HKL and d-spacing
+                hkl = Modeler.Hi[i_roi] if Modeler.Hi else (0, 0, 0)
+                hkl_asu = Modeler.Hi_asu[i_roi] if Modeler.Hi_asu else hkl
+                d_spacing = 1.0 / Modeler.Q[i_roi] if hasattr(Modeler, 'Q') and Modeler.Q else np.nan
+                # panel and centroid (pixels)
+                x1, x2, y1, y2 = Modeler.rois[i_roi]
+                pid = Modeler.pids[i_roi]
+                cent_x = (x1 + x2) / 2.0
+                cent_y = (y1 + y2) / 2.0
+                # Lab-frame coordinates (mm) from detector geometry
+                try:
+                    panel = det[pid]
+                    lab_xyz = panel.get_pixel_lab_coord((cent_x, cent_y))
+                    det_x_mm = lab_xyz[0]
+                    det_y_mm = lab_xyz[1]
+                    det_z_mm = lab_xyz[2]
+                except Exception:
+                    det_x_mm = det_y_mm = det_z_mm = np.nan
+                # tilt plane
+                ta, tb, tc = Modeler.tilt_abc[i_roi] if Modeler.tilt_abc else (np.nan, np.nan, np.nan)
+                # tilt plane residual variance (diagonal of covariance)
+                cov = Modeler.tilt_cov[i_roi] if hasattr(Modeler, 'tilt_cov') and Modeler.tilt_cov else None
+                if cov is not None and hasattr(cov, '__len__'):
+                    try:
+                        bg_resid_var = float(np.trace(cov) / 3.0)
+                    except (TypeError, ValueError):
+                        bg_resid_var = np.nan
+                else:
+                    bg_resid_var = np.nan
+                # data/model max in trusted region
+                dat_max = float(dat[trust].max()) if np.any(trust) else np.nan
+                mod_max = float(fit[trust].max()) if np.any(trust) else np.nan
+                # integrated signal (sum over trusted pixels, data - background)
+                bg = Modeler.all_background[Modeler.roi_id == i_roi] if hasattr(Modeler, 'all_background') else None
+                if bg is not None and np.any(trust):
+                    dat_flat = Modeler.all_data[Modeler.roi_id == i_roi]
+                    trust_flat = Modeler.all_trusted[Modeler.roi_id == i_roi]
+                    dat_sum = float((dat_flat - bg)[trust_flat].sum())
+                    mod_flat = (Modeler.best_model + Modeler.all_background)[Modeler.roi_id == i_roi] if Modeler.best_model is not None else None
+                    mod_sum = float((mod_flat - bg)[trust_flat].sum()) if mod_flat is not None else np.nan
+                else:
+                    dat_sum = mod_sum = np.nan
+                # bragg signal fraction
+                bragg = bragg_subimg[i_roi] if bragg_subimg and bragg_subimg[0] is not None else None
+                bragg_max = float(bragg[trust].max()) if bragg is not None and np.any(trust) else np.nan
+                rows.append({
+                    'roi_id': i_roi,
+                    'h': hkl[0], 'k': hkl[1], 'l': hkl[2],
+                    'h_asu': hkl_asu[0], 'k_asu': hkl_asu[1], 'l_asu': hkl_asu[2],
+                    'd_spacing': d_spacing,
+                    'panel': pid,
+                    'cent_x': cent_x, 'cent_y': cent_y,
+                    'det_x_mm': det_x_mm, 'det_y_mm': det_y_mm,
+                    'sigma_z': sigmaZ,
+                    'n_trusted': ntrust,
+                    'n_pixels': dat.size,
+                    'tilt_a': ta, 'tilt_b': tb, 'tilt_c': tc,
+                    'bg_resid_var': bg_resid_var,
+                    'dat_max': dat_max, 'mod_max': mod_max,
+                    'dat_sum': dat_sum, 'mod_sum': mod_sum,
+                    'bragg_max': bragg_max,
+                })
+            spot_df = pandas.DataFrame(rows)
+            spot_df.to_csv(diag_path, index=False, float_format='%.4f')
+
+            # Also append a one-line shot summary to a rank-level file
+            summary_path = os.path.join(rank_diag_outdir, "%s_rank%d_shot_summary.csv" % (Modeler.params.tag, rank))
+            sigz_vals = spot_df['sigma_z'].dropna()
+            from simtbx.diffBragg.utils import is_outlier
+            n_outlier_sigz = int(is_outlier(sigz_vals.values).sum()) if len(sigz_vals) >= 3 else 0
+            shot_summary = {
+                'shot': i_shot,
+                'exp_name': basename,
+                'n_rois': len(rows),
+                'G': G_val,
+                'B': B_val,
+                'rotX': rot_vals[0], 'rotY': rot_vals[1], 'rotZ': rot_vals[2],
+                'Na': Na, 'Nb': Nb, 'Nc': Nc,
+            }
+            if chol_names[0] in Modeler.P:
+                for cn, lv in zip(chol_names, L_vals):
+                    shot_summary[cn] = lv
+            shot_summary.update({
+                'uc_a': uc_a, 'uc_b': uc_b, 'uc_c': uc_c,
+                'uc_al': uc_al, 'uc_be': uc_be, 'uc_ga': uc_ga,
+                'sigz_mean': sigz_vals.mean() if len(sigz_vals) else np.nan,
+                'sigz_median': sigz_vals.median() if len(sigz_vals) else np.nan,
+                'sigz_max': sigz_vals.max() if len(sigz_vals) else np.nan,
+                'frac_sigz_lt2': (sigz_vals < 2).mean() if len(sigz_vals) else np.nan,
+                'frac_sigz_lt5': (sigz_vals < 5).mean() if len(sigz_vals) else np.nan,
+                'n_outlier_sigz': n_outlier_sigz,
+            })
+            sum_df = pandas.DataFrame([shot_summary])
+            write_header = not os.path.exists(summary_path)
+            sum_df.to_csv(summary_path, mode='a', header=write_header, index=False, float_format='%.4f')
 
         return shot_df
 
@@ -3147,6 +3354,71 @@ def get_lam0_lam1_from_pandas(df):
     assert lam0 != -1
     assert lam1 != -1
     return lam0, lam1
+
+
+def estimate_spot_scale(Modeler, SIM):
+    """
+    Estimate a reasonable init.G by comparing data signal to a forward model at G=1.
+
+    The forward model at G=1 already reflects the no_Nabc_scale flag, so the ratio
+    data_sum/model_sum gives the correct G directly.
+
+    Returns the estimated G value.
+    """
+    x0 = np.ones(len(Modeler.P))
+    model_pix, _ = model(x0, Modeler, SIM, compute_grad=False)
+    # model_pix is Bragg-only at G=1; data signal = data - background
+    data_signal = Modeler.all_data - Modeler.all_background
+    trusted = Modeler.all_trusted
+
+    model_sum = model_pix[trusted].sum()
+    data_sum = data_signal[trusted].sum()
+
+    # Diagnostics: understand why model might be zero
+    model_max = model_pix.max()
+    model_nonzero = np.count_nonzero(model_pix > 1e-10)
+    MAIN_LOGGER.info("estimate_spot_scale: model_max=%.4g, model_nonzero_pixels=%d/%d, "
+                     "data_sum=%.4g, model_sum=%.4g"
+                     % (model_max, model_nonzero, len(model_pix), data_sum, model_sum))
+    # Per-ROI breakdown: check a few ROIs for signal
+    MAIN_LOGGER.info("  Total ROIs: %d, first few HKLs: %s" %
+                     (len(Modeler.rois), str(Modeler.Hi[:5]) if Modeler.Hi else "none"))
+    # Check structure factors
+    if hasattr(SIM, 'crystal') and hasattr(SIM.crystal, 'miller_array') and SIM.crystal.miller_array is not None:
+        F = np.array(SIM.crystal.miller_array.data())
+        MAIN_LOGGER.info("  Structure factors: n=%d, min=%.4g, max=%.4g, mean=%.4g"
+                         % (len(F), F.min(), F.max(), F.mean()))
+    # Check beam
+    if hasattr(SIM, 'beam') and hasattr(SIM.beam, 'xray_beams'):
+        beams = SIM.beam.xray_beams
+        MAIN_LOGGER.info("  Beam: %d energy channels, wavelength=%.6g (raw), spectrum[0]=(%s), unit_s0=%s" %
+                         (len(beams), beams[0].get_wavelength(),
+                          str(SIM.beam.spectrum[0]),
+                          str(tuple(SIM.beam.unit_s0))))
+    # Check gonio
+    MAIN_LOGGER.info("  Gonio: phi_deg=%.4f, osc_deg=%.4f, phisteps=%d, axis=%s" %
+                     (SIM.D.phi_deg, SIM.D.osc_deg, SIM.D.phisteps,
+                      str(tuple(SIM.D.spindle_axis))))
+    # Check crystal
+    MAIN_LOGGER.info("  Crystal Amatrix: %s" % str(tuple(SIM.D.Amatrix)[:9]))
+    # Check what the engine actually sees for beam
+    engine_beams = SIM.D.xray_beams
+    if len(engine_beams) > 0:
+        MAIN_LOGGER.info("  Engine beam[0]: wavelength=%.6g, flux=%.6g" %
+                         (engine_beams[0].get_wavelength(), engine_beams[0].get_flux()))
+    # Also check detector
+    MAIN_LOGGER.info("  Detector: %d panels, panel0 origin=%s" %
+                     (len(SIM.detector), str(SIM.detector[0].get_origin())))
+
+    if model_sum <= 0:
+        MAIN_LOGGER.warning("estimate_spot_scale: model sum <= 0, cannot auto-estimate G")
+        return None
+
+    G_est = data_sum / model_sum
+
+    MAIN_LOGGER.info("Auto-estimated init.G = %.4g (data_sum=%.4g, model_sum=%.4g)"
+                     % (G_est, data_sum, model_sum))
+    return G_est
 
 
 def get_simulator_for_data_modelers(data_modeler):

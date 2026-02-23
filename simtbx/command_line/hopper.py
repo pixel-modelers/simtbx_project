@@ -286,6 +286,20 @@ class Script:
 
             SIM.D.device_Id = self.dev
 
+            # Auto-estimate G from data/model ratio
+            auto_G = getattr(self.params.init, 'auto_G', True)
+            fix_G = self.params.fix.G
+            MAIN_LOGGER.debug("auto_G=%s, fix.G=%s" % (auto_G, fix_G))
+            if auto_G and not fix_G:
+                G_est = hopper_utils.estimate_spot_scale(Modeler, SIM)
+                if G_est is not None and G_est > 0:
+                    if G_est > 1e30:
+                        MAIN_LOGGER.error("Auto-G estimate %.4g is unreasonably large (model ~0). "
+                                          "Skipping this shot — check beam/crystal/structure factors." % G_est)
+                        continue
+                    Modeler.P["G_xtal0"].init = G_est
+                    MAIN_LOGGER.info("Set G_xtal0.init = %.4g" % G_est)
+
             nparam = len(Modeler.P)
             if SIM.refining_Fhkl:
                 nparam += SIM.Num_ASU*SIM.num_Fhkl_channels
@@ -379,7 +393,7 @@ class Script:
             print_s = "Finished refinement of shot %d / %d in %.4f sec. (rank mean t/im=%.4f sec.)" \
                         % (i_shot+1, len(input_lines), tref, np.mean(trefs))
             if sigz is not None and niter is not None:
-                print_s += " Ran %d iterations. Final sigmaZ = %.1f," % (niter, sigz)
+                print_s += " Ran %d iterations. Final sigmaZ = %.1f. %d ROIs." % (niter, sigz, len(Modeler.rois))
             if COMM.rank==0:
                 MAIN_LOGGER.info(print_s)
             else:

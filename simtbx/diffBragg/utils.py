@@ -818,7 +818,13 @@ def simulator_for_refinement(expt, params):
     SIM.isotropic_diffuse_gamma = params.isotropic.diffuse_gamma
     SIM.isotropic_diffuse_sigma = params.isotropic.diffuse_sigma
 
-    SIM.D.no_Nabc_scale = params.no_Nabc_scale  # TODO check gradients for this setting
+    SIM.D.no_Nabc_scale = params.no_Nabc_scale
+    if params.no_Nabc_scale:
+        # When no_Nabc_scale=True, the kernel omits det(NABC) from F_latt.
+        # Apply a fixed baseline scale equivalent to det(NABC)^2 for N=30
+        # so that G stays at a reasonable magnitude. This constant is
+        # independent of init.Nabc and consistent across all stages.
+        SIM.D.spot_scale = 30**6  # (30*30*30)^2 = 7.29e8
     SIM.D.update_oversample_during_refinement = False
 
     return SIM
@@ -865,7 +871,7 @@ def simulator_from_expt_and_params(expt, params=None):
 
     # create nanoBragg crystal
     crystal = NBcrystal(init_defaults=False)
-    crystal.xtal_shape = "gauss"
+    crystal.xtal_shape = params.simulator.crystal.xtal_shape if params is not None else "gauss"
     crystal.isotropic_ncells = has_isotropic_ncells
     if params.simulator.crystal.rotXYZ_ucell is not None:
         rotXYZ = params.simulator.crystal.rotXYZ_ucell[:3]
@@ -901,6 +907,9 @@ def simulator_from_expt_and_params(expt, params=None):
         assert total_flux is not None
         init_spectrum = [(expt.beam.get_wavelength(), total_flux)]
     beam.spectrum = init_spectrum
+    if params is not None and params.simulator.beam.divergence_mrad > 0:
+        beam.divergence_mrad = params.simulator.beam.divergence_mrad
+        beam.divsteps = params.simulator.beam.divsteps if params.simulator.beam.divsteps > 0 else 4
     SIM.beam = beam
     # TODO what about spectrum from imageset ?
 
@@ -1025,6 +1034,71 @@ def open_mtz(mtzfname, mtzlabel=None, verbose=False):
     if not ma.is_xray_amplitude_array():
         ma = ma.as_amplitude_array()
     return ma
+
+
+def complete_miller_array(ma, d_min=None, log=True):
+    """Complete a miller array by filling missing reflections using d-spacing interpolation.
+
+    Missing HKLs are assigned amplitudes from a 1D interpolation of F vs d-spacing
+    fitted to the existing data (similar to Wilson statistics).
+
+    :param ma: cctbx miller array (amplitudes)
+    :param d_min: resolution limit (if None, uses the data's d_min)
+    :param log: if True, print coverage statistics
+    :return: completed miller array
+    """
+    from scipy.interpolate import interp1d
+
+    if not ma.is_xray_amplitude_array():
+        ma = ma.as_amplitude_array()
+
+    if d_min is None:
+        _, d_min = ma.resolution_range()
+
+    mset_full = ma.build_miller_set(anomalous_flag=True, d_min=d_min)
+    n_full = mset_full.size()
+    n_have = ma.size()
+    n_missing = n_full - n_have
+
+    if n_missing <= 0:
+        if log:
+            MAIN_LOGGER.info("MTZ is already complete (%d / %d HKLs)" % (n_have, n_full))
+        return ma
+
+    completeness = 100 * n_have / max(n_full, 1)
+    if log:
+        MAIN_LOGGER.warning(
+            "MTZ coverage: %d / %d HKLs (%.1f%%). Filling %d missing reflections "
+            "using d-spacing interpolation." % (n_have, n_full, completeness, n_missing))
+
+    # Build lookup and interpolation function
+    Fmap = {h: val for h, val in zip(ma.indices(), ma.data())}
+    xvals = np.array(ma.d_spacings().data())
+    yvals = np.array(ma.data())
+    fill_vals = (yvals[np.argmin(xvals)], yvals[np.argmax(xvals)])
+    interp_func = interp1d(xvals, yvals, fill_value=fill_vals, bounds_error=False)
+
+    # Build complete d-spacing lookup
+    mset_full_d = {h: d for h, d in zip(mset_full.d_spacings().indices(),
+                                         mset_full.d_spacings().data())}
+
+    # Fill missing values
+    from dials.array_family import flex as dials_flex
+    data = []
+    for h in mset_full.indices():
+        if h in Fmap:
+            data.append(Fmap[h])
+        else:
+            data.append(float(interp_func(mset_full_d[h])))
+
+    from cctbx import miller as cctbx_miller
+    complete_amps = flex.double(data)
+    completed_ma = cctbx_miller.array(mset_full, complete_amps)
+    if not completed_ma.is_xray_amplitude_array():
+        completed_ma = completed_ma.set_observation_type_xray_amplitude()
+    completed_ma = completed_ma.as_anomalous_array()
+
+    return completed_ma
 
 
 def make_miller_array(symbol, unit_cell, defaultF=1000, d_min=1.5, d_max=999):
@@ -1885,6 +1959,11 @@ def load_Fhkl_model_from_params_and_expt(params, expt):
                 defaultF=default_F)
     else:
         miller_data = open_mtz(sf.mtz_name, sf.mtz_column)
+
+    # Auto-complete missing reflections if requested
+    if getattr(sf, 'auto_complete', True) and miller_data is not None:
+        miller_data = complete_miller_array(
+            miller_data, d_min=sf.dmin if sf.dmin is not None else None)
 
     return miller_data
 

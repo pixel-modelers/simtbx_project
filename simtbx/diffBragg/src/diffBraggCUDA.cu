@@ -228,13 +228,65 @@ void diffBragg_sum_over_steps_cuda(
         cp.npix_allocated = db_cu_flags.Npix_to_allocate;
     } // END of allocation
 
-    // Lazy allocation for gradient images that may be enabled after initial device allocation
+    // Lazy allocation for gradient images that may be enabled after initial device allocation.
+    // This handles the case where the device is first allocated during a forward-only pass
+    // (e.g. auto_G estimation) before refine flags are set, and then refinement enables
+    // derivative computation on a subsequent call.
     if (db_flags.refine_Bfactor && cp.cu_d_Bfactor_images == NULL){
         gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
     }
     if (db_flags.refine_Bfactor_aniso && cp.cu_d_Bfactor_aniso_images == NULL){
         gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_aniso_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
     }
+    if (std::count(db_flags.refine_Umat.begin(), db_flags.refine_Umat.end(), true) > 0){
+        if (cp.cu_d_Umat_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_Umat_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+        if (cp.cu_d2_Umat_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d2_Umat_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+    }
+    if (std::count(db_flags.refine_Ncells.begin(), db_flags.refine_Ncells.end(), true) > 0 || db_flags.refine_Ncells_def){
+        if (cp.cu_d_Ncells_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_Ncells_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
+        if (cp.cu_d2_Ncells_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d2_Ncells_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
+    }
+    if (std::count(db_flags.refine_Bmat.begin(), db_flags.refine_Bmat.end(), true) > 0){
+        if (cp.cu_d_Bmat_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_Bmat_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
+        if (cp.cu_d2_Bmat_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d2_Bmat_images, cp.npix_allocated*6*sizeof(CUDAREAL)));
+    }
+    if (std::count(db_flags.refine_panel_rot.begin(), db_flags.refine_panel_rot.end(), true) > 0 && cp.cu_d_panel_rot_images == NULL)
+        gpuErr(cudaMallocManaged(&cp.cu_d_panel_rot_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+    if (std::count(db_flags.refine_panel_origin.begin(), db_flags.refine_panel_origin.end(), true) > 0 && cp.cu_d_panel_orig_images == NULL)
+        gpuErr(cudaMallocManaged(&cp.cu_d_panel_orig_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+    if (std::count(db_flags.refine_lambda.begin(), db_flags.refine_lambda.end(), true) > 0){
+        if (cp.cu_d_lambda_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_lambda_images, cp.npix_allocated*2*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_fcell){
+        if (cp.cu_d_fcell_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_fcell_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+        if (cp.cu_d2_fcell_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d2_fcell_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_eta){
+        if (cp.cu_d_eta_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_eta_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+        if (cp.cu_d2_eta_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d2_eta_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_diffuse){
+        if (cp.cu_d_diffuse_gamma_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_diffuse_gamma_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+        if (cp.cu_d_diffuse_sigma_images == NULL)
+            gpuErr(cudaMallocManaged(&cp.cu_d_diffuse_sigma_images, cp.npix_allocated*3*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_gonio_angle && cp.cu_d_gonio_angle_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_gonio_angle_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_fp_fdp && cp.cu_d_fp_fdp_images == NULL)
+        gpuErr(cudaMallocManaged(&cp.cu_d_fp_fdp_images, cp.npix_allocated*2*sizeof(CUDAREAL)));
 
     bool ALLOC = !cp.device_is_allocated; // shortcut variable
 
@@ -306,6 +358,12 @@ void diffBragg_sum_over_steps_cuda(
 
 //  UMATS
     if (db_cu_flags.update_umats || ALLOC||FORCE_COPY){
+        // Late-allocate prime/dbl_prime arrays if they grew from empty
+        // (e.g. eta refinement enabled after initial device allocation)
+        if (db_cryst.UMATS_RXYZ_prime.size() > 0 && cp.cu_UMATS_RXYZ_prime == NULL)
+            gpuErr(cudaMallocManaged((void **)&cp.cu_UMATS_RXYZ_prime, db_cryst.UMATS_RXYZ_prime.size()*sizeof(MAT3)));
+        if (db_cryst.UMATS_RXYZ_dbl_prime.size() > 0 && cp.cu_UMATS_RXYZ_dbl_prime == NULL)
+            gpuErr(cudaMallocManaged((void **)&cp.cu_UMATS_RXYZ_dbl_prime, db_cryst.UMATS_RXYZ_dbl_prime.size()*sizeof(MAT3)));
         for (int i=0; i< db_cryst.UMATS.size(); i++)
             cp.cu_UMATS[i] = db_cryst.UMATS[i];
         for (int i=0; i < db_cryst.UMATS_RXYZ.size(); i++)

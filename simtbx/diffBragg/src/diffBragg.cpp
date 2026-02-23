@@ -1858,10 +1858,11 @@ np::ndarray diffBragg::add_Fhkl_gradients(const af::shared<size_t>& panels_fasts
     }
 
     // we need to supply the spot scale parameter
-    SCITBX_ASSERT(spot_scale==1);
-    spot_scale=Gscale;
+    // Save baseline spot_scale (may be non-1 when no_Nabc_scale is used)
+    double saved_spot_scale = spot_scale;
+    spot_scale=Gscale * saved_spot_scale;
     add_diffBragg_spots(panels_fasts_slows);
-    spot_scale=1;
+    spot_scale=saved_spot_scale;
 
     db_flags.using_trusted_mask = false;
     db_flags.gradient_mode = false;
@@ -1929,10 +1930,11 @@ np::ndarray diffBragg::add_sourceI_gradients(const af::shared<size_t>& panels_fa
     }
 
     // we need to supply the spot scale parameter
-    SCITBX_ASSERT(spot_scale==1);
-    spot_scale=Gscale;
+    // Save baseline spot_scale (may be non-1 when no_Nabc_scale is used)
+    double saved_spot_scale2 = spot_scale;
+    spot_scale=Gscale * saved_spot_scale2;
     add_diffBragg_spots(panels_fasts_slows);
-    spot_scale=1;
+    spot_scale=saved_spot_scale2;
 
     db_flags.using_trusted_mask = false;
     db_flags.gradient_mode = false;

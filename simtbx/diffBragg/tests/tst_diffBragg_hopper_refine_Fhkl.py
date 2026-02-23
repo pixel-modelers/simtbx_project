@@ -33,6 +33,8 @@ parser.add_argument("--nshots", type=int, default=3,
                     help="number of shots for multi-shot ensemble test (default: 3)")
 parser.add_argument("--refine-B-iso", action="store_true",
                     help="refine isotropic B instead of aniso B (use with --perturb-B-aniso to compare)")
+parser.add_argument("--divergence", type=float, default=None,
+                    help="beam divergence half-angle in mrad for GT simulation (model has none)")
 args = parser.parse_args()
 import os
 
@@ -139,6 +141,10 @@ with DeviceWrapper(0) as _:
     detdist = 140
     SIM.detector = SimData.simple_detector(detdist, 0.1, shape)
     SIM.crystal = nbcryst
+    if args.divergence is not None:
+        SIM.beam.divergence_mrad = args.divergence
+        SIM.beam.divsteps = 4  # 4x4 grid = ~13 beams within cone
+        print("GT beam divergence: %.2f mrad, %d divsteps" % (args.divergence, SIM.beam.divsteps))
     SIM.instantiate_diffBragg(oversample=1, auto_set_spotscale=True, default_F=0)
 
     # test the code for computing the acerage structure factor intensity with resolution
@@ -585,6 +591,51 @@ with DeviceWrapper(0) as _:
                stats['bg_offset_sigma'], stats['rms_resid'], stats['snr']))
     print("--- End per-reflection diagnostics ---\n")
 
+    if args.divergence is not None:
+        # Resolution-dependent Fhkl correction analysis
+        # With divergence in GT but not in model, the Fhkl corrections should
+        # show resolution-dependent structure (non-uniform across resolution bins).
+        # The exact direction depends on how G absorbs the average divergence effect.
+        import collections
+        # Use data-adaptive bins: split HKLs into quartiles by d-spacing
+        all_dsp = sorted([dsp_map[h] for h in nominal_hkl_corrections], reverse=True)
+        n_bins = 4
+        bin_size = len(all_dsp) // n_bins
+        d_edges = [999]
+        for i in range(1, n_bins):
+            d_edges.append(all_dsp[i * bin_size])
+        d_edges.append(0)
+        d_bins = list(zip(d_edges[:-1], d_edges[1:]))
+
+        bin_corrections = collections.defaultdict(list)
+        for hkl, corr in nominal_hkl_corrections.items():
+            dsp = dsp_map[hkl]
+            for d_hi, d_lo in d_bins:
+                if d_lo < dsp <= d_hi:
+                    bin_corrections[(d_hi, d_lo)].append(corr)
+                    break
+
+        print("\n--- Resolution-dependent Fhkl correction (divergence=%.2f mrad) ---" % args.divergence)
+        mean_corrections = []
+        for d_hi, d_lo in d_bins:
+            vals = bin_corrections[(d_hi, d_lo)]
+            if vals:
+                mean_c = np.mean(vals)
+                std_c = np.std(vals)
+                mean_corrections.append(mean_c)
+                print("  d=%.1f-%.1f A: mean_correction=%.4f +/- %.4f (%d HKLs)" % (
+                    d_hi, d_lo, mean_c, std_c, len(vals)))
+
+        # Assert that corrections are resolution-dependent: the spread of bin means
+        # should be significantly larger than expected if corrections were uniform.
+        # With divergence mismatch, the bin means should NOT all be equal.
+        if len(mean_corrections) >= 3:
+            spread = max(mean_corrections) - min(mean_corrections)
+            assert spread > 0.02, \
+                "Expected resolution-dependent Fhkl corrections (spread=%.4f < 0.02)" % spread
+            print("  PASSED: corrections show resolution-dependent structure (spread=%.4f)" % spread)
+        print("--- End divergence analysis ---\n")
+
     # Skip single-shot R1 assertion when:
     # - G+Fhkl jointly refined with auto-sigma (G*F^2 degeneracy)
     # - Nabc perturbed (6 Cholesky + G + Fhkl too ill-conditioned for single shot)
@@ -592,7 +643,8 @@ with DeviceWrapper(0) as _:
     skip_single_shot_assertion = (
         (args.perturb is not None and "G" in args.perturb and args.auto_sigma) or
         (args.perturb is not None and "Nabc" in args.perturb) or
-        args.perturb_B_aniso
+        args.perturb_B_aniso or
+        args.divergence is not None
     )
 
     if args.scale != 0 and not skip_single_shot_assertion:
@@ -602,7 +654,10 @@ with DeviceWrapper(0) as _:
     if not skip_single_shot_assertion:
         assert r1_check < 0.04, "R1 (refined)=%.4f >= 0.04" % r1_check
     else:
-        reason = "aniso B fixed" if args.perturb_B_aniso else ("auto-sigma" if args.auto_sigma else "Nabc perturbed")
+        reason = ("aniso B fixed" if args.perturb_B_aniso
+                  else "divergence mismatch" if args.divergence is not None
+                  else "auto-sigma" if args.auto_sigma
+                  else "Nabc perturbed")
         print("Skipping single-shot R1<4%% assertion (%s, R1=%.2f%%)" % (reason, r1_check*100))
 
     # test hopper_ensemble_refiner using this one shot
@@ -745,6 +800,9 @@ with DeviceWrapper(0) as _:
             SIM_i = SimData(use_default_crystal=False)
             SIM_i.detector = SimData.simple_detector(detdist, 0.1, shape)
             SIM_i.crystal = nbcryst_i
+            if args.divergence is not None:
+                SIM_i.beam.divergence_mrad = args.divergence
+                SIM_i.beam.divsteps = 4
             SIM_i.instantiate_diffBragg(oversample=1, auto_set_spotscale=True, default_F=0)
             SIM_i.D.default_F = 0
             SIM_i.D.F000 = 0
