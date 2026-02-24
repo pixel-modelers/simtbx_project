@@ -72,6 +72,9 @@ class FormatHDF5AttributeGeometry(FormatHDF5, FormatStill):
             scan_dict = ast.literal_eval(scan_str)
             self._cctbx_gonio = self._goniometer_factory.from_dict(gonio_dict)
             self._cctbx_scan = self._scan_factory.from_dict(scan_dict)
+        else:
+            self._cctbx_gonio = None 
+            self._cctbx_scan = None
 
     def _check_per_shot_spectra(self):
         keys = list(self._handle.keys())
