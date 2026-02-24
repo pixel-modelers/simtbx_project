@@ -7,17 +7,22 @@ for each parameter, scoring each trial by median sigZ. Builds up
 parameter-by-parameter so each stage inherits the best settings from
 the previous stage.
 
-Stages (standard):
-  1. G estimation: forward model at G=1, compute data/model ratio
-  2. G sigma sweep: fix everything else, sweep sigmas.G
-  3. RotXYZ sigma sweep: best G sigma, sweep sigmas.RotXYZ
-  4. Nabc/cholesky sigma sweep: sweep sigmas.Nabc or sigmas.cholesky
-  5. B sigma sweep: sweep sigmas.B
+Stages (standard 2-pass pipeline):
+  Pass 1 (ballpark): Quick sigma sweep with inherited model params
+    1. G estimation: forward model at G=1, compute data/model ratio
+    2. G sigma sweep: fix everything else, sweep sigmas.G
+    3. RotXYZ sigma sweep: best G sigma, sweep sigmas.RotXYZ
+    4. Nabc/cholesky sigma sweep: sweep sigmas.Nabc or sigmas.cholesky
+    5. B sigma sweep: sweep sigmas.B
+  Model tuning: Sweep phisteps + sigma_r using Pass 1 sigmas
+  Pass 2 (refined): Re-sweep all sigmas with tuned model params
 
-Deep-dive mode (--deep-dive): after standard stages, sweeps per-component
-sigmas using coordinate descent. For each multi-component parameter
-(cholesky[6], RotXYZ[3], ucell[6], Baniso[6]), it starts from the scalar
-best and sweeps each component individually while holding others fixed.
+  Use --no-tune-model to skip the 2-pass pipeline (single pass only).
+
+Deep-dive mode (--deep-dive): after sigma sweeps, does per-component
+sigma tuning for multi-component parameters (cholesky[6], ucell[6],
+Baniso[6]). RotXYZ uses scalar sigma by default (use --deep-dive-params
+RotXYZ to override).
 
 Each trial runs hopper on N sample frames (default 3, evenly spaced).
 Scoring: median sigZ from spot diagnostics (lower = better fit).
@@ -43,7 +48,7 @@ Usage:
   # Deep-dive: per-component sigma tuning after standard stages
   python hopper_heatup.py base.phil --deep-dive
 
-  # Deep-dive only specific params
+  # Deep-dive only specific params (RotXYZ excluded by default)
   python hopper_heatup.py base.phil --deep-dive --deep-dive-params cholesky,RotXYZ
 
   # Custom deep-dive multipliers (relative to scalar best)
@@ -90,6 +95,7 @@ DEFAULT_SIGMAS = {
 # Which params to fix at each stage (True = fixed)
 STAGE_FIXES = {
     'G':      {'G': False, 'RotXYZ': True,  'Nabc': True,  'B': True,  'ucell': True},
+    'G+B':    {'G': False, 'RotXYZ': True,  'Nabc': True,  'B': False, 'ucell': True},
     'RotXYZ': {'G': False, 'RotXYZ': False, 'Nabc': True,  'B': True,  'ucell': True},
     'Nabc':   {'G': False, 'RotXYZ': False, 'Nabc': False, 'B': True,  'ucell': True},
     'B':      {'G': False, 'RotXYZ': False, 'Nabc': False, 'B': False, 'ucell': True},
@@ -124,6 +130,8 @@ DEFAULT_BETAS = {
     'cholesky': [1e-2, 1e-1, 1.0, 10.0, 100.0],
     'RotXYZ':   [1e-6, 1e-5, 1e-4, 1e-3, 1e-2],
 }
+# Add 'ucell' to DEFAULT_BETAS (same range as cholesky by default)
+DEFAULT_BETAS['ucell'] = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
 
 # Default sweep values for model parameters
 DEFAULT_PHISTEPS = [5, 10, 20, 30, 50, 75, 100]
@@ -138,7 +146,61 @@ TUNE_PARAMS = {
     'betas.Nabc': 'betas.Nabc',
     'betas.cholesky': 'betas.cholesky',
     'betas.RotXYZ': 'betas.RotXYZ',
+    'betas.ucell': 'betas.ucell',
 }
+
+
+def generate_beta_sweep(tune_name, baseline_vars=None, refined_params=None,
+                         n_points=7, decades_below=3, decades_above=4):
+    """Generate a variance-scaled beta sweep centered on the parameter's actual variance.
+
+    The beta at which spread_ratio ~ 0.5 is typically near the parameter's natural
+    variance. We sweep from several decades below (tight) to above (loose).
+
+    Args:
+        tune_name: e.g. 'betas.G'
+        baseline_vars: dict from unrestrained baseline (col -> variance), preferred
+        refined_params: dict from final refinement (has var_G, etc.), fallback
+        n_points: number of sweep points
+        decades_below: decades below center to sweep (tight end)
+        decades_above: decades above center to sweep (loose end)
+
+    Returns: list of beta values (log-spaced), or DEFAULT_BETAS fallback.
+    """
+    binfo = BETA_PARAM_MAP.get(tune_name)
+    if binfo is None:
+        short = tune_name.split('.', 1)[1] if '.' in tune_name else tune_name
+        return list(DEFAULT_BETAS.get(short, [1e-2, 1e-1, 1.0, 10.0, 100.0]))
+
+    # Get center variance (baseline preferred, refined fallback)
+    center_var = None
+    if baseline_vars is not None:
+        vals = [baseline_vars.get(c) for c in binfo['csv_cols']
+                if c in baseline_vars and baseline_vars[c] > 0]
+        if vals:
+            center_var = float(np.mean(vals))
+
+    if center_var is None and refined_params is not None:
+        var_val = refined_params.get(binfo['var_key'])
+        if var_val is not None:
+            if isinstance(var_val, (tuple, list)):
+                pos = [v for v in var_val if v > 0]
+                center_var = float(np.mean(pos)) if pos else None
+            elif var_val > 0:
+                center_var = float(var_val)
+
+    if center_var is None or center_var <= 0:
+        # No variance info — fall back to DEFAULT_BETAS
+        short = tune_name.split('.', 1)[1] if '.' in tune_name else tune_name
+        return list(DEFAULT_BETAS.get(short, [1e-2, 1e-1, 1.0, 10.0, 100.0]))
+
+    # Generate log-spaced sweep centered on the variance
+    log_center = np.log10(center_var)
+    lo = log_center - decades_below
+    hi = log_center + decades_above
+    sweep = list(np.logspace(lo, hi, n_points))
+
+    return sweep
 
 
 def densify_sweep(values, n_workers, clamp_min=0.01, clamp_max=100.0):
@@ -302,6 +364,9 @@ def generate_trial_phil(base_phil, stage, sigma_value, best_sigmas, outdir,
         lines.append('  ucell = %.6g,%.6g,%.6g,%.6g,%.6g,%.6g' %
                       (sigma_value, sigma_value, sigma_value, sigma_value,
                        sigma_value, sigma_value))
+    elif param_name == 'G+B':
+        # Combined G+B sweep: sigma_value is sigma_G; sigma_B added by caller
+        lines.append('  G = %.6g' % sigma_value)
     else:
         lines.append('  %s = %.6g' % (param_name, sigma_value))
     lines.append('}')
@@ -483,6 +548,7 @@ def parse_trial_results(tmpdir, trial_name, elapsed):
         all_sigz_mean = []
         all_nrois = []
         all_n_outliers = []
+        all_spearman = []
 
         # Per-frame parameter values for spread measurement
         _param_cols = ['G', 'B', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc',
@@ -515,6 +581,13 @@ def parse_trial_results(tmpdir, trial_name, elapsed):
                             all_n_outliers.append(int(row['n_outlier_sigz']))
                         except (ValueError, TypeError):
                             pass
+                    if 'spearman_r_median' in row:
+                        try:
+                            v = float(row['spearman_r_median'])
+                            if np.isfinite(v):
+                                all_spearman.append(v)
+                        except (ValueError, TypeError):
+                            pass
                     # Collect per-frame parameter values
                     for col in _param_cols:
                         if col in row:
@@ -525,11 +598,16 @@ def parse_trial_results(tmpdir, trial_name, elapsed):
                             except (ValueError, TypeError):
                                 pass
 
-        # Compute per-parameter variance across frames
+        # Compute per-parameter variance across frames (robust MAD-based)
+        # MAD estimator: var ≈ (1.4826 * median(|x - median(x)|))^2
+        # Much more stable than np.var with few frames (resistant to outliers)
         param_vars = {}
         for col, vals in all_param_vals.items():
             if len(vals) >= 2:
-                param_vars[col] = float(np.var(vals))
+                arr = np.array(vals)
+                med = np.median(arr)
+                mad = np.median(np.abs(arr - med))
+                param_vars[col] = float((1.4826 * mad) ** 2)
 
         if not all_sigz_med:
             return {
@@ -546,6 +624,7 @@ def parse_trial_results(tmpdir, trial_name, elapsed):
         return {
             'sigZ_median': float(np.median(all_sigz_med)),
             'sigZ_mean': float(np.mean(all_sigz_mean)) if all_sigz_mean else float('inf'),
+            'spearman_r': float(np.median(all_spearman)) if all_spearman else float('nan'),
             'n_rois': sum(all_nrois) if all_nrois else 0,
             'n_outliers': sum(all_n_outliers) if all_n_outliers else 0,
             'param_vars': param_vars,
@@ -628,19 +707,22 @@ def estimate_G_parallel(base_phil, sample_spec, tmpdir, use_cuda=False,
                                      mpi_comm=mpi_comm)
 
     # Find the best G (lowest sigZ)
+    sorted_results = sorted(raw_results, key=lambda x: x[0])
     best_G = None
     best_score = float('inf')
-    print("\n  %-12s  %10s  %10s  %6s  %5s  %s" %
-          ('init.G', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'status'))
-    print("  " + "-" * 63)
-    for g_val, label, score in sorted(raw_results, key=lambda x: x[0]):
+    for g_val, label, score in sorted_results:
         if score['converged'] and score['error'] is None:
-            marker = ''
             trial_score = _score_trial(score)
             if trial_score < best_score:
                 best_score = trial_score
                 best_G = g_val
-                marker = ' <-- best'
+
+    print("\n  %-12s  %10s  %10s  %6s  %5s  %s" %
+          ('init.G', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'status'))
+    print("  " + "-" * 63)
+    for g_val, label, score in sorted_results:
+        if score['converged'] and score['error'] is None:
+            marker = ' <-- best' if g_val == best_G else ''
             sigz_str = '%.3f' % score['sigZ_median']
             mean_str = '%.3f' % score['sigZ_mean']
             print("  %-12.2e  %10s  %10s  %6d  %5d  OK%s" %
@@ -784,6 +866,80 @@ def run_sigma_sweep(base_phil, stage, sigma_values, best_sigmas, sample_spec,
     return results
 
 
+def run_GB_sigma_sweep(base_phil, sigma_G_values, sigma_B_values, best_sigmas,
+                       sample_spec, tmpdir, use_cholesky=False, use_cuda=False,
+                       max_calls=50, timeout=300, n_parallel=1, n_gpus=None,
+                       procs_per_gpu=1, mpi_comm=None, num_devices=None):
+    """Combinatorial G x B sigma sweep. Both G and B are free simultaneously.
+
+    Instead of sweeping G alone (useless — 1D optimizer always converges) then
+    B alone, we sweep all (sigma_G, sigma_B) pairs so the relative step sizes
+    between G and B actually matter. Total trials = len(G) * len(B).
+
+    Returns: list of dicts with 'sigma_G', 'sigma_B', 'sigZ_median', etc.
+    """
+    import itertools
+
+    # Build grid of all (sigma_G, sigma_B) pairs
+    grid = list(itertools.product(sigma_G_values, sigma_B_values))
+
+    trial_args = []
+    for sigma_G, sigma_B in grid:
+        trial_name = 'stage_GB_sigG%.4e_sigB%.4e' % (sigma_G, sigma_B)
+        trial_outdir = os.path.join(tmpdir, trial_name)
+
+        # Build phil: G+B stage fixes (both free, RotXYZ/Nabc/ucell fixed)
+        phil_str = generate_trial_phil(
+            base_phil, 'G+B', sigma_G, best_sigmas, trial_outdir,
+            sample_spec, use_cholesky=use_cholesky, max_calls=max_calls,
+            num_devices=num_devices)
+        # Override sigma_B (generate_trial_phil set sigma_G via the sweep value)
+        phil_str += 'sigmas {\n  B = %.6g\n}\n' % sigma_B
+
+        label = 'G=%.2e,B=%.2e' % (sigma_G, sigma_B)
+        trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout,
+                           sigma_G, label))
+
+    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+
+    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+                                     mpi_comm=mpi_comm)
+
+    results = []
+    for i, (sigma_val, label, score) in enumerate(raw_results):
+        sigma_G, sigma_B = grid[i]
+        results.append({
+            'sigma_G': sigma_G,
+            'sigma_B': sigma_B,
+            'stage': 'G+B',
+            **score,
+        })
+
+    return results
+
+
+def print_GB_summary(results):
+    """Print summary table for a combinatorial G x B sweep."""
+    print("\n  %-10s  %-10s  %10s  %10s  %6s  %5s  %5s  %s" %
+          ('sigma_G', 'sigma_B', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out',
+           'time', 'status'))
+    print("  " + "-" * 78)
+
+    valid = [r for r in results if r['converged'] and r.get('error') is None
+             and r['sigZ_median'] < 1e6]
+    best = min(valid, key=_score_trial) if valid else None
+
+    for r in sorted(results, key=lambda r: (r['sigma_G'], r['sigma_B'])):
+        status = 'OK' if r['converged'] and r.get('error') is None else 'FAIL'
+        sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
+        sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
+        marker = ' <-- best' if r is best else ''
+        print("  %-10.2e  %-10.2e  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
+              (r['sigma_G'], r['sigma_B'], sigz_med, sigz_mean,
+               r['n_rois'], r.get('n_outliers', 0), r['time_sec'],
+               status, marker))
+
+
 def _print_trial_result(score):
     """Print a single trial's result."""
     if score['converged'] and score['error'] is None:
@@ -891,6 +1047,24 @@ def _score_trial(r):
     outlier_frac = n_outliers / n_rois if n_rois > 0 else 0
     penalty = 1.0 + 5.0 * outlier_frac  # 10% outliers -> 1.5x, 20% -> 2.0x
     return med * penalty
+
+
+def _score_trial_spearman(r):
+    """Score for sigma_r tuning: maximize Spearman rank correlation.
+
+    sigma_r controls the noise model (var = model + sigma_r²), which directly
+    scales sigma_Z. Minimizing sigma_Z is circular — it just picks the largest
+    sigma_r. Instead, Spearman R measures model-data shape agreement independent
+    of sigma_r. Higher = better, so we return negative for min().
+    """
+    rho = r.get('spearman_r', float('nan'))
+    if not np.isfinite(rho):
+        return float('inf')
+    n_rois = r.get('n_rois', 0)
+    n_outliers = r.get('n_outliers', 0)
+    outlier_frac = n_outliers / n_rois if n_rois > 0 else 0
+    penalty = 1.0 + 5.0 * outlier_frac
+    return -rho * (1.0 / penalty)  # negate: min(-rho) = max(rho)
 
 
 def print_stage_summary(stage, results):
@@ -1706,6 +1880,309 @@ def interpolate_beta_for_spread(beta_spread_pairs, target_spread):
     return 10.0 ** log_beta
 
 
+def find_elbow_betas(beta_curves):
+    """Find optimal per-parameter betas by detecting the elbow in each spread-ratio curve.
+
+    For each parameter, computes d(spread)/d(log_beta) between consecutive points,
+    then picks the beta at the top of the steepest positive gradient in the transition
+    zone (spread < 0.95). This gives the lightest-touch restraint that still has effect.
+
+    Returns dict mapping param name -> (elbow_beta, spread_at_elbow, gradient, details_str).
+    """
+    results = {}
+    for bname, pairs in beta_curves.items():
+        valid = [(b, s) for b, s in pairs if s is not None and s > 0 and b > 0]
+        if len(valid) < 3:
+            continue
+
+        valid.sort(key=lambda x: x[0])
+        betas = np.array([b for b, _ in valid])
+        spreads = np.array([s for _, s in valid])
+        log_betas = np.log10(betas)
+
+        # Compute gradient d(spread)/d(log_beta) for each interval
+        grads = []
+        for i in range(len(log_betas) - 1):
+            dspread = spreads[i + 1] - spreads[i]
+            dlogb = log_betas[i + 1] - log_betas[i]
+            if abs(dlogb) < 1e-12:
+                continue
+            grad = dspread / dlogb
+            mid_spread = (spreads[i] + spreads[i + 1]) / 2
+            grads.append((grad, mid_spread, i))
+
+        # Filter to positive gradients in the transition zone (below plateau)
+        grads_pos = [g for g in grads if g[0] > 0.05 and g[1] < 0.95]
+        if not grads_pos:
+            continue
+
+        # Find steepest gradient
+        best = max(grads_pos, key=lambda g: g[0])
+        idx = best[2]
+
+        # Pick the beta at the TOP of the sharp rise (upper end of interval)
+        elbow_beta = betas[idx + 1]
+        elbow_spread = spreads[idx + 1]
+        gradient = best[0]
+
+        short_name = bname.split('.', 1)[1] if '.' in bname else bname
+        details = "%.3g->%.3g (grad=%.2f/decade)" % (
+            spreads[idx], spreads[idx + 1], gradient)
+
+        results[bname] = (elbow_beta, elbow_spread, gradient, details)
+
+    return results
+
+
+def _adaptive_beta_search_DISABLED(tune_name, tuning_base, sample_spec, spec_path,
+                          tmpdir, baseline_vars, refined_params,
+                          n_frames, n_nearby, target_spread=0.5,
+                          max_evals=10, max_frame_doublings=2,
+                          use_cuda=False, timeout=1800, n_parallel=1,
+                          n_gpus=None, procs_per_gpu=1,
+                          mpi_comm=None, num_devices=None,
+                          trials_per_worker=1):
+    """Adaptive bracketing search for optimal beta (restraint variance).
+
+    Instead of sweeping a predefined range, starts at beta=baseline_variance
+    and adaptively brackets the transition zone where spread_ratio crosses the
+    target. If estimates are too noisy (spread > 2.0 everywhere), doubles
+    n_frames and re-runs baseline for more stable variance estimates.
+
+    Args:
+        tune_name: e.g. 'betas.G'
+        tuning_base: base phil string for tuning trials
+        sample_spec: path to current sample spec file
+        spec_path: path to full exp_ref_spec.txt (for re-sampling with more frames)
+        tmpdir: working directory
+        baseline_vars: dict of param -> variance from unrestrained baseline
+        refined_params: dict from final refinement (has var_G, etc.)
+        n_frames: current number of phi positions sampled
+        n_nearby: neighboring frames per position
+        target_spread: target spread_ratio for the elbow (default 0.5)
+        max_evals: max number of beta evaluations per attempt (default 10)
+        max_frame_doublings: max times to double n_frames (default 2)
+
+    Returns:
+        (elbow_beta, elbow_spread, beta_curve, new_baseline_vars, new_n_frames)
+        beta_curve is list of (beta, spread_ratio) for all evaluations.
+        Returns (None, None, curve, ...) if no elbow found.
+    """
+    beta_key = tune_name.split('.', 1)[1]
+    binfo = BETA_PARAM_MAP.get(tune_name)
+    if binfo is None:
+        return None, None, [], baseline_vars, n_frames
+
+    # Determine starting beta from baseline variance
+    def _get_var(bvars_dict):
+        if bvars_dict is None:
+            return None
+        vals = [bvars_dict.get(c) for c in binfo['csv_cols']
+                if c in bvars_dict and bvars_dict[c] > 0]
+        return float(np.mean(vals)) if vals else None
+
+    start_beta = _get_var(baseline_vars)
+    if start_beta is None or start_beta <= 0:
+        # Fallback to refined_params variance
+        var_key = 'var_' + beta_key
+        if var_key in refined_params:
+            var_val = refined_params[var_key]
+            start_beta = float(np.mean(var_val)) if isinstance(var_val, (tuple, list)) else float(var_val)
+    if start_beta is None or start_beta <= 0:
+        print("    WARNING: no variance estimate for %s, cannot search" % tune_name)
+        return None, None, [], baseline_vars, n_frames
+
+    current_n_frames = n_frames
+    current_baseline_vars = baseline_vars
+    current_sample_spec = sample_spec
+
+    for doubling in range(max_frame_doublings + 1):
+        print("\n  --- Adaptive beta search: %s (n_frames=%d, start_beta=%.3g, target=%.2f) ---"
+              % (tune_name, current_n_frames, start_beta, target_spread))
+
+        curve = []  # (beta, spread_ratio)
+        lo_bracket = None  # (beta, spread) with spread < target
+        hi_bracket = None  # (beta, spread) with spread > target
+
+        def _eval_beta(beta_val):
+            """Run a single trial at the given beta and return spread_ratio."""
+            results = run_tuning_sweep(
+                tuning_base, tune_name, tune_name, [beta_val],
+                current_sample_spec, tmpdir, use_cuda=use_cuda,
+                timeout=timeout, n_parallel=n_parallel,
+                n_gpus=n_gpus, procs_per_gpu=procs_per_gpu,
+                mpi_comm=mpi_comm, num_devices=num_devices,
+                trials_per_worker=1)
+            if not results or not results[0].get('converged') or results[0].get('error'):
+                return None, results
+            spread = compute_spread_ratio(
+                results[0].get('param_vars', {}), tune_name,
+                refined_params=refined_params,
+                baseline_vars=current_baseline_vars)
+            return spread, results
+
+        # Step 1: Evaluate at starting beta
+        beta = start_beta
+        spread, _ = _eval_beta(beta)
+        if spread is not None:
+            curve.append((beta, spread))
+            print("    eval 1: beta=%.3g  spread=%.3f" % (beta, spread))
+            if spread <= target_spread:
+                lo_bracket = (beta, spread)
+            else:
+                hi_bracket = (beta, spread)
+        else:
+            print("    eval 1: beta=%.3g  FAILED" % beta)
+
+        # Step 2: Search for bracket
+        n_evals = 1
+        step_factor = 10.0  # move 1 decade at a time
+
+        while n_evals < max_evals:
+            if lo_bracket is not None and hi_bracket is not None:
+                break  # bracketed!
+
+            n_evals += 1
+
+            if lo_bracket is None:
+                # Need a point with spread < target → tighten (decrease beta)
+                beta = beta / step_factor
+                spread, _ = _eval_beta(beta)
+                if spread is not None:
+                    curve.append((beta, spread))
+                    print("    eval %d: beta=%.3g  spread=%.3f  (tightening)" % (n_evals, beta, spread))
+                    if spread <= target_spread:
+                        lo_bracket = (beta, spread)
+                    elif hi_bracket is None or beta > hi_bracket[0]:
+                        hi_bracket = (beta, spread)
+                else:
+                    print("    eval %d: beta=%.3g  FAILED (tightening)" % (n_evals, beta))
+            else:
+                # Need a point with spread > target → loosen (increase beta)
+                beta = beta * step_factor
+                spread, _ = _eval_beta(beta)
+                if spread is not None:
+                    curve.append((beta, spread))
+                    print("    eval %d: beta=%.3g  spread=%.3f  (loosening)" % (n_evals, beta, spread))
+                    if spread > target_spread:
+                        hi_bracket = (beta, spread)
+                    elif lo_bracket is None or beta < lo_bracket[0]:
+                        lo_bracket = (beta, spread)
+                else:
+                    print("    eval %d: beta=%.3g  FAILED (loosening)" % (n_evals, beta))
+
+        # Check if all spreads are > 2.0 (noisy baseline)
+        valid_spreads = [s for _, s in curve if s is not None]
+        if valid_spreads and min(valid_spreads) > 2.0:
+            if doubling < max_frame_doublings:
+                new_n_frames = current_n_frames * 2
+                print("\n    All spreads > 2.0 (noisy baseline) — "
+                      "increasing n_frames: %d → %d" % (current_n_frames, new_n_frames))
+                current_n_frames = new_n_frames
+                # Re-sample frames
+                new_sample_lines = sample_frames(spec_path, current_n_frames,
+                                                  n_nearby=n_nearby)
+                resample_dir = os.path.join(tmpdir, 'resample_%d' % current_n_frames)
+                os.makedirs(resample_dir, exist_ok=True)
+                current_sample_spec = write_sample_spec(
+                    new_sample_lines, resample_dir)
+
+                # Re-run baseline with more frames
+                print("    Re-running baseline with %d frames..." % current_n_frames)
+                baseline_phil = tuning_base + '\nuse_restraints = False\n'
+                baseline_phil += '\nexp_ref_spec_file = "%s"\n' % current_sample_spec
+                baseline_results = run_tuning_sweep(
+                    baseline_phil, 'baseline_%d' % current_n_frames, 'betas.G', [1.0],
+                    current_sample_spec, tmpdir, use_cuda=use_cuda,
+                    timeout=timeout, n_parallel=n_parallel,
+                    n_gpus=n_gpus, procs_per_gpu=procs_per_gpu,
+                    mpi_comm=mpi_comm, num_devices=num_devices,
+                    trials_per_worker=1)
+                if baseline_results and baseline_results[0].get('param_vars'):
+                    current_baseline_vars = baseline_results[0]['param_vars']
+                    bl = baseline_results[0]
+                    print("    New baseline: sigZ_med=%.3f n_rois=%d" %
+                          (bl['sigZ_median'], bl['n_rois']))
+                    # Recompute start_beta from new baseline
+                    new_start = _get_var(current_baseline_vars)
+                    if new_start and new_start > 0:
+                        start_beta = new_start
+                        print("    New start_beta=%.3g" % start_beta)
+                else:
+                    print("    WARNING: re-run baseline produced no param_vars, stopping")
+                    break
+                # Reset and retry
+                beta = start_beta
+                continue
+            else:
+                print("\n    Max frame doublings reached (%d), using best available"
+                      % max_frame_doublings)
+
+        # Step 3: Bisect within bracket
+        if lo_bracket is not None and hi_bracket is not None:
+            print("\n    Bracketed: [%.3g (spread=%.3f), %.3g (spread=%.3f)]"
+                  % (lo_bracket[0], lo_bracket[1], hi_bracket[0], hi_bracket[1]))
+
+            lo_b, hi_b = lo_bracket[0], hi_bracket[0]
+            if lo_b > hi_b:
+                lo_b, hi_b = hi_b, lo_b
+
+            while n_evals < max_evals:
+                # Check convergence: within 0.3 decades
+                if abs(np.log10(hi_b) - np.log10(lo_b)) < 0.3:
+                    break
+
+                n_evals += 1
+                mid_log = (np.log10(lo_b) + np.log10(hi_b)) / 2
+                beta = 10.0 ** mid_log
+
+                spread, _ = _eval_beta(beta)
+                if spread is not None:
+                    curve.append((beta, spread))
+                    print("    eval %d: beta=%.3g  spread=%.3f  (bisect)" % (n_evals, beta, spread))
+                    if spread <= target_spread:
+                        lo_b = beta  # lo_bracket side: spread < target
+                    else:
+                        hi_b = beta
+                else:
+                    print("    eval %d: beta=%.3g  FAILED (bisect)" % (n_evals, beta))
+                    break
+
+            # Pick the beta closest to target
+            best_pair = min(curve, key=lambda p: abs(p[1] - target_spread) if p[1] is not None else 999)
+            elbow_beta, elbow_spread = best_pair
+            print("\n    Result: beta=%.3g  spread=%.3f  (%d evals, %d frames)"
+                  % (elbow_beta, elbow_spread, n_evals, current_n_frames))
+            return elbow_beta, elbow_spread, curve, current_baseline_vars, current_n_frames
+
+        elif lo_bracket is not None:
+            # All evaluations below target — pick the loosest (highest spread below target)
+            below = [(b, s) for b, s in curve if s is not None and s <= target_spread]
+            if below:
+                best = max(below, key=lambda p: p[1])
+                print("\n    No upper bracket found. Best below target: beta=%.3g  spread=%.3f"
+                      % (best[0], best[1]))
+                return best[0], best[1], curve, current_baseline_vars, current_n_frames
+
+        elif hi_bracket is not None:
+            # All evaluations above target — pick the tightest (lowest spread)
+            best = min(curve, key=lambda p: p[1] if p[1] is not None else 999)
+            print("\n    No lower bracket found. Tightest: beta=%.3g  spread=%.3f"
+                  % (best[0], best[1]))
+            return best[0], best[1], curve, current_baseline_vars, current_n_frames
+
+        # If we get here without a break/continue/return, we exhausted doublings
+        break
+
+    # Fallback: return best point from whatever we collected
+    if curve:
+        best = min(curve, key=lambda p: abs(p[1] - target_spread) if p[1] is not None else 999)
+        print("\n    Fallback: beta=%.3g  spread=%.3f" % (best[0], best[1]))
+        return best[0], best[1], curve, current_baseline_vars, current_n_frames
+
+    return None, None, curve, current_baseline_vars, current_n_frames
+
+
 def write_restraint_level_phils(base_phil, best_sigmas, init_G, output_dir,
                                  use_cholesky, refined_params,
                                  beta_curves, target_levels,
@@ -1881,6 +2358,7 @@ def run_tuning_sweep(tuning_base_phil, param_name, phil_path, sweep_values,
             'converged': score['converged'],
             'time_sec': score['time_sec'],
             'error': score.get('error'),
+            'spearman_r': score.get('spearman_r', float('nan')),
         })
 
     return results
@@ -1945,11 +2423,41 @@ def write_optimized_phil(base_phil, best_sigmas, init_G, output_path,
 
         # Enable restraints if any betas are set
         betas = {k: v for k, v in tuned_params.items() if k.startswith('betas.')}
+
+        # Ensure every param that will get a center also has a beta.
+        # If the elbow finder skipped a param (no good elbow), fall back to
+        # the observed variance from the final refinement (spread ≈ 1).
+        # This gives a gentle restraint that catches outliers without
+        # fighting the data.  If no variance is available, use a huge beta
+        # (effectively unrestrained) as a last resort.
+        if betas and refined_params:
+            if 'betas.G' not in betas and 'G' in refined_params:
+                betas['betas.G'] = refined_params.get('var_G', 1e30)
+            if 'betas.B' not in betas and 'B' in refined_params:
+                betas['betas.B'] = refined_params.get('var_B', 1e10)
+            if 'betas.RotXYZ' not in betas:
+                betas['betas.RotXYZ'] = refined_params.get('var_RotXYZ', 1e10)
+            if 'betas.cholesky' not in betas and ('cholesky' in refined_params or 'Nabc' in refined_params):
+                # Use mean variance across cholesky components
+                var_chol = refined_params.get('var_cholesky')
+                if var_chol is not None:
+                    betas['betas.cholesky'] = max(np.mean(var_chol), 1e-20)
+                else:
+                    betas['betas.cholesky'] = 1e10
+            if 'betas.ucell' not in betas and 'ucell' in refined_params:
+                # Use mean of nonzero ucell variances (skip fixed angles)
+                var_uc = refined_params.get('var_ucell')
+                if var_uc is not None:
+                    nonzero = [v for v in var_uc if v > 0]
+                    betas['betas.ucell'] = max(np.mean(nonzero), 1e-20) if nonzero else 1e10
+                else:
+                    betas['betas.ucell'] = 1e10
+
         if betas:
             lines.append('use_restraints = True')
         if betas:
             lines.append('betas {')
-            for k, v in betas.items():
+            for k, v in sorted(betas.items()):
                 param_name = k.split('.', 1)[1]
                 if param_name == 'Nabc':
                     lines.append('  Nabc = %.6g,%.6g,%.6g' % (v, v, v))
@@ -2111,10 +2619,13 @@ Examples:
                              "(default: 500, higher than standard stages)")
 
     # Model tuning (phisteps + sigma_r, before deep-dive)
-    parser.add_argument("--tune-model", action="store_true",
-                        help="Sweep phisteps and sigma_r before deep-dive, then "
-                             "re-sweep sigmas with the tuned model. This ensures "
-                             "deep-dive uses the right angular sampling and noise model.")
+    parser.add_argument("--tune-model", action="store_true", default=True,
+                        help="Sweep phisteps and sigma_r after initial sigma scan, "
+                             "then re-sweep sigmas with the tuned model (default: True). "
+                             "Use --no-tune-model to disable.")
+    parser.add_argument("--no-tune-model", action="store_true",
+                        help="Disable automatic model tuning (sigma_r + phisteps). "
+                             "Sigmas are swept once with the inherited model params.")
     parser.add_argument("--tune-model-max-calls", type=int, default=None,
                         help="Max L-BFGS-B iterations for model tuning trials "
                              "(default: same as --max-calls)")
@@ -2134,6 +2645,11 @@ Examples:
                         help="ROI fraction for spread-ratio beta sweeps (default: "
                              "None = use all ROIs for accurate variance estimates). "
                              "Set to match --roi-fraction if you want speed over accuracy.")
+    parser.add_argument("--tune-n-frames", type=int, default=None,
+                        help="Number of phi positions for model tuning (phisteps, "
+                             "sigma_r) and beta sweep trials (default: same as "
+                             "--n-frames). More frames give more stable results "
+                             "for sigma_r selection and spread-ratio curves.")
 
     # Parallelism
     parser.add_argument("--n-parallel", type=int, default=1,
@@ -2149,10 +2665,16 @@ Examples:
     parser.add_argument("--mpi", action="store_true",
                         help="Use MPI for trial distribution (mpirun -n N). "
                              "Rank 0 coordinates, ranks 1..N-1 execute trials.")
+    parser.add_argument("--logfile", default=None,
+                        help="Log file path. All stdout/stderr output (including "
+                             "errors and tracebacks) is duplicated to this file. "
+                             "Default: <output_basename>_heatup.log")
 
     args = parser.parse_args()
+    if args.no_tune_model:
+        args.tune_model = False
 
-    # Handle MPI
+    # Handle MPI (before logging — workers exit here)
     mpi_comm = None
     if args.mpi:
         if not HAS_MPI:
@@ -2172,6 +2694,46 @@ Examples:
         if args.n_gpus is not None and args.n_gpus > 0 and args.procs_per_gpu == 1:
             args.procs_per_gpu = max(1, n_workers // args.n_gpus)
         print("MPI mode: rank 0 (coordinator) + %d workers" % n_workers)
+
+    # --- Set up log file (tee stdout+stderr to file) ---
+    # Only rank 0 reaches here (workers exited above)
+    if args.logfile is None:
+        logfile_path = args.output.replace('.phil', '_heatup.log')
+    else:
+        logfile_path = args.logfile
+    logdir = os.path.dirname(logfile_path)
+    if logdir:
+        os.makedirs(logdir, exist_ok=True)
+    _logfile = open(logfile_path, 'w')
+
+    class _Tee(object):
+        """Duplicate writes to both a stream and a log file, flushing immediately."""
+        def __init__(self, stream, logfile):
+            self._stream = stream
+            self._logfile = logfile
+        def write(self, msg):
+            self._stream.write(msg)
+            self._stream.flush()
+            try:
+                self._logfile.write(msg)
+                self._logfile.flush()
+            except (ValueError, OSError):
+                pass
+        def flush(self):
+            self._stream.flush()
+            try:
+                self._logfile.flush()
+            except (ValueError, OSError):
+                pass
+        def fileno(self):
+            return self._stream.fileno()
+        def isatty(self):
+            return self._stream.isatty()
+
+    sys.stdout = _Tee(sys.__stdout__, _logfile)
+    sys.stderr = _Tee(sys.__stderr__, _logfile)
+    print("hopper_heatup log: %s" % os.path.abspath(logfile_path))
+    print("Command: %s" % ' '.join(sys.argv))
 
     # Handle GPU parallelism
     # When distributing across GPUs, force 1 device per trial
@@ -2339,7 +2901,76 @@ Examples:
         """
         cur_sigmas = dict(best_sigmas_init)
         cur_results = {}
-        for stage in stage_order:
+
+        # When both G and B are in stage_order, replace them with a combined
+        # G+B sweep. Sweeping G alone is useless (1D optimizer always converges
+        # to the same G regardless of step size); the sigma ratio between G and
+        # B only matters when both are free simultaneously.
+        gb_done = False
+        effective_stages = []
+        if 'G' in stage_order and 'B' in stage_order:
+            for s in stage_order:
+                if s == 'G':
+                    effective_stages.append('G+B')
+                elif s == 'B':
+                    continue  # already covered by G+B
+                else:
+                    effective_stages.append(s)
+        else:
+            effective_stages = list(stage_order)
+
+        for stage in effective_stages:
+
+            # --- Combined G+B sigma sweep ---
+            if stage == 'G+B':
+                print("\n" + "=" * 60)
+                print("%sSTAGE: G+B combinatorial sigma sweep" % label)
+                print("=" * 60)
+
+                sigma_G_vals = sigma_sweeps.get('G', DEFAULT_SIGMAS['G'])
+                sigma_B_vals = sigma_sweeps.get('B', DEFAULT_SIGMAS['B'])
+
+                print("  Parameters: sigmas.G x sigmas.B (both free)")
+                print("  sigma_G values (%d): %s" % (
+                    len(sigma_G_vals),
+                    ', '.join(['%.2e' % v for v in sigma_G_vals])))
+                print("  sigma_B values (%d): %s" % (
+                    len(sigma_B_vals),
+                    ', '.join(['%.2e' % v for v in sigma_B_vals])))
+                print("  Total trials: %d" % (len(sigma_G_vals) * len(sigma_B_vals)))
+                print("  Free params: %s" % ', '.join(
+                    [k for k, v in STAGE_FIXES['G+B'].items() if not v]))
+                print("  Best sigmas so far: %s" % cur_sigmas)
+                print()
+
+                results = run_GB_sigma_sweep(
+                    base_phil, sigma_G_vals, sigma_B_vals, cur_sigmas,
+                    sample_spec, tmpdir, use_cholesky=use_cholesky,
+                    use_cuda=args.cuda, max_calls=args.max_calls,
+                    timeout=args.timeout, n_parallel=args.n_parallel,
+                    n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
+                    mpi_comm=mpi_comm, num_devices=trial_num_devices)
+
+                cur_results['G+B'] = results
+                print_GB_summary(results)
+
+                # Find best (sigma_G, sigma_B) pair
+                valid = [r for r in results
+                         if r['converged'] and r.get('error') is None
+                         and r['sigZ_median'] < 1e6]
+                if valid:
+                    best_r = min(valid, key=_score_trial)
+                    cur_sigmas['G'] = best_r['sigma_G']
+                    cur_sigmas['B'] = best_r['sigma_B']
+                    print("\n  Best sigmas.G = %.2e, sigmas.B = %.2e" %
+                          (best_r['sigma_G'], best_r['sigma_B']))
+                else:
+                    print("\n  WARNING: No valid results for G+B sweep!")
+                    cur_sigmas['G'] = 0.01
+                    cur_sigmas['B'] = 1.0
+                continue
+
+            # --- Standard single-parameter sigma sweep ---
             print("\n" + "=" * 60)
             print("%sSTAGE: %s sigma sweep" % (label, stage))
             print("=" * 60)
@@ -2385,9 +3016,9 @@ Examples:
 
         # Compute final score: run one trial with all best sigmas to get sigZ
         # Use the last stage's best result as the score
-        last_stage = stage_order[-1]
+        last_stage = effective_stages[-1]
         last_results = cur_results[last_stage]
-        valid = [r for r in last_results if r['converged'] and r['error'] is None
+        valid = [r for r in last_results if r['converged'] and r.get('error') is None
                  and r['sigZ_median'] < 1e6]
         final_sigZ = min(r['sigZ_median'] for r in valid) if valid else float('inf')
 
@@ -2403,10 +3034,16 @@ Examples:
 
     if not args.skip_to_tuning:
         n_shuffles = args.n_shuffles
-        # G is always first if present; shuffle the rest
+        # G is always first if present; shuffle the rest.
+        # When both G and B are in stages, they form a combined G+B sweep
+        # (run_sweep_ordering handles this), so B is excluded from shuffling.
         if 'G' in stages:
             fixed_stages = ['G']
-            shuffleable = [s for s in stages if s != 'G']
+            exclude = {'G'}
+            if 'B' in stages:
+                fixed_stages.append('B')  # included via G+B, not shuffled
+                exclude.add('B')
+            shuffleable = [s for s in stages if s not in exclude]
         else:
             fixed_stages = []
             shuffleable = list(stages)
@@ -2456,6 +3093,22 @@ Examples:
             best_sigmas = best_overall_sigmas
             all_results = best_overall_results
 
+    # --- Prepare tune_sample_spec (more frames for model + beta tuning) ---
+    tune_sample_spec = sample_spec
+    if not args.skip_to_tuning:
+        tune_n_frames = args.tune_n_frames or args.n_frames
+        if args.tune_n_frames and args.tune_n_frames > args.n_frames:
+            print("\n  Resampling for tuning phases: %d phi positions "
+                  "(vs %d for sigma sweeps)" % (tune_n_frames, args.n_frames))
+            tune_lines = sample_frames(spec_path, tune_n_frames,
+                                        n_nearby=args.n_nearby)
+            tune_dir = os.path.join(tmpdir, 'tune_sample')
+            os.makedirs(tune_dir, exist_ok=True)
+            tune_sample_spec = write_sample_spec(tune_lines, tune_dir)
+            total_frames = len(tune_lines)
+            print("  Tune sample: %d frames (%d positions x %d nearby)"
+                  % (total_frames, tune_n_frames, 2 * args.n_nearby + 1))
+
     # --- Model parameter tuning (phisteps + sigma_r) ---
     if not args.skip_to_tuning:
         tuned_model = {}
@@ -2482,26 +3135,49 @@ Examples:
 
             results = run_tuning_sweep(
                 model_base, model_param, phil_path, sweep_vals,
-                sample_spec, tmpdir, use_cuda=args.cuda,
+                tune_sample_spec, tmpdir, use_cuda=args.cuda,
                 timeout=args.timeout, n_parallel=args.n_parallel,
                 n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                 mpi_comm=mpi_comm, num_devices=trial_num_devices,
                 trials_per_worker=args.trials_per_worker)
 
             # Print and find best
-            print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
-                  ('value', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
-            print("  " + "-" * 68)
+            # sigma_r: use Spearman R (sigma_r-independent model-data agreement)
+            # phisteps: use sigZ (better angular sampling → better fit)
+            # Fall back to sigZ if Spearman data not available (needs rebuilt hopper_utils)
+            has_spearman = any(np.isfinite(r.get('spearman_r', float('nan')))
+                               for r in results if r['converged'] and r['error'] is None)
+            use_spearman = (model_param == 'sigma_r') and has_spearman
+            if model_param == 'sigma_r' and not has_spearman:
+                print("  WARNING: Spearman R not available (rebuild hopper_utils?)")
+                print("  Falling back to sigZ scoring for sigma_r")
+            if use_spearman:
+                print("  Scoring: Spearman rank correlation (sigma_r-independent)")
+                print("\n  %-12s  %10s  %10s  %8s  %6s  %5s  %5s  %s" %
+                      ('value', 'sigZ_med', 'sigZ_mean', 'spR_med', 'n_roi', 'n_out', 'time', 'status'))
+                print("  " + "-" * 78)
+            else:
+                print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
+                      ('value', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
+                print("  " + "-" * 68)
             valid_results = [r for r in results
                              if r['converged'] and r['error'] is None
                              and r['sigZ_median'] < 1e6]
-            best_r = min(valid_results, key=_score_trial) if valid_results else None
+            scorer = _score_trial_spearman if use_spearman else _score_trial
+            best_r = min(valid_results, key=scorer) if valid_results else None
             best_val = best_r['value'] if best_r else None
             for r in results:
                 status = 'OK' if r['converged'] and r['error'] is None else 'FAIL'
                 sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
                 sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
                 marker = ' <-- best' if r is best_r else ''
+                if use_spearman:
+                    spr = '%.4f' % r.get('spearman_r', float('nan')) if np.isfinite(r.get('spearman_r', float('nan'))) else 'N/A'
+                    print("  %-12.3g  %10s  %10s  %8s  %6d  %5d  %5.1f  %s%s" %
+                          (r['value'], sigz_med, sigz_mean, spr, r['n_rois'],
+                           r.get('n_outliers', 0), r['time_sec'],
+                           status, marker))
+                    continue
                 print("  %-12.3g  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
                       (r['value'], sigz_med, sigz_mean, r['n_rois'],
                        r.get('n_outliers', 0), r['time_sec'],
@@ -2574,8 +3250,9 @@ Examples:
                 dd_param_names.append('cholesky')
             elif 'Nabc' in best_sigmas:
                 dd_param_names.append('Nabc')
-            if 'RotXYZ' in best_sigmas:
-                dd_param_names.append('RotXYZ')
+            # RotXYZ: scalar sigma is sufficient; per-component deep-dive
+            # adds noise without meaningful improvement. Use --deep-dive-params
+            # RotXYZ to force it if needed.
             if 'B' in best_sigmas:
                 dd_param_names.append('B')
             # Baniso only if explicitly requested or if base phil has it
@@ -2758,6 +3435,8 @@ Examples:
 
             has_beta_params = any(n.startswith('betas.') for n in tune_param_names)
 
+            # tune_sample_spec already set up before model tuning
+
             # Run unrestrained baseline trial to establish spread denominator
             # This gives apples-to-apples comparison (same frames, ROI fraction, max_calls)
             baseline_vars = {}
@@ -2766,7 +3445,7 @@ Examples:
                 baseline_phil = tuning_base + '\nuse_restraints = False\n'
                 baseline_results = run_tuning_sweep(
                     baseline_phil, 'baseline', 'betas.G', [1.0],
-                    sample_spec, tmpdir, use_cuda=args.cuda,
+                    tune_sample_spec, tmpdir, use_cuda=args.cuda,
                     timeout=args.timeout, n_parallel=args.n_parallel,
                     n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=trial_num_devices,
@@ -2798,7 +3477,6 @@ Examples:
             for tune_name in tune_param_names:
                 is_beta = tune_name.startswith('betas.')
 
-                # Get sweep values and phil path
                 if tune_name == 'phisteps':
                     sweep_vals = list(DEFAULT_PHISTEPS)
                     phil_path = TUNE_PARAMS['phisteps']
@@ -2806,104 +3484,84 @@ Examples:
                     sweep_vals = list(DEFAULT_SIGMA_R)
                     phil_path = TUNE_PARAMS['sigma_r']
                 elif is_beta:
-                    beta_key = tune_name.split('.', 1)[1]
-                    phil_path = tune_name
-                    # Use baseline variance to center the sweep (if available)
-                    binfo = BETA_PARAM_MAP.get(tune_name)
-                    beta_center = None
-                    if binfo and baseline_vars:
-                        bvars = [baseline_vars.get(c) for c in binfo['csv_cols']
-                                 if c in baseline_vars and baseline_vars[c] > 0]
-                        if bvars:
-                            beta_center = float(np.mean(bvars))
-                    # Fallback to refined_params variance
-                    if beta_center is None or beta_center <= 0:
-                        var_key = 'var_' + beta_key
-                        if var_key in refined_params:
-                            var_val = refined_params[var_key]
-                            if isinstance(var_val, tuple):
-                                beta_center = float(np.mean(var_val))
-                            else:
-                                beta_center = float(var_val)
-                    if beta_center is not None and beta_center > 0:
-                        # Sweep wide: 3 decades around the variance
-                        sweep_vals = sorted(set(
-                            float(v) for v in np.geomspace(
-                                beta_center * 0.001, beta_center * 1000, 9)))
-                        print("\n  --- %s (baseline var=%.3g) ---" %
-                              (tune_name, beta_center))
-                    else:
-                        sweep_vals = DEFAULT_BETAS.get(beta_key, [1e-2, 1e-1, 1.0, 10.0])
-                        print("\n  --- %s (no variance data, using defaults) ---" % tune_name)
+                    # Variance-scaled sweep: centered on baseline variance
+                    sweep_vals = generate_beta_sweep(
+                        tune_name, baseline_vars=baseline_vars,
+                        refined_params=refined_params)
+                    phil_path = TUNE_PARAMS.get(tune_name, tune_name)
                 else:
                     print("  WARNING: Unknown tune param '%s', skipping" % tune_name)
                     continue
 
-                if not is_beta:
-                    print("\n  --- %s ---" % tune_name)
+                print("\n  --- %s ---" % tune_name)
                 print("  Sweep values: %s" % ', '.join(['%.3g' % v for v in sweep_vals]))
 
+                # Beta sweeps and sigma_r use tune_sample_spec (more frames
+                # for stable variance / sigma_r estimates); phisteps uses sample_spec
+                sweep_spec = tune_sample_spec if (is_beta or tune_name == 'sigma_r') else sample_spec
                 results = run_tuning_sweep(
                     tuning_base, tune_name, phil_path, sweep_vals,
-                    sample_spec, tmpdir, use_cuda=args.cuda,
+                    sweep_spec, tmpdir, use_cuda=args.cuda,
                     timeout=args.timeout, n_parallel=args.n_parallel,
                     n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=trial_num_devices,
                     trials_per_worker=args.trials_per_worker)
 
                 if is_beta:
-                    # --- Spread-ratio scoring for beta sweeps ---
-                    # Compute spread_ratio using baseline trial as denominator
-                    for r in results:
-                        r['spread_ratio'] = compute_spread_ratio(
-                            r.get('param_vars', {}), tune_name,
-                            refined_params=refined_params,
-                            baseline_vars=baseline_vars if baseline_vars else None)
-
-                    # Print results table with spread_ratio
-                    print("\n  %-12s  %8s  %10s  %10s  %6s  %5s  %s" %
-                          ('beta', 'spread', 'sigZ_med', 'sigZ_mean', 'n_roi', 'time', 'status'))
+                    # --- Spread-ratio scoring for beta params ---
+                    print("\n  %-12s  %10s  %10s  %6s  %8s  %5s  %s" %
+                          ('beta', 'sigZ_med', 'sigZ_mean', 'n_roi', 'spread', 'time', 'status'))
                     print("  " + "-" * 72)
+                    curve = []
                     for r in results:
                         status = 'OK' if r['converged'] and r['error'] is None else 'FAIL'
+                        spread = compute_spread_ratio(
+                            r.get('param_vars', {}), tune_name,
+                            refined_params=refined_params,
+                            baseline_vars=baseline_vars)
+                        if spread is not None:
+                            curve.append((r['value'], spread))
                         sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
                         sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
-                        sr = '%.3f' % r['spread_ratio'] if r['spread_ratio'] is not None else 'N/A'
-                        print("  %-12.3g  %8s  %10s  %10s  %6d  %5.1f  %s" %
-                              (r['value'], sr, sigz_med, sigz_mean,
-                               r['n_rois'], r['time_sec'], status))
-
-                    # Build (beta, spread_ratio) curve for interpolation
-                    pairs = [(r['value'], r['spread_ratio']) for r in results
-                             if r['converged'] and r['error'] is None
-                             and r['spread_ratio'] is not None]
-                    beta_curves[tune_name] = pairs
-
-                    # Report spread range
-                    valid_spreads = [s for _, s in pairs if s is not None]
-                    if valid_spreads:
-                        print("\n  Spread ratio range: %.3f — %.3f" %
-                              (min(valid_spreads), max(valid_spreads)))
-                        if max(valid_spreads) - min(valid_spreads) < 0.01:
-                            print("  WARNING: spread is flat — beta has no effect on this param")
-                            print("  (likely: too few max_calls, or param not moving from center)")
-                    else:
-                        print("\n  WARNING: no valid spread ratios computed")
-
+                        spread_s = '%.4f' % spread if spread is not None else 'N/A'
+                        print("  %-12.3g  %10s  %10s  %6d  %8s  %5.1f  %s" %
+                              (r['value'], sigz_med, sigz_mean, r['n_rois'],
+                               spread_s, r['time_sec'], status))
+                    if curve:
+                        beta_curves[tune_name] = curve
+                        spreads_only = [s for _, s in curve]
+                        print("  Spread range: %.4f — %.4f" %
+                              (min(spreads_only), max(spreads_only)))
                 else:
-                    # --- sigZ scoring for model params (phisteps, sigma_r) ---
-                    print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
-                          ('value', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
-                    print("  " + "-" * 68)
+                    # --- Scoring for model params (phisteps, sigma_r) ---
+                    has_sp = any(np.isfinite(r.get('spearman_r', float('nan')))
+                                 for r in results if r['converged'] and r['error'] is None)
+                    use_sp = (tune_name == 'sigma_r') and has_sp
+                    if use_sp:
+                        print("\n  %-12s  %10s  %10s  %8s  %6s  %5s  %5s  %s" %
+                              ('value', 'sigZ_med', 'sigZ_mean', 'spR_med', 'n_roi', 'n_out', 'time', 'status'))
+                        print("  " + "-" * 78)
+                    else:
+                        print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
+                              ('value', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
+                        print("  " + "-" * 68)
                     valid_results = [r for r in results
                                      if r['converged'] and r['error'] is None
                                      and r['sigZ_median'] < 1e6]
-                    best_r = min(valid_results, key=_score_trial) if valid_results else None
+                    scorer = _score_trial_spearman if use_sp else _score_trial
+                    best_r = min(valid_results, key=scorer) if valid_results else None
                     for r in results:
                         status = 'OK' if r['converged'] and r['error'] is None else 'FAIL'
                         sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
                         sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
                         marker = ' <-- best' if r is best_r else ''
+                        if use_sp:
+                            spr = '%.4f' % r.get('spearman_r', float('nan')) if np.isfinite(r.get('spearman_r', float('nan'))) else 'N/A'
+                            print("  %-12.3g  %10s  %10s  %8s  %6d  %5d  %5.1f  %s%s" %
+                                  (r['value'], sigz_med, sigz_mean, spr, r['n_rois'],
+                                   r.get('n_outliers', 0), r['time_sec'],
+                                   status, marker))
+                            continue
                         print("  %-12.3g  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
                               (r['value'], sigz_med, sigz_mean, r['n_rois'],
                                r.get('n_outliers', 0), r['time_sec'],
@@ -2925,6 +3583,31 @@ Examples:
                     base_phil, best_sigmas, init_G, restraint_dir,
                     use_cholesky, refined_params, beta_curves,
                     target_levels, tuned_model=model_params)
+
+                # --- Auto-elbow: per-parameter optimal betas ---
+                elbow_results = find_elbow_betas(beta_curves)
+                if elbow_results:
+                    print("\n  Auto-elbow per-parameter betas:")
+                    elbow_betas = {}
+                    for bname, (ebeta, espread, egrad, edetails) in elbow_results.items():
+                        short = bname.split('.', 1)[1] if '.' in bname else bname
+                        elbow_betas[bname] = ebeta
+                        print("    %s: beta=%.4g  spread=%.3f  (%s)" %
+                              (short, ebeta, espread, edetails))
+
+                    # Write elbow phil
+                    elbow_params = dict(model_params)
+                    elbow_params.update(elbow_betas)
+                    elbow_path = os.path.join(restraint_dir, 'level_auto_elbow.phil')
+                    write_optimized_phil(
+                        base_phil, best_sigmas, init_G, elbow_path,
+                        use_cholesky=use_cholesky,
+                        refined_params=refined_params,
+                        tuned_params=elbow_params)
+                    print("    Wrote: %s" % elbow_path)
+                else:
+                    print("\n  WARNING: No elbows found in any beta curve."
+                          " Try increasing --n-frames for more stable variance.")
 
     # --- Summary ---
     print("\n" + "=" * 60)
@@ -2974,6 +3657,15 @@ Examples:
                       (bname, min(spreads), max(spreads), len(valid)))
         base_name = os.path.splitext(args.output)[0]
         print("  Restraint phil folder: %s_restraints/" % base_name)
+        elbow_results = find_elbow_betas(beta_curves)
+        if elbow_results:
+            print("  Auto-elbow betas:")
+            for bname, (ebeta, espread, egrad, edetails) in elbow_results.items():
+                short = bname.split('.', 1)[1] if '.' in bname else bname
+                print("    %s: %.4g (spread=%.3f)" % (short, ebeta, espread))
+            print("  Recommended: %s_restraints/level_auto_elbow.phil" % base_name)
+        else:
+            print("  No elbows found — try increasing --n-frames")
 
     print("\n  Optimized phil (no restraints): %s" % args.output)
 
@@ -3007,19 +3699,40 @@ Examples:
 
         for stage, results in all_results.items():
             f.write("Stage: %s\n" % stage)
-            f.write("  %-12s  %10s  %10s  %6s  %5s  %5s  %s\n" %
-                    ('sigma', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
-            f.write("  " + "-" * 68 + '\n')
-            for r in results:
-                status = 'OK' if r['converged'] and r['error'] is None else 'FAIL'
-                sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
-                sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
-                f.write("  %-12.2e  %10s  %10s  %6d  %5d  %5.1f  %s\n" %
-                        (r['sigma'], sigz_med, sigz_mean, r['n_rois'],
-                         r.get('n_outliers', 0), r['time_sec'], status))
-            best = find_best_sigma(results)
-            if best is not None:
-                f.write("  --> Best: %.2e\n" % best)
+            if stage == 'G+B':
+                f.write("  %-10s  %-10s  %10s  %10s  %6s  %5s  %5s  %s\n" %
+                        ('sigma_G', 'sigma_B', 'sigZ_med', 'sigZ_mean',
+                         'n_roi', 'n_out', 'time', 'status'))
+                f.write("  " + "-" * 78 + '\n')
+                for r in sorted(results, key=lambda r: (r['sigma_G'], r['sigma_B'])):
+                    status = 'OK' if r['converged'] and r.get('error') is None else 'FAIL'
+                    sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
+                    sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
+                    f.write("  %-10.2e  %-10.2e  %10s  %10s  %6d  %5d  %5.1f  %s\n" %
+                            (r['sigma_G'], r['sigma_B'], sigz_med, sigz_mean,
+                             r['n_rois'], r.get('n_outliers', 0),
+                             r['time_sec'], status))
+                valid = [r for r in results
+                         if r['converged'] and r.get('error') is None
+                         and r['sigZ_median'] < 1e6]
+                if valid:
+                    best_r = min(valid, key=_score_trial)
+                    f.write("  --> Best: G=%.2e, B=%.2e\n" %
+                            (best_r['sigma_G'], best_r['sigma_B']))
+            else:
+                f.write("  %-12s  %10s  %10s  %6s  %5s  %5s  %s\n" %
+                        ('sigma', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
+                f.write("  " + "-" * 68 + '\n')
+                for r in results:
+                    status = 'OK' if r['converged'] and r.get('error') is None else 'FAIL'
+                    sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
+                    sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
+                    f.write("  %-12.2e  %10s  %10s  %6d  %5d  %5.1f  %s\n" %
+                            (r['sigma'], sigz_med, sigz_mean, r['n_rois'],
+                             r.get('n_outliers', 0), r['time_sec'], status))
+                best = find_best_sigma(results)
+                if best is not None:
+                    f.write("  --> Best: %.2e\n" % best)
             f.write("\n")
 
         # Deep-dive results
@@ -3055,6 +3768,16 @@ Examples:
                     f.write("    %-12.3g  %8s\n" % (beta, sr))
                 f.write("\n")
 
+            elbow_results = find_elbow_betas(beta_curves)
+            if elbow_results:
+                f.write("\nAuto-elbow per-parameter betas:\n")
+                f.write("  %-12s  %12s  %8s  %s\n" % ('param', 'beta', 'spread', 'transition'))
+                f.write("  " + "-" * 60 + "\n")
+                for bname, (ebeta, espread, egrad, edetails) in elbow_results.items():
+                    short = bname.split('.', 1)[1] if '.' in bname else bname
+                    f.write("  %-12s  %12.4g  %8.3f  %s\n" % (short, ebeta, espread, edetails))
+                f.write("\n")
+
     print("  Wrote report to: %s" % report_path)
 
     # Shutdown MPI workers
@@ -3074,7 +3797,15 @@ Examples:
     print("  mpirun -n <NPROC> hopper.py %s" % args.output)
     if beta_curves:
         base_name = os.path.splitext(args.output)[0]
+        print("  Recommended (auto-elbow): %s_restraints/level_auto_elbow.phil" % base_name)
         print("  Or try different restraint levels from: %s_restraints/" % base_name)
+
+    # Close log file
+    print("\nLog saved to: %s" % os.path.abspath(logfile_path))
+    try:
+        _logfile.close()
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

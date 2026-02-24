@@ -1342,6 +1342,16 @@ class DataModeler:
         target.x0 = np.array(x0, np.float64)  # initial full parameter list
         x0_for_refinement = target.x0[vary]
 
+        # If all parameters are fixed, skip refinement — just compute forward model
+        if not vary.any():
+            MAIN_LOGGER.info("All parameters fixed — computing forward model only")
+            self.best_model, _ = model(target.x0, self, SIM, compute_grad=False)
+            self.best_model_includes_background = False
+            target.all_f = [0]
+            target.all_hop_id = [0]
+            target.all_sigZ = [0]
+            return target.x0
+
         if self.params.method is None:
             method = "Nelder-Mead"
         else:
@@ -1829,10 +1839,17 @@ class DataModeler:
                     sig = np.sqrt(fit + Modeler.nominal_sigma_rdout ** 2)
                 Z = (dat - fit) / sig
                 sigmaZ = np.nan
+                spearmanR = np.nan
                 ntrust = 0
                 if np.any(trust):
                     sigmaZ = Z[trust].std()
                     ntrust = int(trust.sum())
+                    # Spearman rank correlation: model-data shape agreement
+                    # Independent of noise model (sigma_r), robust to outliers
+                    if ntrust >= 5:
+                        from scipy.stats import spearmanr as _spearmanr
+                        _rho, _ = _spearmanr(dat[trust].ravel(), fit[trust].ravel())
+                        spearmanR = float(_rho) if np.isfinite(_rho) else np.nan
                 # HKL and d-spacing
                 hkl = Modeler.Hi[i_roi] if Modeler.Hi else (0, 0, 0)
                 hkl_asu = Modeler.Hi_asu[i_roi] if Modeler.Hi_asu else hkl
@@ -1887,6 +1904,7 @@ class DataModeler:
                     'cent_x': cent_x, 'cent_y': cent_y,
                     'det_x_mm': det_x_mm, 'det_y_mm': det_y_mm,
                     'sigma_z': sigmaZ,
+                    'spearman_r': spearmanR,
                     'n_trusted': ntrust,
                     'n_pixels': dat.size,
                     'tilt_a': ta, 'tilt_b': tb, 'tilt_c': tc,
@@ -1924,6 +1942,8 @@ class DataModeler:
                 'frac_sigz_lt2': (sigz_vals < 2).mean() if len(sigz_vals) else np.nan,
                 'frac_sigz_lt5': (sigz_vals < 5).mean() if len(sigz_vals) else np.nan,
                 'n_outlier_sigz': n_outlier_sigz,
+                'spearman_r_median': spot_df['spearman_r'].median() if 'spearman_r' in spot_df else np.nan,
+                'spearman_r_mean': spot_df['spearman_r'].mean() if 'spearman_r' in spot_df else np.nan,
             })
             sum_df = pandas.DataFrame([shot_summary])
             write_header = not os.path.exists(summary_path)

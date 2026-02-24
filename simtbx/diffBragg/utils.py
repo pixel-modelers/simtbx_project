@@ -1067,7 +1067,7 @@ def complete_miller_array(ma, d_min=None, log=True):
 
     completeness = 100 * n_have / max(n_full, 1)
     if log:
-        MAIN_LOGGER.warning(
+        MAIN_LOGGER.debug(
             "MTZ coverage: %d / %d HKLs (%.1f%%). Filling %d missing reflections "
             "using d-spacing interpolation." % (n_have, n_full, completeness, n_missing))
 
