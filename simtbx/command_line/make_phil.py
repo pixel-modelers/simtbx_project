@@ -4,8 +4,7 @@
 Generate a diffBragg hopper phil configuration for rotation data.
 
 Reads experiment geometry to set sensible defaults for Nabc, unit cell,
-goniometer, and structure factors. Optionally estimates init.G by running
-a quick G-only pre-refinement on a handful of frames.
+goniometer, and structure factors.
 
 Philosophy:
   - Nabc estimated from unit cell as ~1200/cell_i (domain ~1200 A)
@@ -17,12 +16,7 @@ Philosophy:
 
 Two-step workflow:
   Step 1: make_phil.py generates the phil
-  Step 2: user runs hopper with the phil
-
-For G estimation (--estimate-G):
-  Runs hopper on ~5 frames with only G free (everything else fixed),
-  using the generated phil. Extracts median refined G and rewrites
-  the phil with the estimated G as init.
+  Step 2: user runs hopper (or hopper_heatup) with the phil
 
 Usage:
   # Basic: generate phil from experiment + MTZ
@@ -38,14 +32,6 @@ Usage:
                       --mtz iobs_all.mtz \\
                       --delta-phi 0.1 \\
                       --outdir my_run \\
-                      -o my_run.phil
-
-  # With G estimation (requires simtbx environment):
-  python make_phil.py --spec expanded/exp_ref_spec.txt \\
-                      --mtz iobs_all.mtz \\
-                      --delta-phi 0.1 \\
-                      --outdir my_run \\
-                      --estimate-G \\
                       -o my_run.phil
 """
 
@@ -119,6 +105,107 @@ def estimate_phi_steps(delta_phi):
     return max(5, min(20, int(round(steps_per_tenth * delta_phi / 0.1))))
 
 
+def generate_g_estimation_phil(base_phil_str):
+    """Generate a phil for G-only pre-refinement.
+
+    Fixes everything except G, runs a quick L-BFGS-B optimization.
+    """
+    extra = """
+# G-estimation mode: fix everything except G
+fix {
+  RotXYZ = 1,1,1
+  Nabc = True
+  B = True
+  ucell = True
+  detz_shift = True
+}
+method = "L-BFGS-B"
+lbfgs_maxiter = 200
+"""
+    return base_phil_str + extra
+
+
+def run_g_estimation(phil_path, spec_path, n_frames=5):
+    """Run a quick G pre-estimation using hopper.
+
+    Returns the estimated G value.
+    """
+    import subprocess
+    import tempfile
+    import glob
+
+    # Create a temp spec file with only n_frames entries
+    with open(spec_path) as f:
+        all_lines = [l.strip() for l in f if l.strip()]
+
+    # Sample evenly across the scan
+    if len(all_lines) > n_frames:
+        step = len(all_lines) // n_frames
+        selected = [all_lines[i * step] for i in range(n_frames)]
+    else:
+        selected = all_lines
+
+    tmpdir = tempfile.mkdtemp(prefix="g_est_")
+    tmp_spec = os.path.join(tmpdir, "g_est_spec.txt")
+    with open(tmp_spec, "w") as f:
+        for line in selected:
+            f.write(line + "\n")
+
+    # Read the base phil and override spec + outdir
+    with open(phil_path) as f:
+        phil_str = f.read()
+
+    g_phil_str = generate_g_estimation_phil(phil_str)
+    g_phil_str = g_phil_str.replace(
+        'exp_ref_spec_file = "%s"' % os.path.abspath(spec_path),
+        'exp_ref_spec_file = "%s"' % tmp_spec)
+    g_phil_str = g_phil_str.replace(
+        'outdir = "', 'outdir = "%s/' % tmpdir.rstrip("/"))
+
+    g_phil_path = os.path.join(tmpdir, "g_est.phil")
+    with open(g_phil_path, "w") as f:
+        f.write(g_phil_str)
+
+    print("\n--- G ESTIMATION ---")
+    print("Running hopper on %d frames with G-only refinement..." % len(selected))
+    print("Temp dir: %s" % tmpdir)
+    print("Phil: %s" % g_phil_path)
+
+    hopper_script = os.path.join(os.path.dirname(__file__), "hopper.py")
+    cmd = [sys.executable, hopper_script, g_phil_path]
+    print("Command: %s" % " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+    if result.returncode != 0:
+        print("WARNING: G estimation failed (return code %d)" % result.returncode)
+        print("STDERR:", result.stderr[-500:] if result.stderr else "")
+        return None
+
+    # Read refined G from shot summary CSVs
+    import pandas as pd
+    csv_files = glob.glob(os.path.join(tmpdir, "*/spot_diagnostics/rank*/*_shot_summary.csv"))
+    if not csv_files:
+        csv_files = glob.glob(os.path.join(tmpdir, "spot_diagnostics/rank*/*_shot_summary.csv"))
+
+    if not csv_files:
+        print("WARNING: No shot summary CSVs found after G estimation")
+        return None
+
+    dfs = [pd.read_csv(f) for f in csv_files]
+    df = pd.concat(dfs, ignore_index=True)
+    G_median = df["G"].median()
+    G_mean = df["G"].mean()
+
+    print("G estimation results (%d frames):" % len(df))
+    print("  G median = %.2e" % G_median)
+    print("  G mean   = %.2e" % G_mean)
+    print("  G range  = %.2e to %.2e" % (df["G"].min(), df["G"].max()))
+    print("Using median G = %.2e" % G_median)
+    print("--- END G ESTIMATION ---\n")
+
+    return G_median
+
+
 def generate_phil(args, info, init_G=None):
     """Generate the phil configuration string."""
     uc = info["unit_cell"]
@@ -134,8 +221,6 @@ def generate_phil(args, info, init_G=None):
     lines.append("# Space group: %s" % sg)
     lines.append("# Wavelength: %.4f A" % info["wavelength"])
     lines.append("# Nabc estimated from ~1200 A domain size")
-    if init_G is not None:
-        lines.append("# G estimated from pre-refinement")
     lines.append("")
 
     # Output
@@ -225,110 +310,6 @@ def generate_phil(args, info, init_G=None):
     return "\n".join(lines) + "\n"
 
 
-def generate_g_estimation_phil(base_phil_str, n_frames=5):
-    """Generate a phil for G-only pre-refinement.
-
-    Fixes everything except G, runs on a small number of frames.
-    """
-    extra = """
-# G-estimation mode: fix everything except G
-fix {
-  RotXYZ = True,True,True
-  Nabc = True
-  B = True
-  ucell = True
-  detz_shift = True
-}
-# Quick run: fewer iterations
-method = "L-BFGS-B"
-lbfgs_maxiter = 200
-"""
-    return base_phil_str + extra
-
-
-def run_g_estimation(phil_path, spec_path, n_frames=5):
-    """Run a quick G pre-estimation using hopper.
-
-    Returns the estimated G value.
-    """
-    import subprocess
-    import tempfile
-    import glob
-
-    # Create a temp spec file with only n_frames entries
-    with open(spec_path) as f:
-        all_lines = [l.strip() for l in f if l.strip()]
-
-    # Sample evenly across the scan
-    if len(all_lines) > n_frames:
-        step = len(all_lines) // n_frames
-        selected = [all_lines[i * step] for i in range(n_frames)]
-    else:
-        selected = all_lines
-
-    tmpdir = tempfile.mkdtemp(prefix="g_est_")
-    tmp_spec = os.path.join(tmpdir, "g_est_spec.txt")
-    with open(tmp_spec, "w") as f:
-        for line in selected:
-            f.write(line + "\n")
-
-    # Read the base phil and override spec + outdir
-    with open(phil_path) as f:
-        phil_str = f.read()
-
-    g_phil_str = generate_g_estimation_phil(phil_str)
-    g_phil_str = g_phil_str.replace(
-        'exp_ref_spec_file = "%s"' % os.path.abspath(spec_path),
-        'exp_ref_spec_file = "%s"' % tmp_spec)
-    g_phil_str = g_phil_str.replace(
-        'outdir = "', 'outdir = "%s/' % tmpdir.rstrip("/"))
-
-    g_phil_path = os.path.join(tmpdir, "g_est.phil")
-    with open(g_phil_path, "w") as f:
-        f.write(g_phil_str)
-
-    print("\n--- G ESTIMATION ---")
-    print("Running hopper on %d frames with G-only refinement..." % len(selected))
-    print("Temp dir: %s" % tmpdir)
-    print("Phil: %s" % g_phil_path)
-
-    # Run hopper via Python (dispatcher may not exist in conda envs)
-    hopper_script = os.path.join(os.path.dirname(__file__), "hopper.py")
-    cmd = [sys.executable, hopper_script, g_phil_path]
-    print("Command: %s" % " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
-    if result.returncode != 0:
-        print("WARNING: G estimation failed (return code %d)" % result.returncode)
-        print("STDERR:", result.stderr[-500:] if result.stderr else "")
-        return None
-
-    # Read refined G from shot summary CSVs
-    import pandas as pd
-    csv_files = glob.glob(os.path.join(tmpdir, "*/spot_diagnostics/rank*/*_shot_summary.csv"))
-    if not csv_files:
-        # Try the outdir pattern
-        csv_files = glob.glob(os.path.join(tmpdir, "spot_diagnostics/rank*/*_shot_summary.csv"))
-
-    if not csv_files:
-        print("WARNING: No shot summary CSVs found after G estimation")
-        return None
-
-    dfs = [pd.read_csv(f) for f in csv_files]
-    df = pd.concat(dfs, ignore_index=True)
-    G_median = df["G"].median()
-    G_mean = df["G"].mean()
-
-    print("G estimation results (%d frames):" % len(df))
-    print("  G median = %.2e" % G_median)
-    print("  G mean   = %.2e" % G_mean)
-    print("  G range  = %.2e to %.2e" % (df["G"].min(), df["G"].max()))
-    print("Using median G = %.2e" % G_median)
-    print("--- END G ESTIMATION ---\n")
-
-    return G_median
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Generate a diffBragg hopper phil for rotation data",
@@ -344,12 +325,10 @@ Examples:
       --spec expanded/exp_ref_spec.txt \\
       --mtz iobs_all.mtz --delta-phi 0.1 --outdir run1 -o run1.phil
 
-  # With G pre-estimation:
-  python make_phil.py --spec expanded/exp_ref_spec.txt \\
-      --mtz iobs_all.mtz --delta-phi 0.1 --outdir run1 \\
-      --estimate-G -o run1.phil
+  # Then run hopper_heatup for automated tuning:
+  python hopper_heatup.py run1.phil --spec expanded/exp_ref_spec.txt
 
-  # Then run hopper:
+  # Or run hopper directly:
   mpirun -n 12 simtbx.diffBragg.hopper run1.phil
 """)
     parser.add_argument("--expt", help="Experiment file (.expt) to read crystal/beam info from. "
@@ -366,7 +345,7 @@ Examples:
                         help="Output phil filename (default: hopper.phil)")
     parser.add_argument("--mask", default=None, help="Hotpixel mask file (.pkl)")
     parser.add_argument("--init-G", type=float, default=1e5,
-                        help="Initial G scale factor (default: 1e5, use --estimate-G for auto)")
+                        help="Initial G scale factor (default: 1e5)")
     parser.add_argument("--init-B", type=float, default=20,
                         help="Initial B-factor (default: 20)")
     parser.add_argument("--num-devices", type=int, default=0,
@@ -376,7 +355,8 @@ Examples:
     parser.add_argument("--fix-ucell", action="store_true",
                         help="Fix unit cell during refinement")
     parser.add_argument("--estimate-G", action="store_true",
-                        help="Run a quick G-only pre-refinement on ~5 frames to estimate init.G")
+                        help="Run a quick G-only pre-refinement on ~5 frames to estimate init.G "
+                             "(not needed if using hopper_heatup, which does this automatically)")
     parser.add_argument("--g-est-frames", type=int, default=5,
                         help="Number of frames for G estimation (default: 5)")
 
@@ -410,22 +390,20 @@ Examples:
         estimate_phi_steps(args.delta_phi), args.delta_phi))
 
     # Generate phil
-    init_G = None
-    phil_str = generate_phil(args, info, init_G=init_G)
+    phil_str = generate_phil(args, info)
 
     # Write phil
     with open(args.output, "w") as f:
         f.write(phil_str)
     print("\nWrote phil to: %s" % args.output)
 
-    # G estimation (optional, after writing initial phil)
+    # G estimation (optional)
     if args.estimate_G:
         if not args.spec:
             print("ERROR: --estimate-G requires --spec")
             sys.exit(1)
         G_est = run_g_estimation(args.output, args.spec, n_frames=args.g_est_frames)
         if G_est is not None:
-            # Rewrite phil with estimated G
             phil_str = generate_phil(args, info, init_G=G_est)
             with open(args.output, "w") as f:
                 f.write(phil_str)
@@ -437,18 +415,16 @@ Examples:
     print("\n" + "=" * 60)
     print("TO RUN:")
     print("=" * 60)
-    if args.num_devices > 0:
-        print("  mpirun -n <NPROC> simtbx.diffBragg.hopper %s" % args.output)
-    else:
-        print("  mpirun -n <NPROC> simtbx.diffBragg.hopper %s" % args.output)
+    print("  # Automated tuning (recommended):")
+    print("  python hopper_heatup.py %s" % args.output)
+    print("")
+    print("  # Direct refinement:")
+    print("  mpirun -n <NPROC> simtbx.diffBragg.hopper %s" % args.output)
     print("")
     print("TO ANALYZE:")
-    print("  python analyze/analyze_spots_by_resolution.py %s" % args.outdir)
-    print("  python analyze/analyze_hkl_errors.py %s" % args.outdir)
-    print("  python analyze/analyze_asu_rocking.py %s --space-group '%s'" % (
-        args.outdir, info["space_group"]))
-    print("  python analyze/analyze_temporal.py %s" % args.outdir)
-    print("  python analyze/analyze_params.py %s" % args.outdir)
+    print("  python analyze/analyze_spots_by_resolution.py <outdir>")
+    print("  python analyze/analyze_hkl_errors.py <outdir>")
+    print("  python analyze/analyze_params.py <outdir>")
 
 
 if __name__ == "__main__":
