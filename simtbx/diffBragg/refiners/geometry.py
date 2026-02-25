@@ -156,14 +156,14 @@ class DetectorParameters:
 
             o = RangedParameter(name="group%d_RotOrth" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=1,
                                 minval=GEO.min.panel_rotations[0]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[0]*DEG_TO_PI,
                                 fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
 
             f = RangedParameter(name="group%d_RotFast" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=1,
                                 minval=GEO.min.panel_rotations[1]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[1]*DEG_TO_PI,
                                 fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
@@ -171,7 +171,7 @@ class DetectorParameters:
 
             s = RangedParameter(name="group%d_RotSlow" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=1,
                                 minval=GEO.min.panel_rotations[2]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[2]*DEG_TO_PI,
                                 fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
@@ -180,17 +180,17 @@ class DetectorParameters:
             vary_shifts = [not fixed_flag and group_has_data for fixed_flag in GEO.fix.panel_translations]
             #vary_shifts = [True]*3
             x = RangedParameter(name="group%d_ShiftX" % i_group, init=0,
-                                sigma=100,
+                                sigma=1,
                                 minval=GEO.min.panel_translations[0]*1e-3, maxval=GEO.max.panel_translations[0]*1e-3,
                                 fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
                                 is_global=True)
             y = RangedParameter(name="group%d_ShiftY" % i_group, init=0,
-                                sigma=100,
+                                sigma=1,
                                 minval=GEO.min.panel_translations[1]*1e-3, maxval=GEO.max.panel_translations[1]*1e-3,
                                 fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
                                 is_global=True)
             z = RangedParameter(name="group%d_ShiftZ" % i_group, init=0,
-                                sigma=100,
+                                sigma=1,
                                 minval=GEO.min.panel_translations[2]*1e-3, maxval=GEO.max.panel_translations[2]*1e-3,
                                 fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
                                 is_global=True)
@@ -210,20 +210,19 @@ class CrystalParameters:
             # set the per-spot scale factors, per pixel...
             Mod.set_slices("roi_id")
             Mod.per_roi_scales_per_pix = np.ones_like(Mod.all_data)
+            has_scale_factor = "scale_factor" in list(Mod.refls[0].keys())
             for roi_id, ref_idx in enumerate(Mod.refls_idx):
-                if "scale_factor" in list(Mod.refls[0].keys()):
-                    slcs = Mod.roi_id_slices[roi_id]
-                    assert len(slcs)==1
-                    slc = slcs[0]
-                    #init_scale = Mod.refls[ref_idx]["scale_factor"]
-                    init_scale=1
-                    Mod.per_roi_scales_per_pix[slc] =init_scale
-                else:
-                    init_scale = 1
+                init_scale = 1.0
+                if has_scale_factor:
+                    init_scale = float(Mod.refls[ref_idx]["scale_factor"])
+                    if init_scale != 1.0:
+                        slcs = Mod.roi_id_slices[roi_id]
+                        assert len(slcs) == 1
+                        Mod.per_roi_scales_per_pix[slcs[0]] = init_scale
 
                 p = RangedParameter(name="rank%d_shot%d_scale_roi%d" % (COMM.rank, i_shot, roi_id),
                                     minval=0, maxval=1e12, fix=self.phil.fix.perRoiScale,
-                                    center=1, beta=1e12, init=init_scale)
+                                    center=init_scale, beta=1e12, init=init_scale)
                 self.parameters.append(p)
 
             for i_N in range(3):
@@ -334,6 +333,38 @@ class Target:
             pred_offset_str = ", ".join(map(lambda x: "%.4f" %x, self.med_offsets))
             print("Iteration %d:\n\tResid=%f, sigmaZ %f, t-per-iter=%.4f sec, pred_offsets=%s"
                   % (self.iternum, f, self.sigmaZ, time_per_iter, pred_offset_str), flush=True)
+
+            # Print detector geometry parameters
+            det_params_str = ""
+            for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
+                          "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
+                if pname in self.ref_params:
+                    p = self.ref_params[pname]
+                    val = p.get_val(self.x0[p.xpos])
+                    # Convert radians to degrees for rotations, meters to mm for shifts
+                    if "Rot" in pname:
+                        val = val * 180.0 / np.pi  # rad to deg
+                        unit = "deg"
+                    else:
+                        val = val * 1000.0  # m to mm
+                        unit = "mm"
+                    det_params_str += "%s=%.4f%s " % (pname.replace("group0_", ""), val, unit)
+            if det_params_str:
+                print("\tDetector: %s" % det_params_str, flush=True)
+
+            # Print RotXYZ statistics across all shots
+            rotxyz_vals = []
+            for pname in self.ref_params:
+                if "RotXYZ" in pname:
+                    p = self.ref_params[pname]
+                    if not p.fix:
+                        val = p.get_val(self.x0[p.xpos])
+                        rotxyz_vals.append(val * 180.0 / np.pi)  # rad to deg
+            if rotxyz_vals:
+                rotxyz_vals = np.array(rotxyz_vals)
+                print("\tRotXYZ: mean=%.4f deg, std=%.4f deg, min=%.4f deg, max=%.4f deg"
+                      % (np.mean(rotxyz_vals), np.std(rotxyz_vals),
+                         np.min(rotxyz_vals), np.max(rotxyz_vals)), flush=True)
         if self.iternum % self.save_state_freq==0 and self.iternum >0:
             if not self.overwrite_state:
                 params = args[-1]  # phil params
@@ -360,6 +391,37 @@ class Target:
     def at_min_callback(self, x, f, accept):
         if COMM.rank==0:
             print("Final Iteration %d:\n\tResid=%f, sigmaZ %f" % (self.iternum, f, self.sigmaZ))
+
+            # Print final detector geometry parameters
+            det_params_str = ""
+            for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
+                          "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
+                if pname in self.ref_params:
+                    p = self.ref_params[pname]
+                    val = p.get_val(self.x0[p.xpos])
+                    if "Rot" in pname:
+                        val = val * 180.0 / np.pi
+                        unit = "deg"
+                    else:
+                        val = val * 1000.0
+                        unit = "mm"
+                    det_params_str += "%s=%.4f%s " % (pname.replace("group0_", ""), val, unit)
+            if det_params_str:
+                print("\tDetector: %s" % det_params_str, flush=True)
+
+            # Print final RotXYZ statistics
+            rotxyz_vals = []
+            for pname in self.ref_params:
+                if "RotXYZ" in pname:
+                    p = self.ref_params[pname]
+                    if not p.fix:
+                        val = p.get_val(self.x0[p.xpos])
+                        rotxyz_vals.append(val * 180.0 / np.pi)
+            if rotxyz_vals:
+                rotxyz_vals = np.array(rotxyz_vals)
+                print("\tRotXYZ: mean=%.4f deg, std=%.4f deg, min=%.4f deg, max=%.4f deg"
+                      % (np.mean(rotxyz_vals), np.std(rotxyz_vals),
+                         np.min(rotxyz_vals), np.max(rotxyz_vals)), flush=True)
 
 
 def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
@@ -443,6 +505,9 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     # update gonio, TODO: free up gonio axis
     utils.update_SIM_with_gonio(SIM, delta_phi=Modeler.osc_deg,
                                 num_phi_steps=Modeler.phisteps, spindle_axis=SIM.D.spindle_axis)
+    # Set per-frame starting phi for rotation data
+    if hasattr(Modeler, 'phi_deg') and Modeler.phi_deg is not None:
+        SIM.D.phi_deg = Modeler.phi_deg
 
     # update the Bmatrix
     Modeler.ucell_man.variables = [p.get_val(x[p.xpos]) for p in ucell_pars]
@@ -832,8 +897,10 @@ def geom_min(params):
     if COMM.rank == 0:
         print("Will optimize using %d experiments" %len(df))
 
-    from simtbx.diffBragg import mpi_logger
-    mpi_logger.setup_logging_from_params(params)
+    main_logger = logging.getLogger("diffBragg.main")
+    if not main_logger.handlers:
+        from simtbx.diffBragg import mpi_logger
+        mpi_logger.setup_logging_from_params(params)
     df.reset_index(drop=True, inplace=True)
     #if "geom_exp" not in df:
     #    exps,refs, exp_idxs = [],[],[]
@@ -875,6 +942,36 @@ def geom_min(params):
         print("ADDING %d FHKL parameters!" % len(fhkl_params.parameters))
         for p in fhkl_params.parameters:
             LMP.add(p)
+
+    # Print geometry refinement settings for verification
+    if COMM.rank == 0:
+        print("\n" + "="*80)
+        print("GEOMETRY REFINEMENT SETTINGS:")
+        print("="*80)
+        print("Restraints enabled: %s" % params.use_restraints)
+        print("Crystal params fixed: G=%s, Nabc=%s, RotXYZ=%s, ucell=%s, eta=%s" %
+              (params.fix.G, params.fix.Nabc, params.fix.RotXYZ, params.fix.ucell, params.fix.eta_abc))
+        print("\nDetector parameters:")
+        print("  Rotations - fix: %s, bounds: [%.2f, %.2f] deg" %
+              (params.geometry.fix.panel_rotations,
+               params.geometry.min.panel_rotations[0], params.geometry.max.panel_rotations[0]))
+        print("  Translations - fix: %s, bounds: [%.2f, %.2f] mm" %
+              (params.geometry.fix.panel_translations,
+               params.geometry.min.panel_translations[0], params.geometry.max.panel_translations[0]))
+        if params.use_restraints:
+            print("\nRestraint betas:")
+            print("  panel_rot: %s" % str(params.geometry.betas.panel_rot))
+            print("  panel_xyz: %s" % str(params.geometry.betas.panel_xyz))
+
+        # Print detector parameter details
+        for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
+                      "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
+            if pname in LMP:
+                p = LMP[pname]
+                print("  %s: sigma=%.2f, beta=%.2e, fixed=%s" %
+                      (pname, p.sigma, p.beta if p.beta is not None else 0, p.fix))
+        print("="*80 + "\n", flush=True)
+
     launcher.SIM.refining_sourceI = not params.geometry.fix.sourceI
     if launcher.SIM.refining_sourceI:
         sourceI_params = SourceIParameters(params, launcher.SIM)
@@ -944,6 +1041,64 @@ def geom_min(params):
 
     target.x0[target.vary] = result.x
     Xopt = target.x0  # optimized, rescaled parameters
+
+    # Print final optimized geometry parameters
+    if COMM.rank == 0:
+        print("\n" + "="*80)
+        print("GEOMETRY REFINEMENT COMPLETE:")
+        print("="*80)
+        print("Final optimization result:")
+        print("  Success: %s" % result.message if hasattr(result, 'message') else 'N/A')
+        print("  Final residual: %.2f" % result.fun if hasattr(result, 'fun') else 'N/A')
+        print("\nFinal detector parameters (raw):")
+        rot_orth_deg = rot_fast_deg = rot_slow_deg = 0.0
+        shift_x_mm = shift_y_mm = shift_z_mm = 0.0
+        for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
+                      "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
+            if pname in LMP:
+                p = LMP[pname]
+                val = p.get_val(Xopt[p.xpos])
+                if "Rot" in pname:
+                    val_deg = val * 180.0 / np.pi
+                    unit = "deg"
+                    if "RotOrth" in pname:
+                        rot_orth_deg = val_deg
+                    elif "RotFast" in pname:
+                        rot_fast_deg = val_deg
+                    elif "RotSlow" in pname:
+                        rot_slow_deg = val_deg
+                    print("  %s: %.4f %s" % (pname.replace("group0_", ""), val_deg, unit))
+                else:
+                    val_mm = val * 1000.0
+                    unit = "mm"
+                    if "ShiftX" in pname:
+                        shift_x_mm = val_mm
+                    elif "ShiftY" in pname:
+                        shift_y_mm = val_mm
+                    elif "ShiftZ" in pname:
+                        shift_z_mm = val_mm
+                    print("  %s: %.4f %s" % (pname.replace("group0_", ""), val_mm, unit))
+
+        # Compute geometric interpretation
+        print("\nGeometric interpretation:")
+        # Total tilt magnitude (combined rotation effect)
+        total_tilt = np.sqrt(rot_fast_deg**2 + rot_slow_deg**2)
+        print("  Total detector tilt: %.4f deg" % total_tilt)
+
+        # Pitch/Yaw decomposition (assuming standard geometry)
+        # RotFast ≈ pitch (rotation around horizontal/fast axis, tilts detector up/down)
+        # RotSlow ≈ yaw (rotation around vertical/slow axis, tilts detector left/right)
+        print("  Pitch (RotFast, tilt around horizontal): %.4f deg" % rot_fast_deg)
+        print("  Yaw (RotSlow, tilt around vertical): %.4f deg" % rot_slow_deg)
+        print("  Roll (RotOrth, in-plane rotation): %.4f deg" % rot_orth_deg)
+
+        # Beam center shift
+        beam_shift_mag = np.sqrt(shift_x_mm**2 + shift_y_mm**2)
+        print("\nBeam center shift:")
+        print("  X shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_x_mm, shift_x_mm/0.075))
+        print("  Y shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_y_mm, shift_y_mm/0.075))
+        print("  Total shift: %.4f mm (%.2f pixels)" % (beam_shift_mag, beam_shift_mag/0.075))
+        print("="*80 + "\n", flush=True)
 
     if params.geometry.optimized_results_tag is not None:
         write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)

@@ -134,7 +134,7 @@ DEFAULT_BETAS = {
 DEFAULT_BETAS['ucell'] = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
 
 # Default sweep values for model parameters
-DEFAULT_PHISTEPS = [5, 10, 20, 30, 50, 75, 100]
+DEFAULT_PHISTEPS = [1, 2, 5, 10, 20, 30, 50, 75, 100]
 DEFAULT_SIGMA_R = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
 
 # Tunable model/restraint params and their phil paths
@@ -288,26 +288,27 @@ def write_sample_spec(sample_lines, tmpdir):
     return spec_path
 
 
-def generate_trial_phil(base_phil, stage, sigma_value, best_sigmas, outdir,
-                        sample_spec, use_cholesky=False, max_calls=None,
+def generate_trial_phil(base_phil, stage, sigma_value, best_sigmas,
+                        use_cholesky=False, max_calls=None,
                         num_devices=None):
-    """Generate a phil string for one trial.
+    """Generate a phil string for one trial (in-process refinement).
 
     Starts from the base phil, then overrides:
     - fix flags for the current stage
     - sigma for the parameter being swept
     - best sigmas from previous stages
-    - outdir and spec file
     - num_devices (when using --n-gpus, force 1 device per trial)
+
+    Does NOT set exp_ref_spec_file, outdir, or save_spot_diagnostics
+    since refinement runs in-process via hopper_utils.refine().
     """
     lines = [base_phil, '\n# --- hopper_heatup trial ---\n']
 
-    # Override spec and outdir
-    lines.append('exp_ref_spec_file = "%s"' % sample_spec)
-    lines.append('outdir = "%s"' % outdir)
+    # Disable disk output (scoring is done in-process)
+    lines.append('save_spot_diagnostics = False')
 
-    # Save diagnostics (needed for scoring)
-    lines.append('save_spot_diagnostics = True')
+    # Suppress verbose per-image logging (Cholesky bounds, etc.)
+    lines.append('logging.rank0_level = low')
 
     # Override num_devices for multi-GPU parallel trials
     if num_devices is not None:
@@ -376,7 +377,10 @@ def generate_trial_phil(base_phil, stage, sigma_value, best_sigmas, outdir,
 
 def run_hopper_trial(phil_str, tmpdir, trial_name, use_cuda=False, timeout=300,
                      gpu_id=None):
-    """Run hopper on one trial and return the score.
+    """DEPRECATED: Use _run_one_image_trial() instead, which runs refinement
+    in-process via hopper_utils.refine() without subprocess spawning.
+
+    Run hopper on one trial and return the score.
 
     Returns dict with: sigZ_median, sigZ_mean, n_rois, n_outliers, converged, time_sec
     """
@@ -444,7 +448,8 @@ def run_hopper_trial(phil_str, tmpdir, trial_name, use_cuda=False, timeout=300,
 
 
 def parse_trial_results(tmpdir, trial_name, elapsed):
-    """Parse spot diagnostics from a hopper run."""
+    """DEPRECATED: Scoring is now done in-process via extract_image_score().
+    Parse spot diagnostics from a hopper run."""
     import numpy as np
 
     # Find the outdir used by this trial
@@ -645,8 +650,8 @@ def parse_trial_results(tmpdir, trial_name, elapsed):
         }
 
 
-def estimate_G_parallel(base_phil, sample_spec, tmpdir, use_cuda=False,
-                         timeout=300, n_parallel=1, n_gpus=None,
+def estimate_G_parallel(base_phil, sample_lines, use_cuda=False,
+                         n_parallel=1, n_gpus=None,
                          procs_per_gpu=1, mpi_comm=None, num_devices=None):
     """Estimate init.G by running parallel trials across orders of magnitude.
 
@@ -655,29 +660,28 @@ def estimate_G_parallel(base_phil, sample_spec, tmpdir, use_cuda=False,
     The best G is the one with lowest median sigZ.
 
     Disables auto_G so our explicit init.G / bounds are respected.
+    sample_lines: list of spec file lines (one per image)
     """
     import numpy as np
 
     # Span 16 orders of magnitude: G = 1 to 1e15
     g_values = [10.0 ** i for i in range(16)]
 
-    print("  Searching %d G values in parallel: 1e0 to 1e15..." % len(g_values))
+    n_images = len(sample_lines)
+    print("  Searching %d G values x %d images = %d work units..." %
+          (len(g_values), n_images, len(g_values) * n_images))
 
-    # Build trial configs
+    # Build per-sigma trial configs
     trial_args = []
     for g_val in g_values:
-        trial_name = 'g_search_%.0e' % g_val
-        trial_outdir = os.path.join(tmpdir, trial_name)
-
         # Set bounds to +/- 2 orders of magnitude around init.G
         # so the ranged parameterization has a sensible range
         g_min = max(1e-10, g_val * 0.01)
         g_max = g_val * 100.0
 
         lines = [base_phil, '\n# G search trial\n']
-        lines.append('exp_ref_spec_file = "%s"' % sample_spec)
-        lines.append('outdir = "%s"' % trial_outdir)
-        lines.append('save_spot_diagnostics = True')
+        lines.append('save_spot_diagnostics = False')
+        lines.append('logging.rank0_level = low')
         lines.append('init.G = %.6e' % g_val)
         lines.append('init.auto_G = False')
         lines.append('mins.G = %.6e' % g_min)
@@ -696,24 +700,31 @@ def estimate_G_parallel(base_phil, sample_spec, tmpdir, use_cuda=False,
         phil_str = '\n'.join(lines) + '\n'
 
         label = 'G=%.0e' % g_val
-        trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout,
-                           g_val, label))
+        trial_args.append((phil_str, use_cuda, g_val, label))
 
-    # Assign GPUs
-    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+    # Flatten to per-(G_val, image) work units
+    flat_trials = _flatten_trials(trial_args, sample_lines)
+    flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
 
     # Run all in parallel
-    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+    raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                      mpi_comm=mpi_comm)
 
-    # Find the best G (lowest sigZ)
-    sorted_results = sorted(raw_results, key=lambda x: x[0])
+    # Aggregate per-image results back to per-G_val
+    agg_results = aggregate_image_results(raw_results, n_images)
+
+    # Find the best G (lowest sigZ).
+    # Use <= so that when scores are tied across a flat plateau, we pick
+    # the HIGHEST G value. This gives better bounds centering since the
+    # true G is near the top of the plateau (too-high init.G causes sigZ
+    # to rise, too-low converges to the same value).
+    sorted_results = sorted(agg_results, key=lambda x: x[0])
     best_G = None
     best_score = float('inf')
     for g_val, label, score in sorted_results:
         if score['converged'] and score['error'] is None:
             trial_score = _score_trial(score)
-            if trial_score < best_score:
+            if trial_score <= best_score:
                 best_score = trial_score
                 best_G = g_val
 
@@ -741,7 +752,8 @@ def estimate_G_parallel(base_phil, sample_spec, tmpdir, use_cuda=False,
 
 
 def _run_one_trial(args_tuple):
-    """Worker function for parallel trial execution.
+    """DEPRECATED: Use _run_one_image_trial() instead.
+    Worker function for parallel trial execution via subprocess.
 
     args_tuple: (phil_str, tmpdir, trial_name, use_cuda, timeout, sigma_val, label, gpu_id)
     Returns: (sigma_val, label, score_dict)
@@ -756,28 +768,231 @@ def _run_one_trial(args_tuple):
     return (sigma_val, label, score)
 
 
+def _parse_phil_str(phil_str):
+    """Parse a phil string into a params object.
+
+    Uses the hopper phil scope (hopper_phil + philz).
+    """
+    from libtbx.phil import parse
+    from simtbx.diffBragg.phil import philz as base_philz, hopper_phil
+    scope = parse(hopper_phil + base_philz)
+    user = parse(phil_str)
+    working = scope.fetch(source=user)
+    return working.extract()
+
+
+def _run_one_image_trial(args_tuple):
+    """Worker function for in-process per-image trial execution.
+
+    args_tuple: (phil_str, spec_line, use_cuda, sigma_val, label, gpu_id)
+    Returns: (sigma_val, label, per_image_score_dict)
+    """
+    phil_str, spec_line, use_cuda, sigma_val, label, gpu_id = args_tuple
+    t0 = time.time()
+    try:
+        if use_cuda:
+            os.environ['DIFFBRAGG_USE_CUDA'] = '1'
+
+        from simtbx.diffBragg import hopper_utils
+
+        params = _parse_phil_str(phil_str)
+        exp, ref, exp_idx, spec = hopper_utils.split_line(spec_line)
+
+        # Override params for in-process mode
+        params.outdir = None  # no disk output
+
+        gpu_device = gpu_id if gpu_id is not None else 0
+        _, _, Modeler, SIM, x = hopper_utils.refine(
+            exp, ref, params, spec=spec, gpu_device=gpu_device,
+            return_modeler=True, free_mem=False)
+
+        score = hopper_utils.extract_image_score(Modeler, SIM, x, params)
+        score['time_sec'] = time.time() - t0
+
+        Modeler.clean_up(SIM)
+        return (sigma_val, label, score)
+
+    except Exception as e:
+        import traceback
+        return (sigma_val, label, {
+            'sigz_median': float('inf'),
+            'sigz_mean': float('inf'),
+            'sigz_vals': [],
+            'n_rois': 0,
+            'n_outlier_sigz': 0,
+            'spearman_r_median': float('nan'),
+            'spearman_vals': [],
+            'param_vals': {},
+            'converged': False,
+            'time_sec': time.time() - t0,
+            'error': traceback.format_exc()[-200:],
+        })
+
+
+def _flatten_trials(trial_args, spec_lines):
+    """Expand per-sigma trial list to per-(sigma, image) work units.
+
+    Input trial_args: list of (phil_str, use_cuda, sigma_val, label)
+        — note NO spec_line or gpu_id yet
+    Input spec_lines: list of spec file lines (one per image)
+
+    Output: list of (phil_str, spec_line, use_cuda, sigma_val, label, gpu_id=None)
+        — one per (sigma x image), with gpu_id to be assigned by _assign_gpus
+
+    Work units are ordered expensive-first (reversed trial_args order) so that
+    costly trials (e.g. high phisteps) get dispatched to workers early,
+    avoiding a long tail where one worker is still grinding on an expensive
+    trial while others sit idle.
+    """
+    flat = []
+    for phil_str, use_cuda, sigma_val, label in reversed(trial_args):
+        for spec_line in spec_lines:
+            flat.append((phil_str, spec_line, use_cuda, sigma_val, label, None))
+    return flat
+
+
+def aggregate_image_results(image_results, n_images):
+    """Aggregate per-image results into per-sigma score dicts.
+
+    Groups results by (sigma_val, label), computes aggregate stats
+    matching the output format of parse_trial_results().
+
+    image_results: list of (sigma_val, label, per_image_score_dict)
+    n_images: expected number of images per sigma value
+
+    Returns: list of (sigma_val, label, aggregated_score_dict)
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for sigma_val, label, score in image_results:
+        groups[(sigma_val, label)].append(score)
+
+    aggregated = []
+    _param_cols = ['scale', 'Bfactor', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc',
+                   'a', 'b', 'c', 'al', 'be', 'ga']
+    # Also include cholesky if present
+    _chol_cols = ['cholesky']
+
+    for (sigma_val, label), scores in groups.items():
+        # Filter out errored images
+        good = [s for s in scores if s.get('error') is None and s.get('converged', False)]
+
+        if not good:
+            aggregated.append((sigma_val, label, {
+                'sigZ_median': float('inf'),
+                'sigZ_mean': float('inf'),
+                'spearman_r': float('nan'),
+                'n_rois': 0,
+                'n_outliers': 0,
+                'param_vars': {},
+                'converged': False,
+                'time_sec': max((s['time_sec'] for s in scores), default=0),
+                'error': 'all images failed',
+            }))
+            continue
+
+        # Aggregate sigZ across images by pooling raw per-ROI values
+        # This matches the baseline behavior (median of ALL ROIs across all images)
+        # rather than median-of-per-image-medians which is too coarse with few images
+        pooled_sigz = []
+        pooled_spearman = []
+        for s in good:
+            pooled_sigz.extend(s.get('sigz_vals', []))
+            pooled_spearman.extend(s.get('spearman_vals', []))
+        # Filter non-finite
+        pooled_sigz = [v for v in pooled_sigz if np.isfinite(v)]
+        pooled_spearman = [v for v in pooled_spearman if np.isfinite(v)]
+
+        # n_rois and n_outliers are summed across images
+        total_rois = sum(s['n_rois'] for s in good)
+        total_outliers = sum(s.get('n_outlier_sigz', 0) for s in good)
+
+        # Compute per-parameter variance across images (robust MAD-based)
+        param_vars = {}
+        # Map from get_param_from_x keys to CSV-compatible names for downstream
+        _key_map = {'scale': 'G', 'Bfactor': 'B',
+                     'rotX': 'rotX', 'rotY': 'rotY', 'rotZ': 'rotZ',
+                     'Na': 'Na', 'Nb': 'Nb', 'Nc': 'Nc',
+                     'a': 'uc_a', 'b': 'uc_b', 'c': 'uc_c',
+                     'al': 'uc_al', 'be': 'uc_be', 'ga': 'uc_ga'}
+        for src_key, dst_key in _key_map.items():
+            vals = []
+            for s in good:
+                pv = s.get('param_vals', {})
+                if src_key in pv and np.isfinite(pv[src_key]):
+                    vals.append(pv[src_key])
+            if len(vals) >= 2:
+                arr = np.array(vals)
+                med = np.median(arr)
+                mad = np.median(np.abs(arr - med))
+                param_vars[dst_key] = float((1.4826 * mad) ** 2)
+
+        # Cholesky components
+        for s in good:
+            pv = s.get('param_vals', {})
+            if 'cholesky' in pv:
+                chol = pv['cholesky']
+                chol_names = ['chol_L11', 'chol_L21', 'chol_L22',
+                              'chol_L31', 'chol_L32', 'chol_L33']
+                for i, cn in enumerate(chol_names):
+                    if cn not in param_vars:
+                        param_vars[cn] = 0.0
+                break  # Just check if any image has cholesky
+        # Now compute cholesky variances
+        for i, cn in enumerate(['chol_L11', 'chol_L21', 'chol_L22',
+                                 'chol_L31', 'chol_L32', 'chol_L33']):
+            vals = []
+            for s in good:
+                pv = s.get('param_vals', {})
+                if 'cholesky' in pv and len(pv['cholesky']) > i:
+                    v = pv['cholesky'][i]
+                    if np.isfinite(v):
+                        vals.append(v)
+            if len(vals) >= 2:
+                arr = np.array(vals)
+                med = np.median(arr)
+                mad = np.median(np.abs(arr - med))
+                param_vars[cn] = float((1.4826 * mad) ** 2)
+
+        aggregated.append((sigma_val, label, {
+            'sigZ_median': float(np.median(pooled_sigz)) if pooled_sigz else float('inf'),
+            'sigZ_mean': float(np.mean(pooled_sigz)) if pooled_sigz else float('inf'),
+            'spearman_r': float(np.median(pooled_spearman)) if pooled_spearman else float('nan'),
+            'n_rois': total_rois,
+            'n_outliers': total_outliers,
+            'param_vars': param_vars,
+            'converged': True,
+            'time_sec': max(s['time_sec'] for s in scores),
+            'error': None,
+        }))
+
+    return aggregated
+
+
 def _assign_gpus(trial_args, n_gpus, procs_per_gpu):
     """Assign GPU IDs to trial args using round-robin across GPUs.
 
     Each GPU can run procs_per_gpu concurrent trials. Total parallelism
     is n_gpus * procs_per_gpu.
 
-    Appends gpu_id to each trial tuple.
+    Replaces the gpu_id field (last element) in each trial tuple.
+    Tuple format: (phil_str, spec_line, use_cuda, sigma_val, label, gpu_id)
     """
     if n_gpus is None or n_gpus <= 0:
-        # No GPU assignment, append None
-        return [ta + (None,) for ta in trial_args]
+        return trial_args  # gpu_id already None from _flatten_trials
 
     result = []
     for i, ta in enumerate(trial_args):
         gpu_id = i % n_gpus
-        result.append(ta + (gpu_id,))
+        result.append(ta[:-1] + (gpu_id,))
     return result
 
 
 def _run_trials_batch(trial_args, n_parallel=1, mpi_comm=None):
     """Run a batch of trials with the best available parallelism.
 
+    trial_args: list of (phil_str, spec_line, use_cuda, sigma_val, label, gpu_id)
     Returns: list of (sigma_val, label, score_dict) in submission order.
     """
     if mpi_comm is not None and mpi_comm.Get_size() > 1:
@@ -789,22 +1004,19 @@ def _run_trials_batch(trial_args, n_parallel=1, mpi_comm=None):
         # Sequential
         results = []
         for i, ta in enumerate(trial_args):
-            label = ta[6]  # label is always index 6
-            print("  Trial %d/%d: %s ..." % (i + 1, len(trial_args), label),
-                  end='', flush=True)
-            sigma_val, label, score = _run_one_trial(ta)
+            label = ta[4]  # label is index 4 in new tuple
+            sigma_val, label, score = _run_one_image_trial(ta)
+            print("  %s:" % label, end='')
             _print_trial_result(score)
             results.append((sigma_val, label, score))
         return results
 
     # ThreadPoolExecutor parallel
-    print("  Running %d trials with %d parallel workers..." %
-          (len(trial_args), min(n_parallel, len(trial_args))))
     results = [None] * len(trial_args)
     with ThreadPoolExecutor(max_workers=n_parallel) as executor:
         future_to_idx = {}
         for idx, ta in enumerate(trial_args):
-            f = executor.submit(_run_one_trial, ta)
+            f = executor.submit(_run_one_image_trial, ta)
             future_to_idx[f] = idx
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
@@ -815,18 +1027,25 @@ def _run_trials_batch(trial_args, n_parallel=1, mpi_comm=None):
     return results
 
 
-def run_sigma_sweep(base_phil, stage, sigma_values, best_sigmas, sample_spec,
-                    tmpdir, use_cholesky=False, use_cuda=False, max_calls=50,
-                    timeout=300, n_parallel=1, n_gpus=None, procs_per_gpu=1,
-                    mpi_comm=None, num_devices=None, trials_per_worker=1):
-    """Sweep sigma values for one parameter and return results."""
-    # Densify sweep to fill available workers (x trials_per_worker)
-    n_workers = n_parallel - 1 if (mpi_comm is not None and mpi_comm.Get_size() > 1) else n_parallel
-    n_target = max(len(sigma_values), n_workers * trials_per_worker)
-    if n_target > len(sigma_values):
-        sigma_values = densify_sweep(sigma_values, n_target)
-        print("  Densified to %d sweep values (%d workers x %d trials/worker)" %
-              (len(sigma_values), n_workers, trials_per_worker))
+def run_sigma_sweep(base_phil, stage, sigma_values, best_sigmas, sample_lines,
+                    use_cholesky=False, use_cuda=False, max_calls=50,
+                    n_parallel=1, n_gpus=None, procs_per_gpu=1,
+                    mpi_comm=None, num_devices=None, densify=1):
+    """Sweep sigma values for one parameter and return results.
+
+    Runs in-process refinement for each (sigma, image) pair, then
+    aggregates per-image results into per-sigma scores.
+
+    sample_lines: list of spec file lines (one per image)
+    densify: integer multiplier for sweep resolution (1=base, 2=2x finer, etc.)
+    """
+    n_images = len(sample_lines)
+    # Densify sweep: interpolate between base values for finer resolution
+    n_target_sigmas = max(len(sigma_values), len(sigma_values) * densify)
+    if n_target_sigmas > len(sigma_values):
+        sigma_values = densify_sweep(sigma_values, n_target_sigmas)
+        print("  Densified %dx to %d sweep values (%d images/sigma, %d total work units)" %
+              (densify, len(sigma_values), n_images, len(sigma_values) * n_images))
     # Deduplicate values that would collide in trial naming
     seen = set()
     unique_vals = []
@@ -837,29 +1056,36 @@ def run_sigma_sweep(base_phil, stage, sigma_values, best_sigmas, sample_spec,
             unique_vals.append(v)
     sigma_values = unique_vals
 
-    # Build all trial configs
+    n_images = len(sample_lines)
+    print("  %d sigma values x %d images = %d work units" %
+          (len(sigma_values), n_images, len(sigma_values) * n_images))
+
+    # Build per-sigma trial configs (without spec_line)
     trial_args = []
     for sigma_val in sigma_values:
-        trial_name = 'stage_%s_sig%.4e' % (stage, sigma_val)
-        trial_outdir = os.path.join(tmpdir, trial_name)
-
         phil_str = generate_trial_phil(
-            base_phil, stage, sigma_val, best_sigmas, trial_outdir,
-            sample_spec, use_cholesky=use_cholesky, max_calls=max_calls,
+            base_phil, stage, sigma_val, best_sigmas,
+            use_cholesky=use_cholesky, max_calls=max_calls,
             num_devices=num_devices)
 
         label = 'sigmas.%s=%.2e' % (stage, sigma_val)
-        trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout,
-                           sigma_val, label))
+        trial_args.append((phil_str, use_cuda, sigma_val, label))
 
-    # Assign GPUs if applicable
-    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+    # Flatten to per-(sigma, image) work units
+    flat_trials = _flatten_trials(trial_args, sample_lines)
 
-    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+    # Assign GPUs
+    flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
+
+    # Run all
+    raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                      mpi_comm=mpi_comm)
 
+    # Aggregate per-image results back to per-sigma
+    agg_results = aggregate_image_results(raw_results, n_images)
+
     results = []
-    for sigma_val, label, score in raw_results:
+    for sigma_val, label, score in agg_results:
         results.append({'sigma': sigma_val, 'stage': stage, **score})
     results.sort(key=lambda r: r['sigma'])
 
@@ -867,8 +1093,8 @@ def run_sigma_sweep(base_phil, stage, sigma_values, best_sigmas, sample_spec,
 
 
 def run_GB_sigma_sweep(base_phil, sigma_G_values, sigma_B_values, best_sigmas,
-                       sample_spec, tmpdir, use_cholesky=False, use_cuda=False,
-                       max_calls=50, timeout=300, n_parallel=1, n_gpus=None,
+                       sample_lines, use_cholesky=False, use_cuda=False,
+                       max_calls=50, n_parallel=1, n_gpus=None,
                        procs_per_gpu=1, mpi_comm=None, num_devices=None):
     """Combinatorial G x B sigma sweep. Both G and B are free simultaneously.
 
@@ -876,6 +1102,7 @@ def run_GB_sigma_sweep(base_phil, sigma_G_values, sigma_B_values, best_sigmas,
     B alone, we sweep all (sigma_G, sigma_B) pairs so the relative step sizes
     between G and B actually matter. Total trials = len(G) * len(B).
 
+    sample_lines: list of spec file lines (one per image)
     Returns: list of dicts with 'sigma_G', 'sigma_B', 'sigZ_median', etc.
     """
     import itertools
@@ -883,31 +1110,39 @@ def run_GB_sigma_sweep(base_phil, sigma_G_values, sigma_B_values, best_sigmas,
     # Build grid of all (sigma_G, sigma_B) pairs
     grid = list(itertools.product(sigma_G_values, sigma_B_values))
 
+    n_images = len(sample_lines)
+    print("  %d G x B pairs x %d images = %d work units" %
+          (len(grid), n_images, len(grid) * n_images))
+
     trial_args = []
     for sigma_G, sigma_B in grid:
-        trial_name = 'stage_GB_sigG%.4e_sigB%.4e' % (sigma_G, sigma_B)
-        trial_outdir = os.path.join(tmpdir, trial_name)
-
         # Build phil: G+B stage fixes (both free, RotXYZ/Nabc/ucell fixed)
         phil_str = generate_trial_phil(
-            base_phil, 'G+B', sigma_G, best_sigmas, trial_outdir,
-            sample_spec, use_cholesky=use_cholesky, max_calls=max_calls,
+            base_phil, 'G+B', sigma_G, best_sigmas,
+            use_cholesky=use_cholesky, max_calls=max_calls,
             num_devices=num_devices)
         # Override sigma_B (generate_trial_phil set sigma_G via the sweep value)
         phil_str += 'sigmas {\n  B = %.6g\n}\n' % sigma_B
 
         label = 'G=%.2e,B=%.2e' % (sigma_G, sigma_B)
-        trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout,
-                           sigma_G, label))
+        trial_args.append((phil_str, use_cuda, sigma_G, label))
 
-    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+    # Flatten to per-(sigma_pair, image) work units
+    flat_trials = _flatten_trials(trial_args, sample_lines)
+    flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
 
-    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+    raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                      mpi_comm=mpi_comm)
 
+    # Aggregate per-image results back to per-sigma_pair
+    agg_results = aggregate_image_results(raw_results, n_images)
+
+    # Map back to grid indices by label
+    label_to_grid = {('G=%.2e,B=%.2e' % (g, b)): (g, b) for g, b in grid}
+
     results = []
-    for i, (sigma_val, label, score) in enumerate(raw_results):
-        sigma_G, sigma_B = grid[i]
+    for sigma_val, label, score in agg_results:
+        sigma_G, sigma_B = label_to_grid.get(label, (sigma_val, 0))
         results.append({
             'sigma_G': sigma_G,
             'sigma_B': sigma_B,
@@ -941,11 +1176,19 @@ def print_GB_summary(results):
 
 
 def _print_trial_result(score):
-    """Print a single trial's result."""
-    if score['converged'] and score['error'] is None:
+    """Print a single trial's result.
+
+    Handles both per-image keys (sigz_median, n_outlier_sigz) from
+    extract_image_score() and aggregate keys (sigZ_median, n_outliers)
+    from aggregate_image_results().
+    """
+    if score.get('converged', False) and score.get('error') is None:
+        sigz_med = score.get('sigZ_median', score.get('sigz_median', float('inf')))
+        sigz_mean = score.get('sigZ_mean', score.get('sigz_mean', float('inf')))
+        n_rois = score.get('n_rois', 0)
+        n_out = score.get('n_outliers', score.get('n_outlier_sigz', 0))
         print(" sigZ_med=%.3f sigZ_mean=%.3f n_rois=%d n_out=%d (%.1fs)" %
-              (score['sigZ_median'], score['sigZ_mean'], score['n_rois'],
-               score.get('n_outliers', 0), score['time_sec']))
+              (sigz_med, sigz_mean, n_rois, n_out, score['time_sec']))
     else:
         print(" FAILED: %s (%.1fs)" %
               (score.get('error', 'unknown')[:60], score['time_sec']))
@@ -957,11 +1200,8 @@ def run_trials_mpi(trial_args, comm):
     Rank 0 distributes trial_args to workers, collects results.
     Workers are persistent (they don't stop after this batch).
 
-    Uses BATCH_WORK_TAG for work items and BATCH_DONE_TAG for results.
-    Workers that get BATCH_IDLE_TAG wait for the next batch.
-
-    trial_args: list of tuples (phil_str, tmpdir, trial_name, use_cuda,
-                                timeout, sigma_val, label[, gpu_id])
+    trial_args: list of tuples (phil_str, spec_line, use_cuda,
+                                sigma_val, label, gpu_id)
     Returns: list of (sigma_val, label, score_dict) in original order
     """
     size = comm.Get_size()
@@ -971,7 +1211,7 @@ def run_trials_mpi(trial_args, comm):
         # No workers, run sequentially on rank 0
         results = []
         for ta in trial_args:
-            results.append(_run_one_trial(ta))
+            results.append(_run_one_image_trial(ta))
         return results
 
     results = [None] * len(trial_args)
@@ -987,7 +1227,8 @@ def run_trials_mpi(trial_args, comm):
 
     # Collect results and distribute remaining work
     n_done = 0
-    while n_done < len(trial_args):
+    n_total = len(trial_args)
+    while n_done < n_total:
         status = MPI.Status()
         msg = comm.recv(source=MPI.ANY_SOURCE, status=status)
         worker = status.Get_source()
@@ -1020,6 +1261,8 @@ def mpi_worker_loop(comm):
       ('work', idx, trial_tuple) -> execute and return result
       ('idle',) -> wait for next message
       ('shutdown',) -> exit
+
+    trial_tuple: (phil_str, spec_line, use_cuda, sigma_val, label, gpu_id)
     """
     while True:
         msg = comm.recv(source=0)
@@ -1028,7 +1271,7 @@ def mpi_worker_loop(comm):
             break
         elif cmd == 'work':
             _, idx, trial_tuple = msg
-            result = _run_one_trial(trial_tuple)
+            result = _run_one_image_trial(trial_tuple)
             comm.send(('done', idx, result), dest=0)
         elif cmd == 'idle':
             continue  # just loop back and wait
@@ -1096,7 +1339,7 @@ def find_best_sigma(results, return_result=False):
 
 def generate_deep_dive_trial_phil(base_phil, param_name, component_idx,
                                    sigma_value, component_sigmas, best_sigmas,
-                                   outdir, sample_spec, use_cholesky=False,
+                                   use_cholesky=False,
                                    max_calls=None, num_devices=None):
     """Generate a phil for a deep-dive trial where one component's sigma varies.
 
@@ -1106,9 +1349,8 @@ def generate_deep_dive_trial_phil(base_phil, param_name, component_idx,
     """
     lines = [base_phil, '\n# --- hopper_heatup deep-dive trial ---\n']
 
-    lines.append('exp_ref_spec_file = "%s"' % sample_spec)
-    lines.append('outdir = "%s"' % outdir)
-    lines.append('save_spot_diagnostics = True')
+    lines.append('save_spot_diagnostics = False')
+    lines.append('logging.rank0_level = low')
 
     if num_devices is not None:
         lines.append('refiner { num_devices = %d }' % num_devices)
@@ -1189,20 +1431,22 @@ def generate_deep_dive_trial_phil(base_phil, param_name, component_idx,
 
 
 def run_deep_dive_sweep(base_phil, param_name, n_components, comp_names,
-                         scalar_best, best_sigmas, sample_spec, tmpdir,
+                         scalar_best, best_sigmas, sample_lines,
                          multipliers, use_cholesky=False, use_cuda=False,
-                         max_calls=50, timeout=300, n_parallel=1,
+                         max_calls=50, n_parallel=1,
                          n_gpus=None, procs_per_gpu=1, mpi_comm=None,
-                         num_devices=None, trials_per_worker=1):
+                         num_devices=None, densify=1):
     """Coordinate-descent sweep of per-component sigmas for one parameter.
 
     Starts from scalar_best for all components, then sweeps each component
     individually while holding others at their current best.
 
+    sample_lines: list of spec file lines (one per image)
     Returns: list of per-component best sigmas
     """
     # Initialize all components to the scalar best
     component_sigmas = [scalar_best] * n_components
+    n_images = len(sample_lines)
 
     print("  Starting from uniform sigma = %.2e for all %d components" %
           (scalar_best, n_components))
@@ -1212,9 +1456,8 @@ def run_deep_dive_sweep(base_phil, param_name, n_components, comp_names,
         sweep_values = [max(0.01, min(100.0, scalar_best * m)) for m in multipliers]
         # Remove duplicates and sort
         sweep_values = sorted(set(sweep_values))
-        # Densify to fill workers (x trials_per_worker)
-        n_workers_avail = n_parallel - 1 if (mpi_comm is not None and mpi_comm.Get_size() > 1) else n_parallel
-        n_target = max(len(sweep_values), n_workers_avail * trials_per_worker)
+        # Densify: interpolate between base values for finer resolution
+        n_target = max(len(sweep_values), len(sweep_values) * densify)
         if n_target > len(sweep_values):
             sweep_values = densify_sweep(sweep_values, n_target)
         # Deduplicate values that would collide in trial naming (%.4e precision)
@@ -1228,32 +1471,32 @@ def run_deep_dive_sweep(base_phil, param_name, n_components, comp_names,
         sweep_values = unique_vals
 
         print("\n  --- Component %d/%d: %s ---" % (comp_idx + 1, n_components, comp_name))
-        print("  Sweep values (%d): %s" % (len(sweep_values), ', '.join(['%.2e' % v for v in sweep_values])))
+        print("  Sweep values (%d) x %d images:" % (len(sweep_values), n_images))
 
-        # Build all trial configs for this component
+        # Build per-sigma trial configs for this component
         trial_args = []
         for sigma_val in sweep_values:
-            trial_name = 'deep_%s_%s_sig%.4e' % (param_name, comp_name, sigma_val)
-            trial_outdir = os.path.join(tmpdir, trial_name)
-
             phil_str = generate_deep_dive_trial_phil(
                 base_phil, param_name, comp_idx, sigma_val,
-                component_sigmas, best_sigmas, trial_outdir,
-                sample_spec, use_cholesky=use_cholesky, max_calls=max_calls,
+                component_sigmas, best_sigmas,
+                use_cholesky=use_cholesky, max_calls=max_calls,
                 num_devices=num_devices)
 
             label = '%s=%.2e' % (comp_name, sigma_val)
-            trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout,
-                               sigma_val, label))
+            trial_args.append((phil_str, use_cuda, sigma_val, label))
 
-        # Assign GPUs
-        trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+        # Flatten to per-(sigma, image) work units
+        flat_trials = _flatten_trials(trial_args, sample_lines)
+        flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
 
-        raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+        raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                          mpi_comm=mpi_comm)
 
+        # Aggregate per-image results back to per-sigma
+        agg_results = aggregate_image_results(raw_results, n_images)
+
         results = []
-        for sigma_val, label, score in raw_results:
+        for sigma_val, label, score in agg_results:
             results.append({'sigma': sigma_val, 'component': comp_name, **score})
         results.sort(key=lambda r: r['sigma'])
 
@@ -1269,10 +1512,10 @@ def run_deep_dive_sweep(base_phil, param_name, n_components, comp_names,
     return component_sigmas
 
 
-def _run_deep_dive_for_param(dd_param, base_phil, best_sigmas, sample_spec, tmpdir,
-                              multipliers, use_cholesky, use_cuda, max_calls, timeout,
+def _run_deep_dive_for_param(dd_param, base_phil, best_sigmas, sample_lines,
+                              multipliers, use_cholesky, use_cuda, max_calls,
                               n_parallel, n_gpus=None, procs_per_gpu=1, mpi_comm=None,
-                              num_devices=None, trials_per_worker=1):
+                              num_devices=None, densify=1):
     """Run deep-dive for one parameter. Designed for parallel execution across params."""
     phil_key, n_comp, comp_names = DEEP_DIVE_PARAMS[dd_param]
 
@@ -1288,11 +1531,11 @@ def _run_deep_dive_for_param(dd_param, base_phil, best_sigmas, sample_spec, tmpd
 
     comp_sigmas = run_deep_dive_sweep(
         base_phil, dd_param, n_comp, comp_names,
-        scalar_best, best_sigmas, sample_spec, tmpdir,
+        scalar_best, best_sigmas, sample_lines,
         multipliers, use_cholesky=use_cholesky, use_cuda=use_cuda,
-        max_calls=max_calls, timeout=timeout, n_parallel=n_parallel,
+        max_calls=max_calls, n_parallel=n_parallel,
         n_gpus=n_gpus, procs_per_gpu=procs_per_gpu, mpi_comm=mpi_comm,
-        num_devices=num_devices, trials_per_worker=trials_per_worker)
+        num_devices=num_devices, densify=densify)
 
     print("\n  Final %s sigmas:" % dd_param)
     for name, sig in zip(comp_names, comp_sigmas):
@@ -1306,35 +1549,24 @@ def _run_deep_dive_for_param(dd_param, base_phil, best_sigmas, sample_spec, tmpd
     }
 
 
-def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
+def run_final_refinement(base_phil, best_sigmas, sample_lines,
                           use_cholesky=False, use_cuda=False, max_calls=500,
-                          timeout=600, n_parallel=1, n_gpus=None,
+                          n_parallel=1, n_gpus=None,
                           procs_per_gpu=1, mpi_comm=None, num_devices=None,
                           init_G=None, refine_ucell=False):
     """Run a final refinement with optimized sigmas, return median refined params.
 
-    Runs hopper with all parameters free and the tuned sigmas on the sample
-    frames. Parses the shot_summary CSVs (from save_spot_diagnostics) to
-    extract refined parameter values (G, B, Nabc) across frames and returns
-    their medians.
+    Runs in-process refinement on each sample image and extracts refined
+    parameter values directly from the result dicts.
 
-    Returns dict with keys: G, B, Nabc (tuple of 3), or None on failure.
+    sample_lines: list of spec file lines (one per image)
+    Returns dict with keys: G, B, Nabc (tuple of 3), var_G, etc., or None on failure.
     """
     import numpy as np
 
-    trial_name = 'final_refine'
-    trial_outdir = os.path.join(tmpdir, trial_name)
-
-    # Clean stale spot_diagnostics from previous runs to avoid column mismatches
-    diag_dir = os.path.join(trial_outdir, 'spot_diagnostics')
-    if os.path.isdir(diag_dir):
-        import shutil
-        shutil.rmtree(diag_dir)
-
     lines = [base_phil, '\n# --- Final refinement with optimized sigmas ---\n']
-    lines.append('exp_ref_spec_file = "%s"' % sample_spec)
-    lines.append('outdir = "%s"' % trial_outdir)
-    lines.append('save_spot_diagnostics = True')
+    lines.append('save_spot_diagnostics = False')
+    lines.append('logging.rank0_level = low')
 
     if num_devices is not None:
         lines.append('refiner { num_devices = %d }' % num_devices)
@@ -1379,84 +1611,74 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
 
     phil_str = '\n'.join(lines) + '\n'
 
-    # Run as a single trial
-    trial_args = [(phil_str, tmpdir, trial_name, use_cuda, timeout, None, 'final')]
-    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
+    n_images = len(sample_lines)
+    print("  Final refinement: %d images" % n_images)
 
-    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+    # Run one image per work unit (no sigma sweep — just one phil config)
+    trial_args = [(phil_str, use_cuda, None, 'final')]
+    flat_trials = _flatten_trials(trial_args, sample_lines)
+    flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
+
+    raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                      mpi_comm=mpi_comm)
 
-    if not raw_results:
-        print("  WARNING: Final refinement failed: no results")
-        return None
-    sigma_val, label, score = raw_results[0]
-    if score.get('error'):
-        print("  WARNING: Final refinement failed: %s" % score['error'])
-        return None
-    print("  Final refinement: sigZ_median=%.3f, n_rois=%d, time=%.1fs" %
-          (score['sigZ_median'], score['n_rois'], score['time_sec']))
+    # Filter successful results
+    good_scores = [score for _, _, score in raw_results
+                   if score.get('error') is None and score.get('converged', False)]
 
-    # Parse refined parameters from shot_summary CSVs
-    # (these are always written when save_spot_diagnostics=True, unlike pandas
-    # pickles which require debug_mode=True)
-    import pandas
-    summary_patterns = [
-        os.path.join(trial_outdir, 'spot_diagnostics', 'rank*', '*_shot_summary.csv'),
-        os.path.join(trial_outdir, 'spot_diagnostics', '*_shot_summary.csv'),
-    ]
-    summary_files = []
-    for pat in summary_patterns:
-        summary_files.extend(glob.glob(pat))
-
-    if not summary_files:
-        print("  WARNING: No shot_summary CSVs found in %s" % trial_outdir)
+    if not good_scores:
+        print("  WARNING: Final refinement failed: no successful images")
         return None
 
-    chol_col_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
-    rot_col_names = ["rotX", "rotY", "rotZ"]
-    ucell_col_names = ["uc_a", "uc_b", "uc_c", "uc_al", "uc_be", "uc_ga"]
+    # Aggregate: sigZ stats
+    agg_results = aggregate_image_results(raw_results, n_images)
+    if agg_results:
+        _, _, agg_score = agg_results[0]
+        print("  Final refinement: sigZ_median=%.3f, n_rois=%d, time=%.1fs" %
+              (agg_score['sigZ_median'], agg_score['n_rois'], agg_score['time_sec']))
 
-    # Collect per-frame rows with fit quality for weighting
-    frame_rows = []  # list of dicts, one per frame
-    for csv_path in summary_files:
-        try:
-            df = pandas.read_csv(csv_path)
-            for _, row in df.iterrows():
-                fr = {}
-                # Fit quality for weighting
-                sigz = row.get('sigz_median', np.nan)
-                nrois = row.get('n_rois', 0)
-                if np.isfinite(sigz) and sigz > 0 and nrois > 0:
-                    fr['weight'] = float(nrois) / float(sigz) ** 2
-                else:
-                    fr['weight'] = 0.0
-                # Parameters
-                for key in ('G', 'B'):
-                    v = row.get(key, np.nan)
-                    if np.isfinite(v):
-                        fr[key] = float(v)
-                for key in ('Na', 'Nb', 'Nc'):
-                    v = row.get(key, np.nan)
-                    if np.isfinite(v):
-                        fr[key] = float(v)
-                if all(np.isfinite(row.get(c, np.nan)) for c in chol_col_names):
-                    fr['chol'] = tuple(float(row[c]) for c in chol_col_names)
-                if all(np.isfinite(row.get(c, np.nan)) for c in rot_col_names):
-                    fr['rot'] = tuple(float(row[c]) for c in rot_col_names)
-                if all(np.isfinite(row.get(c, np.nan)) for c in ucell_col_names):
-                    fr['ucell'] = tuple(float(row[c]) for c in ucell_col_names)
-                frame_rows.append(fr)
-        except Exception as e:
-            print("  WARNING: Failed to read %s: %s" % (csv_path, e))
+    # Extract refined parameters from per-image param_vals dicts
+    # Weight by n_rois / sigz_median^2 (good fits count more)
+    frame_rows = []
+    for s in good_scores:
+        pv = s.get('param_vals', {})
+        if not pv:
             continue
+        sigz = s.get('sigz_median', np.nan)
+        nrois = s.get('n_rois', 0)
+        weight = float(nrois) / float(sigz) ** 2 if (np.isfinite(sigz) and sigz > 0 and nrois > 0) else 0.0
+        fr = {'weight': weight}
+        # Map from get_param_from_x keys to our internal keys
+        if 'scale' in pv and np.isfinite(pv['scale']):
+            fr['G'] = float(pv['scale'])
+        if 'Bfactor' in pv and np.isfinite(pv['Bfactor']):
+            fr['B'] = float(pv['Bfactor'])
+        for key in ('Na', 'Nb', 'Nc'):
+            if key in pv and np.isfinite(pv[key]):
+                fr[key] = float(pv[key])
+        if 'cholesky' in pv and len(pv['cholesky']) == 6:
+            if all(np.isfinite(v) for v in pv['cholesky']):
+                fr['chol'] = tuple(float(v) for v in pv['cholesky'])
+        for i, rkey in enumerate(['rotX', 'rotY', 'rotZ']):
+            if rkey in pv and np.isfinite(pv[rkey]):
+                fr.setdefault('rot_vals', [None, None, None])
+                fr['rot_vals'][i] = float(pv[rkey])
+        if 'rot_vals' in fr and all(v is not None for v in fr['rot_vals']):
+            fr['rot'] = tuple(fr['rot_vals'])
+            del fr['rot_vals']
+        elif 'rot_vals' in fr:
+            del fr['rot_vals']
+        uc_keys = ['a', 'b', 'c', 'al', 'be', 'ga']
+        uc_vals = [pv.get(k) for k in uc_keys]
+        if all(v is not None and np.isfinite(v) for v in uc_vals):
+            fr['ucell'] = tuple(float(v) for v in uc_vals)
+        frame_rows.append(fr)
+
+    if not frame_rows:
+        print("  WARNING: Could not extract refined parameters from results")
+        return None
 
     def _weighted_var(vals, weights, robust=True):
-        """Weighted variance, optionally robust to outliers.
-
-        If robust=True, removes outlier values (MAD-based, thresh=3.5)
-        before computing variance. This prevents runaway parameters
-        (e.g. auto_G blowup) from dominating the variance estimate.
-        """
         vals = np.array(vals, dtype=float)
         weights = np.array(weights, dtype=float)
         if len(vals) < 2 or weights.sum() == 0:
@@ -1476,7 +1698,6 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
         return float(np.average((vals - wmean) ** 2, weights=weights))
 
     def _weighted_median(vals, weights):
-        """Weighted median: value where cumulative weight crosses 50%."""
         vals = np.array(vals)
         weights = np.array(weights)
         if weights.sum() == 0:
@@ -1487,7 +1708,6 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
         idx = np.searchsorted(cumw, cumw[-1] * 0.5)
         return float(vals[min(idx, len(vals) - 1)])
 
-    # Extract arrays with weights
     def _extract(key):
         vals = [fr[key] for fr in frame_rows if key in fr]
         wts = [fr['weight'] for fr in frame_rows if key in fr]
@@ -1508,7 +1728,6 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
         if len(b_vals) >= 2:
             refined_params['var_B'] = _weighted_var(b_vals, b_wts)
 
-    # Nabc: need all 3 present per frame
     nabc_frames = [(fr, fr['weight']) for fr in frame_rows
                    if all(k in fr for k in ('Na', 'Nb', 'Nc'))]
     if nabc_frames:
@@ -1549,7 +1768,6 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
                 _weighted_var(ucell_vals[:, i], ucell_wts) for i in range(6))
 
     if refined_params:
-        # Show weight distribution
         all_wts = [fr['weight'] for fr in frame_rows]
         n_nonzero = sum(1 for w in all_wts if w > 0)
         print("  Refined parameters from %d frames (%d with nonzero weight):" %
@@ -1585,7 +1803,7 @@ def run_final_refinement(base_phil, best_sigmas, sample_spec, tmpdir,
                 print("      var(ucell) = (%s)" %
                       ', '.join('%.4g' % v for v in refined_params['var_ucell']))
     else:
-        print("  WARNING: Could not extract refined parameters from shot_summary CSVs")
+        print("  WARNING: Could not extract refined parameters from results")
         return None
 
     return refined_params
@@ -1596,6 +1814,7 @@ def build_tuning_base_phil(base_phil, best_sigmas, init_G, refined_params,
     """Build a phil string for the tuning phase: all params free, best sigmas set,
     refined init values set, centers set from refined params."""
     lines = [base_phil, '\n# --- Tuning phase base phil ---\n']
+    lines.append('logging.rank0_level = low')
 
     # Init values from final refinement
     if refined_params and 'G' in refined_params:
@@ -1730,6 +1949,7 @@ def build_model_sweep_phil(base_phil, best_sigmas, init_G=None,
     No centers/betas — just best sigmas and all params free.
     Used before deep-dive to find the right model settings."""
     lines = [base_phil, '\n# --- Model parameter sweep ---\n']
+    lines.append('logging.rank0_level = low')
 
     if init_G is not None:
         lines.append('init.G = %.6e' % init_G)
@@ -1941,7 +2161,7 @@ def _adaptive_beta_search_DISABLED(tune_name, tuning_base, sample_spec, spec_pat
                           use_cuda=False, timeout=1800, n_parallel=1,
                           n_gpus=None, procs_per_gpu=1,
                           mpi_comm=None, num_devices=None,
-                          trials_per_worker=1):
+                          densify=1):
     """Adaptive bracketing search for optimal beta (restraint variance).
 
     Instead of sweeping a predefined range, starts at beta=baseline_variance
@@ -2012,7 +2232,7 @@ def _adaptive_beta_search_DISABLED(tune_name, tuning_base, sample_spec, spec_pat
                 timeout=timeout, n_parallel=n_parallel,
                 n_gpus=n_gpus, procs_per_gpu=procs_per_gpu,
                 mpi_comm=mpi_comm, num_devices=num_devices,
-                trials_per_worker=1)
+                densify=1)
             if not results or not results[0].get('converged') or results[0].get('error'):
                 return None, results
             spread = compute_spread_ratio(
@@ -2097,7 +2317,7 @@ def _adaptive_beta_search_DISABLED(tune_name, tuning_base, sample_spec, spec_pat
                     timeout=timeout, n_parallel=n_parallel,
                     n_gpus=n_gpus, procs_per_gpu=procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=num_devices,
-                    trials_per_worker=1)
+                    densify=1)
                 if baseline_results and baseline_results[0].get('param_vars'):
                     current_baseline_vars = baseline_results[0]['param_vars']
                     bl = baseline_results[0]
@@ -2244,49 +2464,39 @@ def write_restraint_level_phils(base_phil, best_sigmas, init_G, output_dir,
 
 
 def run_tuning_sweep(tuning_base_phil, param_name, phil_path, sweep_values,
-                      sample_spec, tmpdir, use_cuda=False, timeout=1800,
+                      sample_lines, use_cuda=False,
                       n_parallel=1, n_gpus=None, procs_per_gpu=1,
-                      mpi_comm=None, num_devices=None, trials_per_worker=1):
+                      mpi_comm=None, num_devices=None, densify=1):
     """Sweep a single phil parameter (betas, phisteps, sigma_r) and score by sigZ.
 
     Unlike sigma sweeps, the base phil already has all sigmas/fixes/inits set.
     We just override one parameter at a time.
 
+    sample_lines: list of spec file lines (one per image)
+    densify: integer multiplier for sweep resolution (1=base, 2=2x finer, etc.)
     Returns: list of dicts with 'value', 'sigZ_median', 'sigZ_mean', etc.
     """
     import numpy as np
 
     is_int_param = param_name == 'phisteps'
+    n_images = len(sample_lines)
+    n_target = max(len(sweep_values), len(sweep_values) * densify)
 
-    n_workers = n_parallel - 1 if (mpi_comm is not None and mpi_comm.Get_size() > 1) else n_parallel
-    n_target = max(len(sweep_values), n_workers * trials_per_worker)
-
-    if is_int_param and param_name == 'phisteps' and n_workers > 1:
-        # Cost-weighted phisteps generation: iteration time scales with phisteps,
-        # so generate more values at the low (cheap) end. With dynamic MPI dispatch,
-        # workers that finish cheap trials fast will grab more work automatically.
+    if is_int_param and param_name == 'phisteps' and n_target > len(sweep_values):
         lo, hi = min(sweep_values), max(sweep_values)
-        # Generate enough values to keep all workers busy: aim for total compute
-        # cost ~n_workers * median_cost. Since cost ~ phisteps, generate more
-        # low-phisteps values. geomspace naturally weights toward low end.
-        n_vals = max(n_target, n_workers * 2)
-        raw = np.geomspace(max(1, lo), hi, n_vals)
+        raw = np.geomspace(max(1, lo), hi, n_target)
         generated = sorted(set(int(round(v)) for v in raw))
-        # Ensure original sweep values are included
         generated = sorted(set(generated) | set(int(v) for v in sweep_values))
         if len(generated) > len(sweep_values):
             sweep_values = generated
-            print("  Generated %d phisteps values (geomspace, cost-weighted for %d workers)"
-                  % (len(sweep_values), n_workers))
+            print("  Densified %dx to %d phisteps values (geomspace)"
+                  % (densify, len(sweep_values)))
             print("  Values: %s" % ', '.join(str(v) for v in sweep_values))
     elif not is_int_param and n_target > len(sweep_values) and len(sweep_values) >= 2:
-        # Densify continuous params (betas, sigma_r)
-        # Use sweep range for clamp bounds (betas can be very small like 1e-6)
         clamp_min = min(sweep_values) * 0.5
         clamp_max = max(sweep_values) * 2.0
         sweep_values = densify_sweep(sweep_values, n_target,
                                       clamp_min=clamp_min, clamp_max=clamp_max)
-        # Dedup by trial name precision to avoid MPI collisions
         seen = set()
         unique_vals = []
         for v in sweep_values:
@@ -2295,38 +2505,34 @@ def run_tuning_sweep(tuning_base_phil, param_name, phil_path, sweep_values,
                 seen.add(key)
                 unique_vals.append(v)
         sweep_values = unique_vals
-        print("  Densified to %d sweep values" % len(sweep_values))
+        print("  Densified %dx to %d sweep values" % (densify, len(sweep_values)))
+
+    n_images = len(sample_lines)
+    print("  %d sweep values x %d images = %d work units" %
+          (len(sweep_values), n_images, len(sweep_values) * n_images))
 
     trial_args = []
     for val in sweep_values:
         if is_int_param:
             val = int(val)
-        trial_name = 'tune_%s_%s' % (param_name.replace('.', '_'),
-                                       str(int(val)) if is_int_param else '%.4e' % val)
-        trial_outdir = os.path.join(tmpdir, trial_name)
 
         # Build phil: base + override the swept parameter
         phil_lines = [tuning_base_phil]
-        phil_lines.append('exp_ref_spec_file = "%s"' % sample_spec)
-        phil_lines.append('outdir = "%s"' % trial_outdir)
-        phil_lines.append('save_spot_diagnostics = True')
+        phil_lines.append('save_spot_diagnostics = False')
         if num_devices is not None:
             phil_lines.append('refiner { num_devices = %d }' % num_devices)
 
         # Set the parameter being swept
-        # Handle nested phil paths (e.g. 'betas.G' -> 'betas {\n  G = val\n}')
         parts = phil_path.split('.')
         if len(parts) == 1:
             phil_lines.append('%s = %s' % (phil_path, val))
         elif len(parts) == 2:
-            # For betas.Nabc, betas.cholesky which need array syntax
             if parts[1] in ('Nabc',):
                 phil_lines.append('%s {\n  %s = %.6g,%.6g,%.6g\n}' % (parts[0], parts[1], val, val, val))
             elif parts[1] in ('cholesky',):
                 phil_lines.append('%s {\n  %s = %.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n}' %
                                   (parts[0], parts[1], val, val, val, val, val, val))
             elif parts[1] == 'ucell':
-                # ucell betas are individual phil params (ucell_a, ucell_b, etc.)
                 phil_lines.append('%s {\n'
                     '  ucell_a = %.6g\n  ucell_b = %.6g\n  ucell_c = %.6g\n'
                     '  ucell_alpha = %.6g\n  ucell_beta = %.6g\n  ucell_gamma = %.6g\n'
@@ -2338,15 +2544,20 @@ def run_tuning_sweep(tuning_base_phil, param_name, phil_path, sweep_values,
 
         phil_str = '\n'.join(phil_lines) + '\n'
         label = '%s=%.3g' % (param_name, val)
-        trial_args.append((phil_str, tmpdir, trial_name, use_cuda, timeout, val, label))
+        trial_args.append((phil_str, use_cuda, val, label))
 
-    trial_args = _assign_gpus(trial_args, n_gpus, procs_per_gpu)
-    raw_results = _run_trials_batch(trial_args, n_parallel=n_parallel,
+    # Flatten to per-(value, image) work units
+    flat_trials = _flatten_trials(trial_args, sample_lines)
+    flat_trials = _assign_gpus(flat_trials, n_gpus, procs_per_gpu)
+    raw_results = _run_trials_batch(flat_trials, n_parallel=n_parallel,
                                      mpi_comm=mpi_comm)
+
+    # Aggregate per-image results back to per-value
+    agg_results = aggregate_image_results(raw_results, n_images)
 
     # Collect results
     results = []
-    for sigma_val, label, score in raw_results:
+    for sigma_val, label, score in agg_results:
         results.append({
             'value': sigma_val,
             'label': label,
@@ -2580,10 +2791,13 @@ Examples:
                              "(written alongside the optimized phil). Jump straight "
                              "to Phase 2 restraint tuning. Requires --tune-restraints.")
 
-    parser.add_argument("--trials-per-worker", type=int, default=1,
-                        help="Sigma trials per worker per sweep (default: 1). "
-                             "Total sweep points = n_workers * trials_per_worker. "
-                             "E.g. 12 workers x 3 = 36 sigma values.")
+    parser.add_argument("--trials-per-worker", type=int, default=None,
+                        help="DEPRECATED: use --densify instead.")
+    parser.add_argument("--densify", type=int, default=1,
+                        help="Sweep density multiplier (default: 1). "
+                             "Interpolates between base sweep values for finer "
+                             "resolution. E.g. --densify 3 gives 3x more sweep "
+                             "points. --densify 5 gives 5x finer grid.")
 
     # Custom sigma sweep values
     parser.add_argument("--sigmas-G", default=None,
@@ -2673,6 +2887,11 @@ Examples:
     args = parser.parse_args()
     if args.no_tune_model:
         args.tune_model = False
+
+    # Backward compat: --trials-per-worker is deprecated
+    if args.trials_per_worker is not None:
+        print("WARNING: --trials-per-worker is deprecated, use --densify instead. Ignoring.")
+        args.trials_per_worker = None
 
     # Handle MPI (before logging — workers exit here)
     mpi_comm = None
@@ -2883,8 +3102,8 @@ Examples:
         print("PHASE 0: G ESTIMATION (parallel search across orders of magnitude)")
         print("=" * 60)
         G_est = estimate_G_parallel(
-            base_phil, sample_spec, tmpdir, use_cuda=args.cuda,
-            timeout=args.timeout, n_parallel=args.n_parallel,
+            base_phil, sample_lines, use_cuda=args.cuda,
+            n_parallel=args.n_parallel,
             n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
             mpi_comm=mpi_comm, num_devices=trial_num_devices)
         if G_est is not None and G_est > 0:
@@ -2895,7 +3114,7 @@ Examples:
     # --- Sigma sweep stages ---
     # Helper to run one ordering of stages
     def run_sweep_ordering(stage_order, sigma_sweeps, base_phil, best_sigmas_init,
-                           label="", trials_per_worker=1):
+                           label="", densify=1):
         """Run a complete sweep through stages in the given order.
         Returns (best_sigmas, all_results, final_sigZ).
         """
@@ -2945,9 +3164,9 @@ Examples:
 
                 results = run_GB_sigma_sweep(
                     base_phil, sigma_G_vals, sigma_B_vals, cur_sigmas,
-                    sample_spec, tmpdir, use_cholesky=use_cholesky,
+                    sample_lines, use_cholesky=use_cholesky,
                     use_cuda=args.cuda, max_calls=args.max_calls,
-                    timeout=args.timeout, n_parallel=args.n_parallel,
+                    n_parallel=args.n_parallel,
                     n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=trial_num_devices)
 
@@ -2989,13 +3208,13 @@ Examples:
             print()
 
             results = run_sigma_sweep(
-                base_phil, stage, sweep_values, cur_sigmas, sample_spec,
-                tmpdir, use_cholesky=use_cholesky, use_cuda=args.cuda,
-                max_calls=args.max_calls, timeout=args.timeout,
+                base_phil, stage, sweep_values, cur_sigmas, sample_lines,
+                use_cholesky=use_cholesky, use_cuda=args.cuda,
+                max_calls=args.max_calls,
                 n_parallel=args.n_parallel, n_gpus=args.n_gpus,
                 procs_per_gpu=args.procs_per_gpu, mpi_comm=mpi_comm,
                 num_devices=trial_num_devices,
-                trials_per_worker=trials_per_worker)
+                densify=densify)
 
             cur_results[stage] = results
             print_stage_summary(stage, results)
@@ -3052,7 +3271,7 @@ Examples:
             # Original behavior: single ordering
             best_sigmas, all_results, _ = run_sweep_ordering(
                 stages, sigma_sweeps, base_phil, best_sigmas, label="",
-                trials_per_worker=args.trials_per_worker)
+                densify=args.densify)
         else:
             # Multiple shuffled orderings
             best_overall_sigmas = None
@@ -3074,7 +3293,7 @@ Examples:
 
                 shuf_sigmas, shuf_results, shuf_sigZ = run_sweep_ordering(
                     ordering, sigma_sweeps, base_phil, {}, label=label,
-                    trials_per_worker=args.trials_per_worker)
+                    densify=args.densify)
 
                 print("\n  Shuffle %d result: sigZ_median = %.3f  sigmas = %s" %
                       (shuffle_i + 1, shuf_sigZ, shuf_sigmas))
@@ -3093,19 +3312,16 @@ Examples:
             best_sigmas = best_overall_sigmas
             all_results = best_overall_results
 
-    # --- Prepare tune_sample_spec (more frames for model + beta tuning) ---
-    tune_sample_spec = sample_spec
+    # --- Prepare tune_sample_lines (more frames for model + beta tuning) ---
+    tune_sample_lines = sample_lines
     if not args.skip_to_tuning:
         tune_n_frames = args.tune_n_frames or args.n_frames
         if args.tune_n_frames and args.tune_n_frames > args.n_frames:
             print("\n  Resampling for tuning phases: %d phi positions "
                   "(vs %d for sigma sweeps)" % (tune_n_frames, args.n_frames))
-            tune_lines = sample_frames(spec_path, tune_n_frames,
-                                        n_nearby=args.n_nearby)
-            tune_dir = os.path.join(tmpdir, 'tune_sample')
-            os.makedirs(tune_dir, exist_ok=True)
-            tune_sample_spec = write_sample_spec(tune_lines, tune_dir)
-            total_frames = len(tune_lines)
+            tune_sample_lines = sample_frames(spec_path, tune_n_frames,
+                                               n_nearby=args.n_nearby)
+            total_frames = len(tune_sample_lines)
             print("  Tune sample: %d frames (%d positions x %d nearby)"
                   % (total_frames, tune_n_frames, 2 * args.n_nearby + 1))
 
@@ -3135,24 +3351,26 @@ Examples:
 
             results = run_tuning_sweep(
                 model_base, model_param, phil_path, sweep_vals,
-                tune_sample_spec, tmpdir, use_cuda=args.cuda,
-                timeout=args.timeout, n_parallel=args.n_parallel,
+                tune_sample_lines, use_cuda=args.cuda,
+                n_parallel=args.n_parallel,
                 n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                 mpi_comm=mpi_comm, num_devices=trial_num_devices,
-                trials_per_worker=args.trials_per_worker)
+                densify=args.densify)
 
             # Print and find best
-            # sigma_r: use Spearman R (sigma_r-independent model-data agreement)
-            # phisteps: use sigZ (better angular sampling → better fit)
-            # Fall back to sigZ if Spearman data not available (needs rebuilt hopper_utils)
+            # Both phisteps and sigma_r use Spearman R (model-data shape agreement)
+            # sigZ is unreliable for model params: phisteps landscape is often flat
+            # in sigZ (especially small delta_phi), and sigma_r directly scales sigZ.
+            # Fall back to sigZ if Spearman data not available.
             has_spearman = any(np.isfinite(r.get('spearman_r', float('nan')))
                                for r in results if r['converged'] and r['error'] is None)
-            use_spearman = (model_param == 'sigma_r') and has_spearman
-            if model_param == 'sigma_r' and not has_spearman:
+            use_spearman = has_spearman
+            if not has_spearman:
                 print("  WARNING: Spearman R not available (rebuild hopper_utils?)")
-                print("  Falling back to sigZ scoring for sigma_r")
+                print("  Falling back to sigZ scoring for %s" % model_param)
             if use_spearman:
-                print("  Scoring: Spearman rank correlation (sigma_r-independent)")
+                cost_note = " + cost tiebreaker" if model_param == 'phisteps' else ""
+                print("  Scoring: Spearman rank correlation%s" % cost_note)
                 print("\n  %-12s  %10s  %10s  %8s  %6s  %5s  %5s  %s" %
                       ('value', 'sigZ_med', 'sigZ_mean', 'spR_med', 'n_roi', 'n_out', 'time', 'status'))
                 print("  " + "-" * 78)
@@ -3163,7 +3381,16 @@ Examples:
             valid_results = [r for r in results
                              if r['converged'] and r['error'] is None
                              and r['sigZ_median'] < 1e6]
-            scorer = _score_trial_spearman if use_spearman else _score_trial
+            base_scorer = _score_trial_spearman if use_spearman else _score_trial
+            if model_param == 'phisteps':
+                # For phisteps, prefer speed when scores are similar:
+                # add a tiny cost penalty proportional to value so that
+                # when Spearman R is flat, the cheapest option wins.
+                max_val = max(r['value'] for r in valid_results) if valid_results else 1
+                def scorer(r, _base=base_scorer, _max=max_val):
+                    return _base(r) + 1e-6 * r['value'] / _max
+            else:
+                scorer = base_scorer
             best_r = min(valid_results, key=scorer) if valid_results else None
             best_val = best_r['value'] if best_r else None
             for r in results:
@@ -3213,7 +3440,7 @@ Examples:
             old_sigmas = dict(best_sigmas)
             best_sigmas, all_results, _ = run_sweep_ordering(
                 stages, sigma_sweeps, base_phil, {}, label="[re-sweep] ",
-                trials_per_worker=args.trials_per_worker)
+                densify=args.densify)
 
             # Report changes
             print("\n  Sigma changes after model tuning:")
@@ -3285,12 +3512,12 @@ Examples:
                 dd_max = args.deep_dive_max_calls
                 for dd_param in valid_dd_params:
                     dd_param, dd_data = _run_deep_dive_for_param(
-                        dd_param, base_phil, dict(best_sigmas), sample_spec,
-                        tmpdir, multipliers, use_cholesky, args.cuda,
-                        dd_max, args.timeout, args.n_parallel,
+                        dd_param, base_phil, dict(best_sigmas), sample_lines,
+                        multipliers, use_cholesky, args.cuda,
+                        dd_max, args.n_parallel,
                         args.n_gpus, args.procs_per_gpu, mpi_comm,
                         trial_num_devices,
-                        trials_per_worker=args.trials_per_worker)
+                        densify=args.densify)
                     deep_dive_results[dd_param] = dd_data
                     best_sigmas[dd_param] = dd_data['comp_sigmas']
             else:
@@ -3301,11 +3528,11 @@ Examples:
                     for dd_param in valid_dd_params:
                         f = executor.submit(
                             _run_deep_dive_for_param, dd_param, base_phil,
-                            dict(best_sigmas), sample_spec, tmpdir, multipliers,
-                            use_cholesky, args.cuda, dd_max, args.timeout,
+                            dict(best_sigmas), sample_lines, multipliers,
+                            use_cholesky, args.cuda, dd_max,
                             args.n_parallel, args.n_gpus, args.procs_per_gpu,
                             None, trial_num_devices,
-                            args.trials_per_worker)
+                            args.densify)
                         futures[f] = dd_param
 
                     for future in as_completed(futures):
@@ -3317,11 +3544,11 @@ Examples:
             dd_max = args.deep_dive_max_calls
             for dd_param in valid_dd_params:
                 dd_param, dd_data = _run_deep_dive_for_param(
-                    dd_param, base_phil, best_sigmas, sample_spec, tmpdir,
+                    dd_param, base_phil, best_sigmas, sample_lines,
                     multipliers, use_cholesky, args.cuda, dd_max,
-                    args.timeout, args.n_parallel, args.n_gpus,
+                    args.n_parallel, args.n_gpus,
                     args.procs_per_gpu, mpi_comm, trial_num_devices,
-                    trials_per_worker=args.trials_per_worker)
+                    densify=args.densify)
                 deep_dive_results[dd_param] = dd_data
                 best_sigmas[dd_param] = dd_data['comp_sigmas']
 
@@ -3336,9 +3563,9 @@ Examples:
         print("  Purpose: extract refined G, B, Nabc for init values in optimized phil")
 
         refined_params = run_final_refinement(
-            base_phil, best_sigmas, sample_spec, tmpdir,
+            base_phil, best_sigmas, sample_lines,
             use_cholesky=use_cholesky, use_cuda=args.cuda,
-            max_calls=args.final_refine_max_calls, timeout=args.timeout * 2,
+            max_calls=args.final_refine_max_calls,
             n_parallel=args.n_parallel, n_gpus=args.n_gpus,
             procs_per_gpu=args.procs_per_gpu, mpi_comm=mpi_comm,
             num_devices=trial_num_devices, init_G=init_G,
@@ -3435,7 +3662,7 @@ Examples:
 
             has_beta_params = any(n.startswith('betas.') for n in tune_param_names)
 
-            # tune_sample_spec already set up before model tuning
+            # tune_sample_lines already set up before model tuning
 
             # Run unrestrained baseline trial to establish spread denominator
             # This gives apples-to-apples comparison (same frames, ROI fraction, max_calls)
@@ -3445,11 +3672,11 @@ Examples:
                 baseline_phil = tuning_base + '\nuse_restraints = False\n'
                 baseline_results = run_tuning_sweep(
                     baseline_phil, 'baseline', 'betas.G', [1.0],
-                    tune_sample_spec, tmpdir, use_cuda=args.cuda,
-                    timeout=args.timeout, n_parallel=args.n_parallel,
+                    tune_sample_lines, use_cuda=args.cuda,
+                    n_parallel=args.n_parallel,
                     n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=trial_num_devices,
-                    trials_per_worker=1)
+                    densify=1)
                 if baseline_results and baseline_results[0].get('param_vars'):
                     baseline_vars = baseline_results[0]['param_vars']
                     bl = baseline_results[0]
@@ -3496,16 +3723,16 @@ Examples:
                 print("\n  --- %s ---" % tune_name)
                 print("  Sweep values: %s" % ', '.join(['%.3g' % v for v in sweep_vals]))
 
-                # Beta sweeps and sigma_r use tune_sample_spec (more frames
-                # for stable variance / sigma_r estimates); phisteps uses sample_spec
-                sweep_spec = tune_sample_spec if (is_beta or tune_name == 'sigma_r') else sample_spec
+                # Beta sweeps and sigma_r use tune_sample_lines (more frames
+                # for stable variance / sigma_r estimates); phisteps uses sample_lines
+                sweep_lines = tune_sample_lines if (is_beta or tune_name == 'sigma_r') else sample_lines
                 results = run_tuning_sweep(
                     tuning_base, tune_name, phil_path, sweep_vals,
-                    sweep_spec, tmpdir, use_cuda=args.cuda,
-                    timeout=args.timeout, n_parallel=args.n_parallel,
+                    sweep_lines, use_cuda=args.cuda,
+                    n_parallel=args.n_parallel,
                     n_gpus=args.n_gpus, procs_per_gpu=args.procs_per_gpu,
                     mpi_comm=mpi_comm, num_devices=trial_num_devices,
-                    trials_per_worker=args.trials_per_worker)
+                    densify=args.densify)
 
                 if is_beta:
                     # --- Spread-ratio scoring for beta params ---

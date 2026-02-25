@@ -127,6 +127,11 @@ class Script:
                     best_models = pandas.concat([pandas.read_pickle(f) for f in best_pickles])
                     best_models.reset_index(inplace=True, drop=True)
 
+            if self.params.geometry.optimize:
+                self.params.dump_gathers = True
+                if self.params.gathers_dir is None:
+                    self.params.gathers_dir = os.path.join(self.params.outdir, "gathers")
+
             if self.params.dump_gathers:
                 if self.params.gathers_dir is None:
                     raise ValueError("Need to provide a file dir path in order to dump_gathers")
@@ -405,15 +410,33 @@ class Script:
             if dbg and COMM.rank > 0 and self.params.debug_mode_rank0_only:
                 dbg = False
             save_refl = dbg or self.params.save_perRoiScale
-            save_expt = dbg or self.params.save_perRoiScale
+            save_expt = dbg or self.params.save_perRoiScale or self.params.geometry.optimize
             shot_df = Modeler.save_up(x, SIM, rank=COMM.rank, i_shot=i_shot,
                             save_fhkl_data=dbg, save_refl=save_refl, save_modeler_file=dbg,
                             save_sim_info=dbg, save_pandas=dbg, save_traces=dbg, save_expt=save_expt,
                             checker=CHECKER)
-            #shot_df = shot_out["df"]
-            #shot_expt = shot_out["expt"]
-            #shot_refl = shot_out["refl"]
-            
+
+            # Dump post-refinement gathered refls for geometry refinement
+            if self.params.geometry.optimize:
+                geom_gathers_dir = os.path.join(self.params.outdir, "geom_gathers")
+                utils.safe_makedirs(geom_gathers_dir)
+                geom_output_name = os.path.splitext(os.path.basename(exp))[0] + "_geomData.refl"
+                geom_output_name = os.path.join(geom_gathers_dir, geom_output_name)
+
+                per_roi_scales = None
+                if hasattr(Modeler, 'P') and (not self.params.fix.perRoiScale or self.params.use_perRoiScale):
+                    per_roi_scales = {}
+                    for roi_id in range(len(Modeler.rois)):
+                        pname = "scale_roi%d" % roi_id
+                        if pname in Modeler.P:
+                            p = Modeler.P[pname]
+                            per_roi_scales[roi_id] = p.get_val(x[p.xpos])
+
+                Modeler.dump_gathered_to_refl(geom_output_name, per_roi_scales=per_roi_scales)
+                shot_df["geom_ref"] = os.path.abspath(geom_output_name)
+                shot_df["geom_exp"] = shot_df["opt_exp_name"]
+                shot_df["geom_exp_idx"] = 0
+
             #if self.params.predictions.integrate_phil is not None:
             do_integrate = self.params.predictions.integrate_phil is not None
             Rstrong = None
@@ -706,6 +729,58 @@ class Script:
 
         save_composite_files(this_rank_dfs, this_rank_Elints, this_rank_Ridxs, this_rank_Rints,
                              pd_dir, expt_ref_dir, chunk_id)
+
+        # Phase 2: geometry refinement on the pool of shots
+        if self.params.geometry.optimize:
+            COMM.barrier()
+            if COMM.rank == 0:
+                MAIN_LOGGER.info("Starting geometry refinement on %d ranks" % COMM.size)
+
+            # Point geometry input at the pickles we just wrote
+            pkl_glob = os.path.join(pd_dir, "hopper_results_rank*_chunk*.pkl")
+            self.params.geometry.input_pkl_glob = pkl_glob
+            self.params.geometry.input_pkl = None
+
+            # Load data from the gathered refls (exact same data/bg/masks as hopper)
+            self.params.refiner.load_data_from_refl = True
+
+            # Fix ALL crystal params except RotXYZ — geometry refinement moves detector + crystal orientation
+            self.params.fix.G = True
+            self.params.fix.Nabc = True
+            self.params.fix.Ndef = True
+            self.params.fix.RotXYZ = [0, 0, 0]  # REFINE crystal orientation during geometry optimization
+            self.params.fix.ucell = True
+            self.params.fix.eta_abc = True
+            self.params.fix.perRoiScale = True  # carry over from hopper, don't re-fit
+
+            # Enable restraints for geometry refinement if specified
+            if self.params.geometry.use_restraints:
+                self.params.use_restraints = True
+
+            from simtbx.diffBragg.refiners.geometry import geom_min
+            geom_min(self.params)
+
+            if COMM.rank == 0:
+                det_name = self.params.geometry.optimized_detector_name
+                MAIN_LOGGER.info("Geometry refinement complete. Optimized detector: %s" % det_name)
+                from dxtbx.model import ExperimentList as EL_read
+                opt_el = EL_read.from_file(det_name, check_format=False)
+                opt_det = opt_el[0].detector
+                for ipan in range(len(opt_det)):
+                    pan = opt_det[ipan]
+                    orig = pan.get_origin()
+                    MAIN_LOGGER.info("  Panel %d origin: (%.4f, %.4f, %.4f) mm" % (ipan, orig[0], orig[1], orig[2]))
+
+            # Broadcast optimized detector path to all ranks
+            det_name = COMM.bcast(det_name if COMM.rank == 0 else None)
+
+            # For macro-cycles: update reference geometry for next cycle
+            if hasattr(self.params.geometry, 'macro_cycles') and self.params.geometry.macro_cycles > 1:
+                # Set the optimized detector as reference for future refinements
+                self.params.refiner.reference_geom = det_name
+                if COMM.rank == 0:
+                    MAIN_LOGGER.info("Updated reference geometry to: %s for potential next macro-cycle" % det_name)
+                    MAIN_LOGGER.info("To use in next hopper run, add: refiner.reference_geom=%s" % det_name)
 
 
 def save_composite_files(dfs, expts, refls, refls_int, pd_dir, exp_ref_dir, chunk=0):

@@ -1381,6 +1381,15 @@ geometry {
   optimize = False
     .type = bool
     .help = flag to specify whether to optimize the geometry
+  use_restraints = False
+    .type = bool
+    .help = flag to enable restraints during geometry refinement (overrides global use_restraints)
+  macro_cycles = 1
+    .type = int
+    .help = number of hopper-geometry refinement macro-cycles (1 = single pass, 2+ = alternating refinement)
+  cycler_outdir = None
+    .type = str
+    .help = parent output directory for macro-cycling (creates cycler_outdir/cycle1, cycler_outdir/cycle2, etc.)
   save_optimized_det_freq = 1
     .type = int
     .help = Save the optimzied detector model every X iterations

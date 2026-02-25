@@ -422,6 +422,11 @@ class RefineLauncher:
                 shot_modeler.osc_deg=None
                 shot_modeler.phisteps=None
 
+            if "phi_deg" in exper_dataframe:
+                shot_modeler.phi_deg = exper_dataframe.phi_deg.values[0]
+            else:
+                shot_modeler.phi_deg = 0
+
             if self.params.refiner.gather_dir is not None and not self.params.refiner.load_data_from_refl:
                 spec_wave, spec_weights = map(np.array, zip(*shot_spectra))
                 spec_filename = os.path.splitext(os.path.basename(exper_name))[0]

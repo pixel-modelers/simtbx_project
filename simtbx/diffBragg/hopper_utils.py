@@ -789,15 +789,19 @@ class DataModeler:
 
         MAIN_LOGGER.debug("Modeler has %d/ %d trusted pixels" % (self.all_trusted.sum() , self.npix_total))
 
-    def dump_gathered_to_refl(self, output_name, do_xyobs_sanity_check=False):
+    def dump_gathered_to_refl(self, output_name, do_xyobs_sanity_check=False, per_roi_scales=None):
         """after running GatherFromExperiment, dump the gathered results
         (data, background etc) to a new reflection file which can then be used to run
         diffBragg without the raw data in the experiment (this exists mainly for portability, and
-        unit tests)"""
+        unit tests)
+        :param per_roi_scales: optional dict mapping roi_id -> scale value. If provided,
+            a 'scale_factor' column is written so geometry refinement can recover per-ROI scales.
+        """
         from dials.model.data import Shoebox
         from dials.array_family import flex as dials_flex
         shoeboxes = []
         R = dials_flex.reflection_table()
+        roi_id_map = {}  # maps old roi_id -> new sequential index in R
         for i_roi, i_ref in enumerate(self.refls_idx):
             roi_sel = self.roi_id==i_roi
             x1, x2, y1, y2 = self.rois[i_roi]
@@ -805,13 +809,16 @@ class DataModeler:
             roi_img = self.all_data[roi_sel].reshape(roi_shape).astype(np.float32)  #NOTE this has already been converted to photon units
             roi_bg = self.all_background[roi_sel].reshape(roi_shape).astype(np.float32)
 
+            mask = self.all_trusted[roi_sel].reshape(roi_shape)
+            if not np.any(mask):
+                continue  # skip ROIs with zero trusted pixels
+
             sb = Shoebox((x1, x2, y1, y2, 0, 1))
             sb.allocate()
             sb.data = dials_flex.float(np.ascontiguousarray(roi_img[None]))
             sb.background = dials_flex.float(np.ascontiguousarray(roi_bg[None]))
 
             dials_mask = np.zeros(roi_img.shape).astype(np.int32)
-            mask = self.all_trusted[roi_sel].reshape(roi_shape)
             dials_mask[mask] = dials_mask[mask] + 1  # MaskCode.Valid=1
             sb.mask = dials_flex.int(np.ascontiguousarray(dials_mask[None]))
 
@@ -822,11 +829,18 @@ class DataModeler:
                 assert x1 <= x <= x2, "exp %s; refl %d, %f %f %f" % (output_name, i_ref, x1,x,x2)
                 assert y1 <= y <= y2, "exp %s; refl %d, %f %f %f" % (output_name, i_ref, y1,y,y2)
 
+            roi_id_map[i_roi] = len(R)
             R.extend(self.refls[i_ref: i_ref+1])
             shoeboxes.append(sb)
 
         R['shoebox'] = dials_flex.shoebox(shoeboxes)
         R['id'] = dials_flex.int(len(R), 0)
+        if per_roi_scales is not None:
+            per_refl_scales = dials_flex.double(len(R), 1.0)
+            for roi_id, scale_val in per_roi_scales.items():
+                if roi_id in roi_id_map:
+                    per_refl_scales[roi_id_map[roi_id]] = scale_val
+            R["scale_factor"] = per_refl_scales
         R.as_file(output_name)
 
     def set_parameters_for_experiment(self, best=None):
@@ -1952,6 +1966,70 @@ class DataModeler:
         return shot_df
 
 
+def extract_image_score(Modeler, SIM, x, params):
+    """Extract scoring metrics from a completed refinement without writing to disk.
+
+    Computes per-ROI sigma_z and spearman_r (same logic as save_up), then
+    aggregates into a single-image score dict suitable for hopper_heatup
+    in-process scoring.
+
+    Returns dict with keys: sigz_median, sigz_mean, n_rois, n_outlier_sigz,
+        spearman_r_median, param_vals (dict), converged (bool), time_sec (float),
+        error (str or None).
+    """
+    from scipy.stats import spearmanr as _spearmanr
+    from simtbx.diffBragg.utils import is_outlier
+
+    # Compute model at solution
+    Modeler.best_model, _ = model(x, Modeler, SIM, compute_grad=False)
+    Modeler.best_model_includes_background = False
+
+    if isinstance(Modeler.all_sigma_rdout, np.ndarray):
+        data_subimg, model_subimg, trusted_subimg, bragg_subimg, sigma_rdout_subimg = Modeler.get_data_model_pairs()
+    else:
+        data_subimg, model_subimg, trusted_subimg, bragg_subimg = Modeler.get_data_model_pairs()
+        sigma_rdout_subimg = None
+
+    sigz_vals = []
+    spearman_vals = []
+    for i_roi in range(len(data_subimg)):
+        dat = data_subimg[i_roi]
+        fit = model_subimg[i_roi]
+        trust = trusted_subimg[i_roi]
+        if sigma_rdout_subimg is not None:
+            sig = np.sqrt(fit + sigma_rdout_subimg[i_roi] ** 2)
+        else:
+            sig = np.sqrt(fit + Modeler.nominal_sigma_rdout ** 2)
+        Z = (dat - fit) / sig
+        if np.any(trust):
+            sigz_vals.append(Z[trust].std())
+            ntrust = int(trust.sum())
+            if ntrust >= 5:
+                _rho, _ = _spearmanr(dat[trust].ravel(), fit[trust].ravel())
+                if np.isfinite(_rho):
+                    spearman_vals.append(float(_rho))
+
+    n_rois = len(sigz_vals)
+    sigz_arr = np.array(sigz_vals) if sigz_vals else np.array([])
+    n_outlier_sigz = int(is_outlier(sigz_arr).sum()) if len(sigz_arr) >= 3 else 0
+
+    # Extract refined parameter values
+    param_vals = get_param_from_x(x, Modeler, as_dict=True)
+
+    return {
+        'sigz_median': float(np.median(sigz_arr)) if n_rois > 0 else float('inf'),
+        'sigz_mean': float(np.mean(sigz_arr)) if n_rois > 0 else float('inf'),
+        'sigz_vals': [float(v) for v in sigz_vals],  # raw per-ROI values for pooled aggregation
+        'n_rois': n_rois,
+        'n_outlier_sigz': n_outlier_sigz,
+        'spearman_r_median': float(np.median(spearman_vals)) if spearman_vals else float('nan'),
+        'spearman_vals': [float(v) for v in spearman_vals],  # raw per-ROI values
+        'param_vals': param_vals,
+        'converged': True,
+        'error': None,
+    }
+
+
 def convolve_model_with_psf(model_pix, J, mod, SIM, PSF=None, psf_args=None,
         roi_id_slices=None, roi_id_unique=None):
     if not SIM.use_psf:
@@ -2015,8 +2093,13 @@ def print_params(Mod, x):
     :param x: refinement parameters
     """
     val_s = ""
+    roi_scales = []
     for p in Mod.P.values():
         if p.name.startswith("Fhkl_"):
+            continue
+        if p.name.startswith("scale_roi"):
+            if p.refine:
+                roi_scales.append(p.get_val(x[p.xpos]))
             continue
         if p.refine:
             xval = x[p.xpos]
@@ -2031,6 +2114,9 @@ def print_params(Mod, x):
                 val = val*180 / np.pi
                 name = p.name +"_deg"
             val_s += "%s=%.4f, " % (name, val)
+    if roi_scales:
+        rs = np.array(roi_scales)
+        val_s += "roiScale(n=%d, mean=%.4f, std=%.4f)" % (len(rs), rs.mean(), rs.std())
     MAIN_LOGGER.debug(val_s)
 
 
