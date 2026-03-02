@@ -924,6 +924,10 @@ void diffBragg::let_loose(int refine_id){
         db_flags.refine_Bfactor = true;
     if (refine_id==26)
         db_flags.refine_Bfactor_aniso = true;
+    if (refine_id==27)
+        db_flags.refine_gonio_theta = true;
+    if (refine_id==28)
+        db_flags.refine_gonio_phi = true;
 }
 
 void diffBragg::fix(int refine_id){
@@ -1002,6 +1006,10 @@ void diffBragg::fix(int refine_id){
         db_flags.refine_Bfactor = false;
     if (refine_id==26)
         db_flags.refine_Bfactor_aniso = false;
+    if (refine_id==27)
+        db_flags.refine_gonio_theta = false;
+    if (refine_id==28)
+        db_flags.refine_gonio_phi = false;
 }
 
 
@@ -1118,6 +1126,10 @@ void diffBragg::refine(int refine_id){
         db_flags.refine_Bfactor = true;
     if (refine_id==26)
         db_flags.refine_Bfactor_aniso = true;
+    if (refine_id==27)
+        db_flags.refine_gonio_theta = true;
+    if (refine_id==28)
+        db_flags.refine_gonio_phi = true;
 }
 
 void diffBragg::print_if_refining(){
@@ -1585,6 +1597,22 @@ boost::python::tuple diffBragg::get_gonio_angle_derivative_pixels(){
     }
     boost::python::tuple derivative_pixels;
     derivative_pixels = boost::python::make_tuple(raw_pixels_angle);
+    return derivative_pixels;
+}
+
+boost::python::tuple diffBragg::get_gonio_axis_derivative_pixels(){
+    SCITBX_ASSERT(db_flags.refine_gonio_theta || db_flags.refine_gonio_phi);
+    af::flex_double raw_pixels_theta = af::flex_double(Npix_to_model);
+    af::flex_double raw_pixels_phi = af::flex_double(Npix_to_model);
+
+    double* floatimage_theta = raw_pixels_theta.begin();
+    double* floatimage_phi = raw_pixels_phi.begin();
+    for (int ii=0; ii< Npix_to_model; ii++){
+        floatimage_theta[ii] = db_flags.refine_gonio_theta ? first_deriv_imgs.gonio_theta[ii] : 0.0;
+        floatimage_phi[ii] = db_flags.refine_gonio_phi ? first_deriv_imgs.gonio_phi[ii] : 0.0;
+    }
+    boost::python::tuple derivative_pixels;
+    derivative_pixels = boost::python::make_tuple(raw_pixels_theta, raw_pixels_phi);
     return derivative_pixels;
 }
 
@@ -2199,6 +2227,12 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     if (db_flags.refine_gonio_angle){
         first_deriv_imgs.gonio_angle.resize(Npix_to_model*1,0);
     }
+    if (db_flags.refine_gonio_theta){
+        first_deriv_imgs.gonio_theta.resize(Npix_to_model*1,0);
+    }
+    if (db_flags.refine_gonio_phi){
+        first_deriv_imgs.gonio_phi.resize(Npix_to_model*1,0);
+    }
     if (db_flags.refine_Bfactor){
         first_deriv_imgs.Bfactor.resize(Npix_to_model,0);
     }
@@ -2209,6 +2243,17 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     double time_make_images = (1000000.0*(t4.tv_sec-t3.tv_sec) + t4.tv_usec-t3.tv_usec)/1000.0;
 
     db_cryst.spindle_vec = eig_spindle_vec;
+    // Compute spherical angles from spindle_vec for goniometer axis refinement
+    // theta: polar angle from z-axis [0, pi]
+    // phi: azimuthal angle from x-axis [0, 2*pi]
+    double gx = eig_spindle_vec[0], gy = eig_spindle_vec[1], gz = eig_spindle_vec[2];
+    double gnorm = sqrt(gx*gx + gy*gy + gz*gz);
+    if (gnorm > 0) {
+        gx /= gnorm; gy /= gnorm; gz /= gnorm;
+    }
+    db_cryst.spindle_theta = acos(std::max(-1.0, std::min(1.0, gz)));  // clamp for numerical safety
+    db_cryst.spindle_phi = atan2(gy, gx);
+    if (db_cryst.spindle_phi < 0) db_cryst.spindle_phi += 2*M_PI;
     db_beam.polarization_axis = _polarization_axis;
 
     gettimeofday(&t2, 0);

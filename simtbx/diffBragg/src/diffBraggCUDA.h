@@ -25,6 +25,8 @@ struct diffBragg_cudaPointers {
   CUDAREAL* cu_d_Bmat_images=NULL;
   CUDAREAL* cu_d_Ncells_images=NULL;
   CUDAREAL* cu_d_gonio_angle_images=NULL;
+  CUDAREAL* cu_d_gonio_theta_images=NULL;
+  CUDAREAL* cu_d_gonio_phi_images=NULL;
   CUDAREAL* cu_d_Bfactor_images=NULL;
   CUDAREAL* cu_d_Bfactor_aniso_images=NULL;
   CUDAREAL* cu_Bfactor_aniso=NULL;

@@ -183,6 +183,12 @@ void diffBragg_sum_over_steps_cuda(
         if (db_flags.refine_gonio_angle){
             gpuErr(cudaMallocManaged(&cp.cu_d_gonio_angle_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
         }
+        if (db_flags.refine_gonio_theta){
+            gpuErr(cudaMallocManaged(&cp.cu_d_gonio_theta_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
+        }
+        if (db_flags.refine_gonio_phi){
+            gpuErr(cudaMallocManaged(&cp.cu_d_gonio_phi_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
+        }
         if (db_flags.refine_Bfactor){
             gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_images, db_cu_flags.Npix_to_allocate*1*sizeof(CUDAREAL)));
         }
@@ -284,6 +290,12 @@ void diffBragg_sum_over_steps_cuda(
     }
     if (db_flags.refine_gonio_angle && cp.cu_d_gonio_angle_images == NULL){
         gpuErr(cudaMallocManaged(&cp.cu_d_gonio_angle_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_gonio_theta && cp.cu_d_gonio_theta_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_gonio_theta_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+    if (db_flags.refine_gonio_phi && cp.cu_d_gonio_phi_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_gonio_phi_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
     }
     if (db_flags.refine_fp_fdp && cp.cu_d_fp_fdp_images == NULL)
         gpuErr(cudaMallocManaged(&cp.cu_d_fp_fdp_images, cp.npix_allocated*2*sizeof(CUDAREAL)));
@@ -593,7 +605,10 @@ void diffBragg_sum_over_steps_cuda(
         db_cryst.xtal_shape==GAUSS_STAR,
         db_cryst.xtal_shape==SQUARE, db_flags.refine_gonio_angle,
         db_cryst.Bfactor_image, db_flags.refine_Bfactor, cp.cu_d_Bfactor_images,
-        cp.cu_Bfactor_aniso, db_flags.refine_Bfactor_aniso, cp.cu_d_Bfactor_aniso_images
+        cp.cu_Bfactor_aniso, db_flags.refine_Bfactor_aniso, cp.cu_d_Bfactor_aniso_images,
+        db_cryst.spindle_theta, db_cryst.spindle_phi,
+        db_flags.refine_gonio_theta, db_flags.refine_gonio_phi,
+        cp.cu_d_gonio_theta_images, cp.cu_d_gonio_phi_images
         );
 
     error_msg(cudaGetLastError(), "after kernel call");
@@ -617,6 +632,14 @@ void diffBragg_sum_over_steps_cuda(
     if (db_flags.refine_gonio_angle){
         for (int i=0; i< Npix_to_model; i++)
             d_image.gonio_angle[i] = cp.cu_d_gonio_angle_images[i];
+    }
+    if (db_flags.refine_gonio_theta){
+        for (int i=0; i< Npix_to_model; i++)
+            d_image.gonio_theta[i] = cp.cu_d_gonio_theta_images[i];
+    }
+    if (db_flags.refine_gonio_phi){
+        for (int i=0; i< Npix_to_model; i++)
+            d_image.gonio_phi[i] = cp.cu_d_gonio_phi_images[i];
     }
     if (db_flags.refine_Bfactor){
         for (int i=0; i< Npix_to_model; i++)
@@ -733,6 +756,8 @@ void freedom(diffBragg_cudaPointers& cp){
         gpuErr(cudaFree( cp.cu_d_sausage_XYZ_scale_images));
         gpuErr(cudaFree( cp.cu_d_fp_fdp_images));
         gpuErr(cudaFree(cp.cu_d_gonio_angle_images));
+        gpuErr(cudaFree(cp.cu_d_gonio_theta_images));
+        gpuErr(cudaFree(cp.cu_d_gonio_phi_images));
         gpuErr(cudaFree(cp.cu_d_Bfactor_images));
         gpuErr(cudaFree(cp.cu_d_Bfactor_aniso_images));
         gpuErr(cudaFree(cp.cu_Bfactor_aniso));

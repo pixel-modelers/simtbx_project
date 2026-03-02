@@ -141,6 +141,88 @@ class FhklParameters:
                 self.parameters.append(p)
 
 
+class GoniometerParameters:
+    """
+    Goniometer axis refinement using spherical parameterization.
+
+    The rotation axis is a unit vector with 2 degrees of freedom.
+    We parameterize using spherical angles (theta, phi):
+        - theta: polar angle from z-axis [0, π]
+        - phi: azimuthal angle from x-axis [0, 2π]
+        - axis = (sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta))
+
+    This is a global parameter - all crystals share the same goniometer axis.
+    """
+
+    @staticmethod
+    def cartesian_to_spherical(axis):
+        """Convert Cartesian unit vector to spherical angles (theta, phi)."""
+        x, y, z = axis
+        # Normalize just in case
+        norm = np.sqrt(x*x + y*y + z*z)
+        if norm == 0:
+            return 0.0, 0.0  # Degenerate case
+        x, y, z = x/norm, y/norm, z/norm
+
+        # theta: polar angle from z-axis
+        theta = np.arccos(np.clip(z, -1.0, 1.0))
+
+        # phi: azimuthal angle from x-axis
+        phi = np.arctan2(y, x)
+        if phi < 0:
+            phi += 2*np.pi
+
+        return theta, phi
+
+    @staticmethod
+    def spherical_to_cartesian(theta, phi):
+        """Convert spherical angles to Cartesian unit vector."""
+        x = np.sin(theta) * np.cos(phi)
+        y = np.sin(theta) * np.sin(phi)
+        z = np.cos(theta)
+        return (x, y, z)
+
+    def __init__(self, phil_params, SIM=None):
+        self.parameters = []
+
+        # Get initial axis from phil params (authoritative source)
+        # This supports both stills and rotation experiments uniformly
+        # If SIM is provided and gonio was initialized, use that; otherwise use phil
+        if SIM is not None and hasattr(SIM, 'D') and SIM.D.spindle_axis is not None:
+            init_axis = SIM.D.spindle_axis
+        else:
+            init_axis = tuple(phil_params.simulator.gonio.axis)
+        theta_init, phi_init = self.cartesian_to_spherical(init_axis)
+
+        beta = phil_params.geometry.betas.gonio_axis
+
+        # Create theta parameter (polar angle)
+        theta_param = RangedParameter(
+            name="gonio_theta",
+            init=theta_init,
+            sigma=phil_params.geometry.sigma_gonio_axis,
+            minval=0.0,
+            maxval=np.pi,
+            fix=phil_params.geometry.fix.gonio_axis,
+            center=theta_init,
+            beta=beta,
+            is_global=True)
+
+        # Create phi parameter (azimuthal angle)
+        phi_param = RangedParameter(
+            name="gonio_phi",
+            init=phi_init,
+            sigma=phil_params.geometry.sigma_gonio_axis,
+            minval=0.0,
+            maxval=2*np.pi,
+            fix=phil_params.geometry.fix.gonio_axis,
+            center=phi_init,
+            beta=beta,
+            is_global=True)
+
+        self.parameters = [theta_param, phi_param]
+
+
 class DetectorParameters:
 
     def __init__(self, phil_params, panel_groups_refined, num_panel_groups):
@@ -221,50 +303,80 @@ class CrystalParameters:
                         Mod.per_roi_scales_per_pix[slcs[0]] = init_scale
 
                 p = RangedParameter(name="rank%d_shot%d_scale_roi%d" % (COMM.rank, i_shot, roi_id),
-                                    minval=0, maxval=1e12, fix=self.phil.fix.perRoiScale,
+                                    minval=0, maxval=1e12, fix=self.phil.geometry.fix.perRoiScale,
                                     center=init_scale, beta=1e12, init=init_scale)
                 self.parameters.append(p)
 
             for i_N in range(3):
                 p = Mod.PAR.Nabc[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Nabc%d" % (COMM.rank, i_shot, i_N),
-                                        minval=p.minval, maxval=p.maxval, fix=self.phil.fix.Nabc, init=p.init,
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Nabc, init=p.init,
                                         center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_N in range(3):
                 p = Mod.PAR.Ndef[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ndef%d" % (COMM.rank, i_shot, i_N),
-                                        minval=p.minval, maxval=p.maxval, fix=self.phil.fix.Ndef, init=p.init,
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Ndef, init=p.init,
                                         center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_eta in range(3):
                 p = Mod.PAR.eta[i_eta]
                 ref_p = RangedParameter(name="rank%d_shot%d_eta%d" % (COMM.rank, i_shot, i_eta),
-                                        minval=p.minval, maxval=p.maxval, fix=self.phil.fix.eta_abc, init=p.init,
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.eta_abc, init=p.init,
                                         center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_rot in range(3):
                 p = Mod.PAR.RotXYZ_params[i_rot]
                 ref_p = RangedParameter(name="rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, i_rot),
-                                        minval=p.minval, maxval=p.maxval, fix=self.phil.fix.RotXYZ, init=p.init,
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.RotXYZ[i_rot], init=p.init,
                                         center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             p = Mod.PAR.Scale
             ref_p = RangedParameter(name="rank%d_shot%d_Scale" % (COMM.rank, i_shot),
-                                    minval=p.minval, maxval=p.maxval, fix=self.phil.fix.G, init=p.init,
+                                    minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.G, init=p.init,
                                     center=p.center, beta=p.beta)
             self.parameters.append(ref_p)
 
             for i_uc in range(len(Mod.PAR.ucell)):
                 p = Mod.PAR.ucell[i_uc]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ucell%d" % (COMM.rank, i_shot, i_uc),
-                                        minval=p.minval, maxval=p.maxval, fix=self.phil.fix.ucell, init=p.init,
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.ucell, init=p.init,
                                         center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
+
+            # Per-shot Bfactor (fixed by default, carries the hopper-refined value)
+            bfac_p = Mod.PAR.B
+            ref_p = RangedParameter(name="rank%d_shot%d_Bfactor" % (COMM.rank, i_shot),
+                                    minval=bfac_p.minval, maxval=bfac_p.maxval, fix=True,
+                                    init=bfac_p.init, center=bfac_p.center, beta=bfac_p.beta)
+            self.parameters.append(ref_p)
+
+            # Per-shot Bfactor_aniso (6 components, fixed by default)
+            if hasattr(Mod.PAR, 'Baniso') and Mod.PAR.Baniso is not None:
+                for i_ba in range(6):
+                    ba_p = Mod.PAR.Baniso[i_ba]
+                    ref_p = RangedParameter(name="rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i_ba),
+                                            minval=ba_p.minval, maxval=ba_p.maxval, fix=True,
+                                            init=ba_p.init, center=ba_p.center, beta=ba_p.beta)
+                    self.parameters.append(ref_p)
+
+            # Per-shot diffuse scattering params (fixed by default)
+            if hasattr(Mod.PAR, 'diffuse_gamma') and Mod.PAR.diffuse_gamma is not None:
+                for i_d in range(3):
+                    dg_p = Mod.PAR.diffuse_gamma[i_d]
+                    ref_p = RangedParameter(name="rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i_d),
+                                            minval=dg_p.minval, maxval=dg_p.maxval, fix=True,
+                                            init=dg_p.init, center=dg_p.center, beta=dg_p.beta)
+                    self.parameters.append(ref_p)
+                    ds_p = Mod.PAR.diffuse_sigma[i_d]
+                    ref_p = RangedParameter(name="rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i_d),
+                                            minval=ds_p.minval, maxval=ds_p.maxval, fix=True,
+                                            init=ds_p.init, center=ds_p.center, beta=ds_p.beta)
+                    self.parameters.append(ref_p)
 
 
 def hkl_vary_flags(SIM):
@@ -319,6 +431,77 @@ class Target:
             plt.draw()
             plt.pause(0.1)
 
+    def _get_panel_group_ids(self):
+        """Extract sorted list of unique panel group IDs from ref_params."""
+        ids = set()
+        for pname in self.ref_params:
+            if pname.startswith("group") and "_" in pname:
+                try:
+                    gid = int(pname.split("_")[0].replace("group", ""))
+                    ids.add(gid)
+                except ValueError:
+                    pass
+        return sorted(ids)
+
+    def _print_panel_stats(self, x0, prefix="\t"):
+        """Print per-panel rotation/shift statistics across all panel groups."""
+        group_ids = self._get_panel_group_ids()
+        n_groups = len(group_ids)
+        if n_groups == 0:
+            return
+
+        # For single-panel, print values directly (existing behavior)
+        if n_groups == 1:
+            gid = group_ids[0]
+            det_params_str = ""
+            for suffix in ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]:
+                pname = "group%d_%s" % (gid, suffix)
+                if pname in self.ref_params:
+                    p = self.ref_params[pname]
+                    val = p.get_val(x0[p.xpos])
+                    if "Rot" in suffix:
+                        val = val * 180.0 / np.pi
+                        unit = "deg"
+                    else:
+                        val = val * 1000.0
+                        unit = "mm"
+                    det_params_str += "%s=%.4f%s " % (suffix, val, unit)
+            if det_params_str:
+                print("%sDetector: %s" % (prefix, det_params_str), flush=True)
+            return
+
+        # Multi-panel: collect per-group values, print aggregate stats
+        rot_names = ["RotOrth", "RotFast", "RotSlow"]
+        shift_names = ["ShiftX", "ShiftY", "ShiftZ"]
+        rot_vals = {n: [] for n in rot_names}
+        shift_vals = {n: [] for n in shift_names}
+
+        for gid in group_ids:
+            for suffix in rot_names:
+                pname = "group%d_%s" % (gid, suffix)
+                if pname in self.ref_params:
+                    p = self.ref_params[pname]
+                    val = p.get_val(x0[p.xpos]) * 180.0 / np.pi  # rad -> deg
+                    rot_vals[suffix].append(val)
+            for suffix in shift_names:
+                pname = "group%d_%s" % (gid, suffix)
+                if pname in self.ref_params:
+                    p = self.ref_params[pname]
+                    val = p.get_val(x0[p.xpos]) * 1000.0  # m -> mm
+                    shift_vals[suffix].append(val)
+
+        print("%sPanel geometry (%d groups):" % (prefix, n_groups), flush=True)
+        for suffix in rot_names:
+            v = np.array(rot_vals[suffix])
+            if len(v):
+                print("%s  %s (deg): mean=%.4f  std=%.4f  min=%.4f  max=%.4f"
+                      % (prefix, suffix, v.mean(), v.std(), v.min(), v.max()), flush=True)
+        for suffix in shift_names:
+            v = np.array(shift_vals[suffix])
+            if len(v):
+                print("%s  %s  (mm): mean=%.4f  std=%.4f  min=%.4f  max=%.4f"
+                      % (prefix, suffix, v.mean(), v.std(), v.min(), v.max()), flush=True)
+
     def __call__(self, x, *args, **kwargs):
         self.iternum += 1
         t = time.time()
@@ -334,23 +517,8 @@ class Target:
             print("Iteration %d:\n\tResid=%f, sigmaZ %f, t-per-iter=%.4f sec, pred_offsets=%s"
                   % (self.iternum, f, self.sigmaZ, time_per_iter, pred_offset_str), flush=True)
 
-            # Print detector geometry parameters
-            det_params_str = ""
-            for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
-                          "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
-                if pname in self.ref_params:
-                    p = self.ref_params[pname]
-                    val = p.get_val(self.x0[p.xpos])
-                    # Convert radians to degrees for rotations, meters to mm for shifts
-                    if "Rot" in pname:
-                        val = val * 180.0 / np.pi  # rad to deg
-                        unit = "deg"
-                    else:
-                        val = val * 1000.0  # m to mm
-                        unit = "mm"
-                    det_params_str += "%s=%.4f%s " % (pname.replace("group0_", ""), val, unit)
-            if det_params_str:
-                print("\tDetector: %s" % det_params_str, flush=True)
+            # Print detector geometry parameters (single or multi-panel)
+            self._print_panel_stats(self.x0)
 
             # Print RotXYZ statistics across all shots
             rotxyz_vals = []
@@ -365,6 +533,17 @@ class Target:
                 print("\tRotXYZ: mean=%.4f deg, std=%.4f deg, min=%.4f deg, max=%.4f deg"
                       % (np.mean(rotxyz_vals), np.std(rotxyz_vals),
                          np.min(rotxyz_vals), np.max(rotxyz_vals)), flush=True)
+
+            # Print goniometer axis if being refined
+            if "gonio_theta" in self.ref_params and not self.ref_params["gonio_theta"].fix:
+                gt = self.ref_params["gonio_theta"]
+                gp = self.ref_params["gonio_phi"]
+                theta_val = gt.get_val(self.x0[gt.xpos])
+                phi_val = gp.get_val(self.x0[gp.xpos])
+                axis = GoniometerParameters.spherical_to_cartesian(theta_val, phi_val)
+                print("\tGonio axis: (%.6f, %.6f, %.6f)  theta=%.4f deg, phi=%.4f deg"
+                      % (axis[0], axis[1], axis[2],
+                         np.degrees(theta_val), np.degrees(phi_val)), flush=True)
         if self.iternum % self.save_state_freq==0 and self.iternum >0:
             if not self.overwrite_state:
                 params = args[-1]  # phil params
@@ -392,22 +571,8 @@ class Target:
         if COMM.rank==0:
             print("Final Iteration %d:\n\tResid=%f, sigmaZ %f" % (self.iternum, f, self.sigmaZ))
 
-            # Print final detector geometry parameters
-            det_params_str = ""
-            for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
-                          "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
-                if pname in self.ref_params:
-                    p = self.ref_params[pname]
-                    val = p.get_val(self.x0[p.xpos])
-                    if "Rot" in pname:
-                        val = val * 180.0 / np.pi
-                        unit = "deg"
-                    else:
-                        val = val * 1000.0
-                        unit = "mm"
-                    det_params_str += "%s=%.4f%s " % (pname.replace("group0_", ""), val, unit)
-            if det_params_str:
-                print("\tDetector: %s" % det_params_str, flush=True)
+            # Print final detector geometry parameters (single or multi-panel)
+            self._print_panel_stats(self.x0)
 
             # Print final RotXYZ statistics
             rotxyz_vals = []
@@ -502,9 +667,24 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     lambda_coef = lam0.get_val(x[lam0.xpos]), lam1.get_val(x[lam1.xpos])
     SIM.D.lambda_coefficients = lambda_coef
 
-    # update gonio, TODO: free up gonio axis
+    # update gonio axis (check if being refined)
+    if "gonio_theta" in ref_params and "gonio_phi" in ref_params:
+        gonio_theta = ref_params["gonio_theta"]
+        gonio_phi = ref_params["gonio_phi"]
+        if not gonio_theta.fix:
+            # Goniometer axis is being refined - update from parameters
+            theta = gonio_theta.get_val(x[gonio_theta.xpos])
+            phi = gonio_phi.get_val(x[gonio_phi.xpos])
+            spindle_axis = GoniometerParameters.spherical_to_cartesian(theta, phi)
+        else:
+            # Fixed axis - use existing value
+            spindle_axis = SIM.D.spindle_axis
+    else:
+        # No goniometer parameters (backward compatibility)
+        spindle_axis = SIM.D.spindle_axis
+
     utils.update_SIM_with_gonio(SIM, delta_phi=Modeler.osc_deg,
-                                num_phi_steps=Modeler.phisteps, spindle_axis=SIM.D.spindle_axis)
+                                num_phi_steps=Modeler.phisteps, spindle_axis=spindle_axis)
     # Set per-frame starting phi for rotation data
     if hasattr(Modeler, 'phi_deg') and Modeler.phi_deg is not None:
         SIM.D.phi_deg = Modeler.phi_deg
@@ -531,6 +711,35 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     SIM.D.Ncells_def = (Nd.get_val(x[Nd.xpos]),
                         Ne.get_val(x[Ne.xpos]),
                         Nf.get_val(x[Nf.xpos]))
+
+    # Set per-image Bfactor (from hopper refinement, fixed during geometry)
+    bfac_name = "rank%d_shot%d_Bfactor" % (COMM.rank, i_shot)
+    if bfac_name in ref_params:
+        Bfac = ref_params[bfac_name]
+        SIM.D.Bfactor_image = Bfac.get_val(x[Bfac.xpos])
+
+    # Set per-image Bfactor_aniso (if present)
+    baniso_name = "rank%d_shot%d_Baniso0" % (COMM.rank, i_shot)
+    if baniso_name in ref_params:
+        baniso_vals = []
+        for i_ba in range(6):
+            p = ref_params["rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i_ba)]
+            baniso_vals.append(p.get_val(x[p.xpos]))
+        if any(v != 0 for v in baniso_vals):
+            SIM.D.Bfactor_aniso = tuple(baniso_vals)
+
+    # Set per-image diffuse scattering params (if present)
+    dgamma_name = "rank%d_shot%d_diffuse_gamma0" % (COMM.rank, i_shot)
+    if dgamma_name in ref_params:
+        diff_gamma = []
+        diff_sigma = []
+        for i_d in range(3):
+            dg_p = ref_params["rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i_d)]
+            ds_p = ref_params["rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i_d)]
+            diff_gamma.append(dg_p.get_val(x[dg_p.xpos]))
+            diff_sigma.append(ds_p.get_val(x[ds_p.xpos]))
+        SIM.D.diffuse_gamma = tuple(diff_gamma)
+        SIM.D.diffuse_sigma = tuple(diff_sigma)
 
     npix = int(len(Modeler.pan_fast_slow)/3.)
 
@@ -612,7 +821,7 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
     # Umat gradients
     for i_rot, rot in enumerate([rotX, rotY, rotZ]):
         if not rot.fix:
-            rot_db_id = hopper_utils.ROTXYZ_ID[i_rot]
+            rot_db_id = hopper_utils.ROTXYZ_IDS[i_rot]
             rot_grad = scale*SIM.D.get_derivative_pixels(rot_db_id).as_numpy_array()[:npix]
             rot_grad = rot.get_deriv(x[rot.xpos], rot_grad)
             rot_grad = convolve_model_with_psf(rot_grad, **conv_args)
@@ -670,6 +879,16 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
                                     scale=scale, common_grad_term=common_grad_term, conv_args=conv_args)
     for key in det_Jac:
         J[key] = det_Jac[key]
+
+    # goniometer axis gradients
+    if "gonio_theta" in ref_params and not ref_params["gonio_theta"].fix:
+        gonio_derivs = SIM.D.get_gonio_axis_derivative_pixels()
+        for i_gonio, gonio_name in enumerate(["gonio_theta", "gonio_phi"]):
+            gp = ref_params[gonio_name]
+            d = scale * gonio_derivs[i_gonio].as_numpy_array()[:npix]
+            d = gp.get_deriv(x[gp.xpos], d)
+            d = convolve_model_with_psf(d, **conv_args)
+            J[gp.name] = (common_grad_term * d)[Modeler.all_trusted].sum()
 
     #detector_derivs = []
     #for diffbragg_parameter_id in PAN_OFS_IDS+PAN_XYZ_IDS:
@@ -925,17 +1144,37 @@ def geom_min(params):
         if launcher.SIM.refining_Fhkl:
             Modeler.set_Fhkl_channels(launcher.SIM, set_in_diffBragg=False)
 
+    # If optimize_goniometer is set, override fix.gonio_axis
+    if params.geometry.optimize_goniometer:
+        params.geometry.fix.gonio_axis = False
+
+    # Load optimized gonio axis from reference_geom if available (for macro-cycling)
+    if params.refiner.reference_geom is not None and not params.geometry.fix.gonio_axis:
+        ref_El = ExperimentList.from_file(params.refiner.reference_geom, check_format=False)
+        if len(ref_El) > 0 and ref_El[0].goniometer is not None:
+            ref_axis = list(ref_El[0].goniometer.get_rotation_axis())
+            params.simulator.gonio.axis = ref_axis
+            if COMM.rank == 0:
+                print("Loaded gonio axis from reference_geom: (%.6f, %.6f, %.6f)" % tuple(ref_axis))
+
+    # Initialize gonio from phil params before creating GoniometerParameters
+    # This ensures SIM.D.spindle_axis is set from phil (authoritative source)
+    utils.update_SIM_with_gonio(launcher.SIM, params)
+
     # same on every rank:
     det_params = DetectorParameters(params, launcher.panel_groups_refined, launcher.n_panel_groups)
 
     beam_params = BeamParameters(params, launcher.Modelers)
+
+    # Goniometer axis parameters (global)
+    gonio_params = GoniometerParameters(params, SIM=launcher.SIM)
 
     # different on each rank
     crystal_params = CrystalParameters(params,launcher.Modelers)
     crystal_params.parameters = COMM.bcast(COMM.reduce(crystal_params.parameters))
 
     LMP = Parameters()
-    for p in crystal_params.parameters + det_params.parameters + beam_params.parameters:
+    for p in crystal_params.parameters + det_params.parameters + beam_params.parameters + gonio_params.parameters:
         LMP.add(p)
     if launcher.SIM.refining_Fhkl:
         fhkl_params = FhklParameters(params, launcher.SIM, launcher.hiasu)
@@ -950,7 +1189,8 @@ def geom_min(params):
         print("="*80)
         print("Restraints enabled: %s" % params.use_restraints)
         print("Crystal params fixed: G=%s, Nabc=%s, RotXYZ=%s, ucell=%s, eta=%s" %
-              (params.fix.G, params.fix.Nabc, params.fix.RotXYZ, params.fix.ucell, params.fix.eta_abc))
+              (params.geometry.fix.G, params.geometry.fix.Nabc, params.geometry.fix.RotXYZ,
+               params.geometry.fix.ucell, params.geometry.fix.eta_abc))
         print("\nDetector parameters:")
         print("  Rotations - fix: %s, bounds: [%.2f, %.2f] deg" %
               (params.geometry.fix.panel_rotations,
@@ -958,10 +1198,22 @@ def geom_min(params):
         print("  Translations - fix: %s, bounds: [%.2f, %.2f] mm" %
               (params.geometry.fix.panel_translations,
                params.geometry.min.panel_translations[0], params.geometry.max.panel_translations[0]))
+        if not params.geometry.fix.gonio_axis:
+            gonio_theta_p = LMP["gonio_theta"]
+            gonio_phi_p = LMP["gonio_phi"]
+            print("\nGoniometer axis:")
+            print("  fix: %s" % params.geometry.fix.gonio_axis)
+            print("  theta init: %.6f rad (%.2f deg)" % (gonio_theta_p.init, np.degrees(gonio_theta_p.init)))
+            print("  phi init: %.6f rad (%.2f deg)" % (gonio_phi_p.init, np.degrees(gonio_phi_p.init)))
+            print("  sigma: %.4f" % params.geometry.sigma_gonio_axis)
+            if params.geometry.betas.gonio_axis is not None:
+                print("  beta: %.2e" % params.geometry.betas.gonio_axis)
         if params.use_restraints:
             print("\nRestraint betas:")
             print("  panel_rot: %s" % str(params.geometry.betas.panel_rot))
             print("  panel_xyz: %s" % str(params.geometry.betas.panel_xyz))
+            if params.geometry.betas.gonio_axis is not None:
+                print("  gonio_axis: %.2e" % params.geometry.betas.gonio_axis)
 
         # Print detector parameter details
         for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
@@ -987,6 +1239,25 @@ def geom_min(params):
     launcher.SIM.panel_group_from_id = launcher.panel_group_from_id
     launcher.SIM.panel_groups_refined = launcher.panel_groups_refined
 
+    # State snapshots at geometry start (for propagation verification)
+    from simtbx.diffBragg.diffbragg_state import (
+        should_snapshot, capture_geometry_state, write_state_snapshot,
+        compare_states, load_state_snapshot)
+    x0_snap = np.ones(len(LMP))  # initial x (all 1s)
+    for i_shot in launcher.Modelers:
+        if should_snapshot(params, i_shot, COMM.rank):
+            _state = capture_geometry_state(
+                x0_snap, LMP, i_shot, launcher.Modelers[i_shot], launcher.SIM,
+                "geom_start", COMM.rank)
+            write_state_snapshot(_state, params.outdir, "geom_start_rank%d_shot%d" % (COMM.rank, i_shot))
+
+            # Compare with hopper_final snapshot if it exists
+            if COMM.rank == 0:
+                hopper_state = load_state_snapshot(params.outdir, "hopper_final_rank%d_shot%d" % (COMM.rank, i_shot))
+                if hopper_state is not None:
+                    compare_states(hopper_state, _state,
+                                   label="hopper_final -> geom_start (shot %d)" % i_shot)
+
     # set the GPU device
     launcher.SIM.D.device_Id = COMM.rank % params.refiner.num_devices
     npx_str = "(rnk%d, dev%d): %d pix" %(COMM.rank, launcher.SIM.D.device_Id, launcher.NPIX_TO_ALLOC)
@@ -997,25 +1268,28 @@ def geom_min(params):
     launcher.SIM.D.Npix_to_allocate = launcher.NPIX_TO_ALLOC
 
     # configure diffBragg instance for gradient computation
-    if not params.fix.RotXYZ:
-        for i_rot in range(3):
-            launcher.SIM.D.refine(hopper_utils.ROTXYZ_ID[i_rot])
-    if not params.fix.spec:
+    # Use geometry.fix.* flags (not top-level fix.*) for crystal params during geometry refinement
+    for i_rot in range(3):
+        if not params.geometry.fix.RotXYZ[i_rot]:
+            launcher.SIM.D.refine(hopper_utils.ROTXYZ_IDS[i_rot])
+    if not params.geometry.fix.sourceI:
         launcher.SIM.D.refine(hopper_utils.LAMBDA_IDS[0])
         launcher.SIM.D.refine(hopper_utils.LAMBDA_IDS[1])
-    if not params.fix.eta_abc:
+    if not params.geometry.fix.eta_abc:
         launcher.SIM.D.refine(hopper_utils.ETA_ID)
-    if not params.fix.Nabc:
+    if not params.geometry.fix.Nabc:
         launcher.SIM.D.refine(hopper_utils.NCELLS_ID)
-    if not params.fix.Ndef:
+    if not params.geometry.fix.Ndef:
         launcher.SIM.D.refine(hopper_utils.NCELLS_ID_OFFDIAG)
-    if not params.fix.ucell:
+    if not params.geometry.fix.ucell:
         for i_ucell in range(launcher.SIM.num_ucell_param):
             launcher.SIM.D.refine(hopper_utils.UCELL_ID_OFFSET + i_ucell)
     for i, diffbragg_id in enumerate(PAN_OFS_IDS):
         if not params.geometry.fix.panel_rotations[i]:
             launcher.SIM.D.refine(diffbragg_id)
-    # TODO gonio_angle refine
+    if not params.geometry.fix.gonio_axis:
+        launcher.SIM.D.refine(hopper_utils.GONIO_THETA_ID)
+        launcher.SIM.D.refine(hopper_utils.GONIO_PHI_ID)
 
     for i, diffbragg_id in enumerate(PAN_XYZ_IDS):
         if not params.geometry.fix.panel_translations[i]:
@@ -1050,54 +1324,60 @@ def geom_min(params):
         print("Final optimization result:")
         print("  Success: %s" % result.message if hasattr(result, 'message') else 'N/A')
         print("  Final residual: %.2f" % result.fun if hasattr(result, 'fun') else 'N/A')
-        print("\nFinal detector parameters (raw):")
-        rot_orth_deg = rot_fast_deg = rot_slow_deg = 0.0
-        shift_x_mm = shift_y_mm = shift_z_mm = 0.0
-        for pname in ["group0_RotOrth", "group0_RotFast", "group0_RotSlow",
-                      "group0_ShiftX", "group0_ShiftY", "group0_ShiftZ"]:
-            if pname in LMP:
-                p = LMP[pname]
-                val = p.get_val(Xopt[p.xpos])
-                if "Rot" in pname:
-                    val_deg = val * 180.0 / np.pi
-                    unit = "deg"
-                    if "RotOrth" in pname:
-                        rot_orth_deg = val_deg
-                    elif "RotFast" in pname:
-                        rot_fast_deg = val_deg
-                    elif "RotSlow" in pname:
-                        rot_slow_deg = val_deg
-                    print("  %s: %.4f %s" % (pname.replace("group0_", ""), val_deg, unit))
-                else:
-                    val_mm = val * 1000.0
-                    unit = "mm"
-                    if "ShiftX" in pname:
-                        shift_x_mm = val_mm
-                    elif "ShiftY" in pname:
-                        shift_y_mm = val_mm
-                    elif "ShiftZ" in pname:
-                        shift_z_mm = val_mm
-                    print("  %s: %.4f %s" % (pname.replace("group0_", ""), val_mm, unit))
+        print("\nFinal detector parameters:")
+        target._print_panel_stats(Xopt, prefix="  ")
 
-        # Compute geometric interpretation
-        print("\nGeometric interpretation:")
-        # Total tilt magnitude (combined rotation effect)
-        total_tilt = np.sqrt(rot_fast_deg**2 + rot_slow_deg**2)
-        print("  Total detector tilt: %.4f deg" % total_tilt)
+        # Geometric interpretation (single-panel only)
+        group_ids = target._get_panel_group_ids()
+        if len(group_ids) == 1:
+            gid = group_ids[0]
 
-        # Pitch/Yaw decomposition (assuming standard geometry)
-        # RotFast ≈ pitch (rotation around horizontal/fast axis, tilts detector up/down)
-        # RotSlow ≈ yaw (rotation around vertical/slow axis, tilts detector left/right)
-        print("  Pitch (RotFast, tilt around horizontal): %.4f deg" % rot_fast_deg)
-        print("  Yaw (RotSlow, tilt around vertical): %.4f deg" % rot_slow_deg)
-        print("  Roll (RotOrth, in-plane rotation): %.4f deg" % rot_orth_deg)
+            def _get_val(suffix, scale):
+                pname = "group%d_%s" % (gid, suffix)
+                if pname in LMP:
+                    return LMP[pname].get_val(Xopt[LMP[pname].xpos]) * scale
+                return 0.0
 
-        # Beam center shift
-        beam_shift_mag = np.sqrt(shift_x_mm**2 + shift_y_mm**2)
-        print("\nBeam center shift:")
-        print("  X shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_x_mm, shift_x_mm/0.075))
-        print("  Y shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_y_mm, shift_y_mm/0.075))
-        print("  Total shift: %.4f mm (%.2f pixels)" % (beam_shift_mag, beam_shift_mag/0.075))
+            rot_orth_deg = _get_val("RotOrth", 180.0 / np.pi)
+            rot_fast_deg = _get_val("RotFast", 180.0 / np.pi)
+            rot_slow_deg = _get_val("RotSlow", 180.0 / np.pi)
+            shift_x_mm = _get_val("ShiftX", 1000.0)
+            shift_y_mm = _get_val("ShiftY", 1000.0)
+
+            print("\n  Geometric interpretation:")
+            total_tilt = np.sqrt(rot_fast_deg**2 + rot_slow_deg**2)
+            print("    Total detector tilt: %.4f deg" % total_tilt)
+            print("    Pitch (RotFast): %.4f deg" % rot_fast_deg)
+            print("    Yaw (RotSlow): %.4f deg" % rot_slow_deg)
+            print("    Roll (RotOrth): %.4f deg" % rot_orth_deg)
+            beam_shift_mag = np.sqrt(shift_x_mm**2 + shift_y_mm**2)
+            print("\n  Beam center shift:")
+            print("    X shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_x_mm, shift_x_mm/0.075))
+            print("    Y shift: %.4f mm (%.2f pixels @ 0.075mm/pix)" % (shift_y_mm, shift_y_mm/0.075))
+            print("    Total shift: %.4f mm (%.2f pixels)" % (beam_shift_mag, beam_shift_mag/0.075))
+
+        # Goniometer axis results
+        if "gonio_theta" in LMP and not LMP["gonio_theta"].fix:
+            gt = LMP["gonio_theta"]
+            gp = LMP["gonio_phi"]
+            theta_init = gt.init
+            phi_init = gp.init
+            theta_final = gt.get_val(Xopt[gt.xpos])
+            phi_final = gp.get_val(Xopt[gp.xpos])
+            axis_init = GoniometerParameters.spherical_to_cartesian(theta_init, phi_init)
+            axis_final = GoniometerParameters.spherical_to_cartesian(theta_final, phi_final)
+            # Angular change between initial and final axis
+            dot = sum(a*b for a, b in zip(axis_init, axis_final))
+            dot = min(1.0, max(-1.0, dot))
+            angle_change_deg = np.degrees(np.arccos(dot))
+            print("\nGoniometer axis refinement:")
+            print("  Initial: (%.6f, %.6f, %.6f)  theta=%.4f deg, phi=%.4f deg"
+                  % (axis_init[0], axis_init[1], axis_init[2],
+                     np.degrees(theta_init), np.degrees(phi_init)))
+            print("  Final:   (%.6f, %.6f, %.6f)  theta=%.4f deg, phi=%.4f deg"
+                  % (axis_final[0], axis_final[1], axis_final[2],
+                     np.degrees(theta_final), np.degrees(phi_final)))
+            print("  Axis change: %.4f deg" % angle_change_deg)
         print("="*80 + "\n", flush=True)
 
     if params.geometry.optimized_results_tag is not None:
@@ -1296,13 +1576,42 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
             scale_p = LMP["rank%d_shot%d_Scale" %(COMM.rank, i_shot)]
             scale = scale_p.get_val(Xopt[scale_p.xpos])
 
+            # Extract Bfactor from geometry params (if present)
+            bfac_name = "rank%d_shot%d_Bfactor" % (COMM.rank, i_shot)
+            Bfactor_val = None
+            if bfac_name in LMP:
+                bp = LMP[bfac_name]
+                Bfactor_val = bp.get_val(Xopt[bp.xpos])
+
+            # Extract Bfactor_aniso (if present)
+            Bfactor_aniso_val = None
+            baniso_name = "rank%d_shot%d_Baniso0" % (COMM.rank, i_shot)
+            if baniso_name in LMP:
+                Bfactor_aniso_val = tuple(
+                    LMP["rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i)].get_val(
+                        Xopt[LMP["rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i)].xpos])
+                    for i in range(6))
+
+            # Extract diffuse params (if present)
+            dgamma_name = "rank%d_shot%d_diffuse_gamma0" % (COMM.rank, i_shot)
+            diff_gamma_val = (np.nan, np.nan, np.nan)
+            diff_sigma_val = (np.nan, np.nan, np.nan)
+            if dgamma_name in LMP:
+                diff_gamma_val = tuple(
+                    LMP["rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i)].get_val(
+                        Xopt[LMP["rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i)].xpos])
+                    for i in range(3))
+                diff_sigma_val = tuple(
+                    LMP["rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i)].get_val(
+                        Xopt[LMP["rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i)].xpos])
+                    for i in range(3))
+
             _,fluxes = zip(*SIM.beam.spectrum)
-            # TODO OUTPUTDEF and LAM0, LAM1
             df= single_expt_pandas(xtal_scale=scale, Amat=new_crystal.get_A(),
                                    ncells_abc=(Na, Nb, Nc), ncells_def=(Nd, Ne, Nf),
                                    eta_abc=eta_abc,
-                                   diff_gamma=(np.nan, np.nan, np.nan),
-                                   diff_sigma=(np.nan, np.nan, np.nan),
+                                   diff_gamma=diff_gamma_val,
+                                   diff_sigma=diff_sigma_val,
                                    detz_shift=0,
                                    use_diffuse=params.use_diffuse_models,
                                    gamma_miller_units=params.gamma_miller_units,
@@ -1318,7 +1627,17 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
                                    opt_exp_name=os.path.abspath(new_expt_fname),
                                    spec_from_imageset=params.spectrum_from_imageset,
                                    oversample=SIM.D.oversample,
-                                   opt_det=params.opt_det, stg1_refls=Modeler.refl_name, stg1_img_path=None)
+                                   opt_det=params.opt_det, stg1_refls=Modeler.refl_name, stg1_img_path=None,
+                                   Bfactor=Bfactor_val, Bfactor_aniso=Bfactor_aniso_val)
+
+            # State snapshot at geometry end
+            from simtbx.diffBragg.diffbragg_state import should_snapshot as _should_snap
+            from simtbx.diffBragg.diffbragg_state import capture_geometry_state as _cap_geom
+            from simtbx.diffBragg.diffbragg_state import write_state_snapshot as _write_snap
+            if _should_snap(params, i_shot, COMM.rank):
+                _state = _cap_geom(Xopt, LMP, i_shot, Modeler, SIM, "geom_end", COMM.rank)
+                _write_snap(_state, params.outdir, "geom_end_rank%d_shot%d" % (COMM.rank, i_shot))
+
             all_dfs.append(df)
 
             # optionally save the modeler file
@@ -1346,6 +1665,16 @@ def save_opt_det(phil_params, x, ref_params, SIM):
     El = ExperimentList()
     E = Experiment()
     E.detector = opt_det
+    # Save optimized goniometer axis if it was refined
+    if "gonio_theta" in ref_params and not ref_params["gonio_theta"].fix:
+        from dxtbx.model import Goniometer
+        gt = ref_params["gonio_theta"]
+        gp = ref_params["gonio_phi"]
+        theta_opt = gt.get_val(x[gt.xpos])
+        phi_opt = gp.get_val(x[gp.xpos])
+        axis_opt = GoniometerParameters.spherical_to_cartesian(theta_opt, phi_opt)
+        E.goniometer = Goniometer(axis_opt)
+        print("Saved optimized gonio axis: (%.6f, %.6f, %.6f)" % axis_opt)
     El.append(E)
     El.as_file(phil_params.geometry.optimized_detector_name)
     print("Saved detector model to %s" % phil_params.geometry.optimized_detector_name )

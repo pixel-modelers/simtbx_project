@@ -242,9 +242,16 @@ class Script:
                 if self.params.only_dump_gathers:
                     continue
 
+            _multipanel_remap = False
             if self.params.refiner.reference_geom is not None:
-                detector = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0].detector
-                Modeler.E.detector = detector
+                ref_detector = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0].detector
+                from simtbx.diffBragg.multipanel_utils import is_multipanel_reference, remap_modeler_to_multipanel
+                if is_multipanel_reference(ref_detector, Modeler.E.detector):
+                    mono_detector = Modeler.E.detector
+                    remap_modeler_to_multipanel(Modeler, mono_detector, ref_detector)
+                    _multipanel_remap = True
+                else:
+                    Modeler.E.detector = ref_detector
 
             # here we support inputting an experiment list with multiple crystals
             # the first crystal in the exp list is used to instantiate a diffBragg instance,
@@ -265,6 +272,13 @@ class Script:
             if self.params.simulator.gonio.delta_phi is None:
                 self.params.simulator.gonio.delta_phi = self.params.init.gonio_angle
             SIM = hopper_utils.get_simulator_for_data_modelers(Modeler)
+
+            # Set up panel_group_from_id for multi-panel per-shot refinement
+            if _multipanel_remap:
+                from simtbx.diffBragg.multipanel_utils import setup_panel_group_from_id
+                setup_panel_group_from_id(SIM, len(Modeler.E.detector))
+                from simtbx.diffBragg.refiners.geometry import set_group_id_slices
+                set_group_id_slices(Modeler, SIM.panel_group_from_id)
             Modeler.set_parameters_for_experiment(best)
             MAIN_LOGGER.debug("Set parameters for experiment")
             Modeler.Umatrices = [Modeler.E.crystal.get_U()]
@@ -324,6 +338,12 @@ class Script:
                         Modeler.filter_pixels(self.params.filter_after_refinement.threshold)
                         x = Modeler.Minimize(x0, SIM, i_shot=i_shot)
 
+                # State snapshot: after main refinement
+                from simtbx.diffBragg.diffbragg_state import should_snapshot, capture_hopper_state, write_state_snapshot
+                if should_snapshot(self.params, i_shot, COMM.rank):
+                    _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_main", COMM.rank)
+                    write_state_snapshot(_state, self.params.outdir, "hopper_main_rank%d_shot%d" % (COMM.rank, i_shot))
+
                 if self.params.perRoi_finish:
                     old_params = deepcopy(self.params)
                     old_P = deepcopy(Modeler.P)
@@ -351,6 +371,11 @@ class Script:
 
                     x = Modeler.Minimize(new_x, SIM, i_shot=i_shot)
 
+                    # State snapshot: after perRoi_finish
+                    if should_snapshot(self.params, i_shot, COMM.rank):
+                        _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_perRoi", COMM.rank)
+                        write_state_snapshot(_state, self.params.outdir, "hopper_perRoi_rank%d_shot%d" % (COMM.rank, i_shot))
+
                     # set the roi_scale factors here on the reflection tables:
                     # reset the params
                     self.params = old_params
@@ -377,6 +402,11 @@ class Script:
                         old_p = old_P[name]
                         new_x[new_p.xpos] = x[old_p.xpos]
                     x = Modeler.Minimize(new_x, SIM, i_shot=i_shot)
+
+                    # State snapshot: after final refinement
+                    if should_snapshot(self.params, i_shot, COMM.rank):
+                        _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_final", COMM.rank)
+                        write_state_snapshot(_state, self.params.outdir, "hopper_final_rank%d_shot%d" % (COMM.rank, i_shot))
 
                     #use_cuda = os.environ["DIFFBRAGG_USE_CUDA"]
                     #del os.environ["DIFFBRAGG_USE_CUDA"]
@@ -433,6 +463,14 @@ class Script:
                             per_roi_scales[roi_id] = p.get_val(x[p.xpos])
 
                 Modeler.dump_gathered_to_refl(geom_output_name, per_roi_scales=per_roi_scales)
+
+                # State snapshot: geometry gather handoff
+                if should_snapshot(self.params, i_shot, COMM.rank):
+                    _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_geomgather", COMM.rank)
+                    if per_roi_scales is not None:
+                        _state["scale"]["per_roi_geomgather"] = {str(k): v for k, v in per_roi_scales.items()}
+                    write_state_snapshot(_state, self.params.outdir, "hopper_geomgather_rank%d_shot%d" % (COMM.rank, i_shot))
+
                 shot_df["geom_ref"] = os.path.abspath(geom_output_name)
                 shot_df["geom_exp"] = shot_df["opt_exp_name"]
                 shot_df["geom_exp_idx"] = 0
@@ -744,18 +782,30 @@ class Script:
             # Load data from the gathered refls (exact same data/bg/masks as hopper)
             self.params.refiner.load_data_from_refl = True
 
-            # Fix ALL crystal params except RotXYZ — geometry refinement moves detector + crystal orientation
-            self.params.fix.G = True
-            self.params.fix.Nabc = True
-            self.params.fix.Ndef = True
-            self.params.fix.RotXYZ = [0, 0, 0]  # REFINE crystal orientation during geometry optimization
-            self.params.fix.ucell = True
-            self.params.fix.eta_abc = True
-            self.params.fix.perRoiScale = True  # carry over from hopper, don't re-fit
+            # Crystal params for geometry refinement are controlled by geometry.fix.*
+            # Defaults are all fixed (True/1,1,1) - override via phil or command line
+            # e.g., geometry.fix.RotXYZ=0,0,0 to refine crystal orientation
 
             # Enable restraints for geometry refinement if specified
             if self.params.geometry.use_restraints:
                 self.params.use_restraints = True
+
+            # --- Multi-panel conversion (rank 0 converts, all ranks use results) ---
+            if self.params.geometry.multipanel:
+                if COMM.rank == 0:
+                    MAIN_LOGGER.info("Converting gathers to multi-panel format...")
+                    from simtbx.diffBragg.multipanel_utils import convert_gathers_to_multipanel
+                    import pandas
+                    fnames = sorted(glob.glob(pkl_glob))
+                    df = pandas.concat([pandas.read_pickle(f) for f in fnames])
+                    df = convert_gathers_to_multipanel(self.params, df)
+                    # Re-save the updated pandas pickle
+                    mp_pkl = os.path.join(self.params.outdir, "multipanel", "hopper_multipanel.pkl")
+                    df.to_pickle(mp_pkl)
+                    self.params.geometry.input_pkl = mp_pkl
+                    self.params.geometry.input_pkl_glob = None
+                COMM.barrier()
+                self.params = COMM.bcast(self.params if COMM.rank == 0 else None)
 
             from simtbx.diffBragg.refiners.geometry import geom_min
             geom_min(self.params)

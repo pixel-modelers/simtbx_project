@@ -92,6 +92,23 @@ DEFAULT_SIGMAS = {
     'ucell':    [0.01, 0.1, 0.5, 1.0, 5.0],
 }
 
+# Consolidated sigma groups (for --use-consolidated-sigmas mode)
+# Maps group name -> list of individual parameter names it controls
+CONSOLIDATED_SIGMA_GROUPS = {
+    'ucell_lengths': ['ucell_a', 'ucell_b', 'ucell_c'],
+    'ucell_angles':  ['ucell_al', 'ucell_be', 'ucell_ga'],
+    'Nabc_group':    ['Nabc'],  # Already a group, but included for consistency
+    'RotXYZ_group':  ['RotXYZ'],  # Already a group, but included for consistency
+}
+
+# Default sigmas for consolidated groups
+DEFAULT_CONSOLIDATED_SIGMAS = {
+    'ucell_lengths': [0.01, 0.1, 0.5, 1.0, 5.0],
+    'ucell_angles':  [0.001, 0.01, 0.05, 0.1, 0.5],  # Smaller range for angles (degrees)
+    'Nabc_group':    [0.01, 0.1, 0.5, 1.0, 5.0],
+    'RotXYZ_group':  [0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+}
+
 # Which params to fix at each stage (True = fixed)
 STAGE_FIXES = {
     'G':      {'G': False, 'RotXYZ': True,  'Nabc': True,  'B': True,  'ucell': True},
@@ -201,6 +218,38 @@ def generate_beta_sweep(tune_name, baseline_vars=None, refined_params=None,
     sweep = list(np.logspace(lo, hi, n_points))
 
     return sweep
+
+
+def expand_consolidated_sigmas(sigma_sweeps, use_consolidated=False):
+    """Expand consolidated sigma groups to individual parameters.
+
+    Args:
+        sigma_sweeps: dict mapping param name -> list of sigma values
+        use_consolidated: if True, interpret keys as consolidated groups
+
+    Returns:
+        dict mapping individual param names -> sigma values
+
+    Example:
+        Input:  {'ucell_lengths': [0.1, 1.0]}
+        Output: {'ucell_a': [0.1, 1.0], 'ucell_b': [0.1, 1.0], 'ucell_c': [0.1, 1.0]}
+    """
+    if not use_consolidated:
+        # Pass through unchanged for backward compatibility
+        return sigma_sweeps
+
+    expanded = {}
+    for group_name, sigma_vals in sigma_sweeps.items():
+        if group_name in CONSOLIDATED_SIGMA_GROUPS:
+            # Expand group to individual parameters
+            param_names = CONSOLIDATED_SIGMA_GROUPS[group_name]
+            for param_name in param_names:
+                expanded[param_name] = sigma_vals
+        else:
+            # Not a consolidated group, pass through
+            expanded[group_name] = sigma_vals
+
+    return expanded
 
 
 def densify_sweep(values, n_workers, clamp_min=0.01, clamp_max=100.0):
@@ -822,6 +871,8 @@ def _run_one_image_trial(args_tuple):
             'n_outlier_sigz': 0,
             'spearman_r_median': float('nan'),
             'spearman_vals': [],
+            'checker_median': float('nan'),
+            'checker_vals': [],
             'param_vals': {},
             'converged': False,
             'time_sec': time.time() - t0,
@@ -883,6 +934,8 @@ def aggregate_image_results(image_results, n_images):
                 'sigZ_median': float('inf'),
                 'sigZ_mean': float('inf'),
                 'spearman_r': float('nan'),
+                'checker_median': float('nan'),
+                'checker_mean': float('nan'),
                 'n_rois': 0,
                 'n_outliers': 0,
                 'param_vars': {},
@@ -897,12 +950,15 @@ def aggregate_image_results(image_results, n_images):
         # rather than median-of-per-image-medians which is too coarse with few images
         pooled_sigz = []
         pooled_spearman = []
+        pooled_checker = []
         for s in good:
             pooled_sigz.extend(s.get('sigz_vals', []))
             pooled_spearman.extend(s.get('spearman_vals', []))
+            pooled_checker.extend(s.get('checker_vals', []))
         # Filter non-finite
         pooled_sigz = [v for v in pooled_sigz if np.isfinite(v)]
         pooled_spearman = [v for v in pooled_spearman if np.isfinite(v)]
+        pooled_checker = [v for v in pooled_checker if np.isfinite(v)]
 
         # n_rois and n_outliers are summed across images
         total_rois = sum(s['n_rois'] for s in good)
@@ -959,6 +1015,8 @@ def aggregate_image_results(image_results, n_images):
             'sigZ_median': float(np.median(pooled_sigz)) if pooled_sigz else float('inf'),
             'sigZ_mean': float(np.mean(pooled_sigz)) if pooled_sigz else float('inf'),
             'spearman_r': float(np.median(pooled_spearman)) if pooled_spearman else float('nan'),
+            'checker_median': float(np.median(pooled_checker)) if pooled_checker else float('nan'),
+            'checker_mean': float(np.mean(pooled_checker)) if pooled_checker else float('nan'),
             'n_rois': total_rois,
             'n_outliers': total_outliers,
             'param_vars': param_vars,
@@ -1155,10 +1213,21 @@ def run_GB_sigma_sweep(base_phil, sigma_G_values, sigma_B_values, best_sigmas,
 
 def print_GB_summary(results):
     """Print summary table for a combinatorial G x B sweep."""
-    print("\n  %-10s  %-10s  %10s  %10s  %6s  %5s  %5s  %s" %
-          ('sigma_G', 'sigma_B', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out',
-           'time', 'status'))
-    print("  " + "-" * 78)
+    # Check if any result has CHECKER scores
+    has_checker = any(r.get('checker_median') is not None and
+                      not np.isnan(r.get('checker_median', float('nan')))
+                      for r in results)
+
+    if has_checker:
+        print("\n  %-10s  %-10s  %10s  %10s  %9s  %6s  %5s  %5s  %s" %
+              ('sigma_G', 'sigma_B', 'sigZ_med', 'sigZ_mean', 'CHECKER', 'n_roi', 'n_out',
+               'time', 'status'))
+        print("  " + "-" * 88)
+    else:
+        print("\n  %-10s  %-10s  %10s  %10s  %6s  %5s  %5s  %s" %
+              ('sigma_G', 'sigma_B', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out',
+               'time', 'status'))
+        print("  " + "-" * 78)
 
     valid = [r for r in results if r['converged'] and r.get('error') is None
              and r['sigZ_median'] < 1e6]
@@ -1169,10 +1238,18 @@ def print_GB_summary(results):
         sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
         sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
         marker = ' <-- best' if r is best else ''
-        print("  %-10.2e  %-10.2e  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
-              (r['sigma_G'], r['sigma_B'], sigz_med, sigz_mean,
-               r['n_rois'], r.get('n_outliers', 0), r['time_sec'],
-               status, marker))
+
+        if has_checker:
+            checker_str = '%.4f' % r.get('checker_median', float('nan')) if not np.isnan(r.get('checker_median', float('nan'))) else 'n/a'
+            print("  %-10.2e  %-10.2e  %10s  %10s  %9s  %6d  %5d  %5.1f  %s%s" %
+                  (r['sigma_G'], r['sigma_B'], sigz_med, sigz_mean, checker_str,
+                   r['n_rois'], r.get('n_outliers', 0), r['time_sec'],
+                   status, marker))
+        else:
+            print("  %-10.2e  %-10.2e  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
+                  (r['sigma_G'], r['sigma_B'], sigz_med, sigz_mean,
+                   r['n_rois'], r.get('n_outliers', 0), r['time_sec'],
+                   status, marker))
 
 
 def _print_trial_result(score):
@@ -1187,8 +1264,14 @@ def _print_trial_result(score):
         sigz_mean = score.get('sigZ_mean', score.get('sigz_mean', float('inf')))
         n_rois = score.get('n_rois', 0)
         n_out = score.get('n_outliers', score.get('n_outlier_sigz', 0))
-        print(" sigZ_med=%.3f sigZ_mean=%.3f n_rois=%d n_out=%d (%.1fs)" %
-              (sigz_med, sigz_mean, n_rois, n_out, score['time_sec']))
+        checker_med = score.get('checker_median', float('nan'))
+
+        if not np.isnan(checker_med):
+            print(" sigZ_med=%.3f sigZ_mean=%.3f CHECKER=%.4f n_rois=%d n_out=%d (%.1fs)" %
+                  (sigz_med, sigz_mean, checker_med, n_rois, n_out, score['time_sec']))
+        else:
+            print(" sigZ_med=%.3f sigZ_mean=%.3f n_rois=%d n_out=%d (%.1fs)" %
+                  (sigz_med, sigz_mean, n_rois, n_out, score['time_sec']))
     else:
         print(" FAILED: %s (%.1fs)" %
               (score.get('error', 'unknown')[:60], score['time_sec']))
@@ -1312,19 +1395,38 @@ def _score_trial_spearman(r):
 
 def print_stage_summary(stage, results):
     """Print a summary table for one stage's sweep."""
-    print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
-          ('sigma', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
-    print("  " + "-" * 68)
+    # Check if any result has CHECKER scores
+    has_checker = any(r.get('checker_median') is not None and
+                      not np.isnan(r.get('checker_median', float('nan')))
+                      for r in results)
+
+    if has_checker:
+        print("\n  %-12s  %10s  %10s  %9s  %6s  %5s  %5s  %s" %
+              ('sigma', 'sigZ_med', 'sigZ_mean', 'CHECKER', 'n_roi', 'n_out', 'time', 'status'))
+        print("  " + "-" * 80)
+    else:
+        print("\n  %-12s  %10s  %10s  %6s  %5s  %5s  %s" %
+              ('sigma', 'sigZ_med', 'sigZ_mean', 'n_roi', 'n_out', 'time', 'status'))
+        print("  " + "-" * 68)
+
     best = find_best_sigma(results, return_result=True)
     for r in results:
         status = 'OK' if r['converged'] and r['error'] is None else 'FAIL'
         sigz_med = '%.3f' % r['sigZ_median'] if r['sigZ_median'] < 1e6 else 'inf'
         sigz_mean = '%.3f' % r['sigZ_mean'] if r['sigZ_mean'] < 1e6 else 'inf'
         marker = ' <-- best' if best is not None and r is best else ''
-        print("  %-12.2e  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
-              (r['sigma'], sigz_med, sigz_mean, r['n_rois'],
-               r.get('n_outliers', 0), r['time_sec'],
-               status, marker))
+
+        if has_checker:
+            checker_str = '%.4f' % r.get('checker_median', float('nan')) if not np.isnan(r.get('checker_median', float('nan'))) else 'n/a'
+            print("  %-12.2e  %10s  %10s  %9s  %6d  %5d  %5.1f  %s%s" %
+                  (r['sigma'], sigz_med, sigz_mean, checker_str, r['n_rois'],
+                   r.get('n_outliers', 0), r['time_sec'],
+                   status, marker))
+        else:
+            print("  %-12.2e  %10s  %10s  %6d  %5d  %5.1f  %s%s" %
+                  (r['sigma'], sigz_med, sigz_mean, r['n_rois'],
+                   r.get('n_outliers', 0), r['time_sec'],
+                   status, marker))
 
 
 def find_best_sigma(results, return_result=False):
@@ -1987,6 +2089,288 @@ def build_model_sweep_phil(base_phil, best_sigmas, init_G=None,
     lines.append('}')
 
     return '\n'.join(lines) + '\n'
+
+
+def run_geometry_refinement_tuning(base_phil, spec_lines, refined_params,
+                                   refine_goniometer=False, method="lbfgsb",
+                                   max_calls=100, panel_group_file=None,
+                                   use_cuda=False, outdir=None, mpi_comm=None):
+    """Run ensemble geometry refinement during Phase 2 tuning.
+
+    This refines detector and optionally goniometer using geom_min(), similar
+    to how phisteps/sigma_r are tuned in Phase 2, but not a sweep - just a
+    single optimization run.
+
+    Args:
+        base_phil: Base phil string (from tuning_base)
+        spec_lines: List of spec file lines for geometry refinement
+        refined_params: Dict of refined parameters from Phase 1 (medians)
+        refine_goniometer: Whether to refine goniometer axis
+        method: Optimization method (lbfgsb or nelder)
+        max_calls: Max iterations
+        panel_group_file: Panel grouping file (or None)
+        use_cuda: Use GPU
+        outdir: Output directory
+        mpi_comm: MPI communicator
+
+    Returns:
+        Path to optimized detector expt file (or None if failed)
+    """
+    import os
+    from libtbx.phil import parse
+    from simtbx.diffBragg import phil as diffBragg_phil
+    from simtbx.diffBragg.phil import hopper_phil
+    from simtbx.diffBragg.refiners.geometry import geom_min
+    from simtbx.diffBragg import hopper_utils
+
+    # Create combined phil scope that includes hopper_phil
+    combined_phil_str = hopper_phil + diffBragg_phil.philz
+    combined_phil_scope = parse(combined_phil_str)
+
+    if mpi_comm is None:
+        try:
+            from mpi4py import MPI
+            mpi_comm = MPI.COMM_WORLD
+        except ImportError:
+            # Create mock communicator for non-MPI case
+            class MockComm:
+                rank = 0
+                size = 1
+                def barrier(self): pass
+                def reduce(self, data, root=0): return data
+                def bcast(self, data, root=0): return data
+            mpi_comm = MockComm()
+
+    rank = mpi_comm.rank
+
+    if outdir is None:
+        outdir = "geom_tuning_output"
+
+    if rank == 0:
+        os.makedirs(outdir, exist_ok=True)
+        pandas_dir = os.path.join(outdir, "pandas")
+        os.makedirs(pandas_dir, exist_ok=True)
+
+    mpi_comm.barrier()
+    pandas_dir = os.path.join(outdir, "pandas")
+
+    # Step 1: Generate pandas pickles for geometry refinement
+    if rank == 0:
+        print("  Step 1: Generating pandas pickles...")
+
+    # Create phil for pickle generation
+    geom_phil = base_phil + '\n'
+    geom_phil += 'debug_mode = True\n'
+    geom_phil += 'save_pandas = True\n'
+    geom_phil += 'load_data_from_refls = False\n'
+    # Note: outdir should be the parent directory; make_rank_outdir will add "pandas/rank*"
+    geom_phil += 'outdir = %s\n' % outdir
+    geom_phil += 'logging.rank0_level = low\n'
+    geom_phil += 'save_spot_diagnostics = False\n'
+
+    # Fix crystal params (should already be in base_phil, but ensure)
+    geom_phil += 'fix.scale = True\n'
+    geom_phil += 'fix.Nabc = True\n'
+    geom_phil += 'fix.RotXYZ = 0,0,0\n'
+    geom_phil += 'fix.B = True\n'
+    geom_phil += 'fix.ucell = True\n'
+
+    # Parse phil
+    try:
+        params = combined_phil_scope.fetch(
+            source=parse(geom_phil)
+        ).extract()
+    except Exception as e:
+        if rank == 0:
+            print("  ERROR parsing phil: %s" % str(e))
+        return None
+
+    # Distribute spec_lines across ranks
+    my_lines = [line for i, line in enumerate(spec_lines) if i % mpi_comm.size == rank]
+
+    n_success = 0
+    n_fail = 0
+    for i_line, line in enumerate(my_lines):
+        try:
+            if rank == 0:
+                print("    DEBUG: Processing line %d: %s" % (i_line, line[:80]))
+            exp, ref, exp_idx, spec = hopper_utils.split_line(line)
+            if rank == 0:
+                print("    DEBUG: exp=%s ref=%s spec=%s" % (exp[:40], ref[:40], spec[:40] if spec else "None"))
+            new_exp, new_refl, Modeler, SIM, x = hopper_utils.refine(
+                exp, ref, params, spec=spec,
+                gpu_device=0 if use_cuda else None,
+                return_modeler=True)
+            if rank == 0:
+                print("    DEBUG: refine() completed, calling save_up()")
+
+            # Set exper_name and refl_name (required for save_up)
+            Modeler.exper_name = exp
+            Modeler.refl_name = ref
+            Modeler.exper_idx = exp_idx
+
+            # Create gathered reflection file for geometry refinement
+            # This contains the observed and predicted pixel data from the model
+            geom_gathers_dir = os.path.join(outdir, "geom_gathers")
+            if rank == 0:
+                os.makedirs(geom_gathers_dir, exist_ok=True)
+            mpi_comm.barrier()
+
+            basename = os.path.splitext(os.path.basename(exp))[0]
+            geom_output_name = "%s_geomData.refl" % basename
+            geom_output_name = os.path.join(geom_gathers_dir, geom_output_name)
+
+            # Dump gathered data to reflection file (contains obs/pred pixels from model)
+            if rank == 0:
+                print("    DEBUG: Creating gathered refl file: %s" % geom_output_name)
+            Modeler.dump_gathered_to_refl(geom_output_name, per_roi_scales=None)
+            if rank == 0 and os.path.exists(geom_output_name):
+                print("    DEBUG: Gathered refl file created successfully, size: %d bytes" % os.path.getsize(geom_output_name))
+
+            # Explicitly call save_up to save pandas pickle
+            # Note: must save_expt=True for geometry refinement to work (geom_exp needs valid path)
+            shot_df = Modeler.save_up(x, SIM, rank=rank, i_shot=i_line,
+                           save_fhkl_data=False,
+                           save_modeler_file=False,
+                           save_refl=False,
+                           save_sim_info=False,
+                           save_traces=False,
+                           save_pandas=True,
+                           save_expt=True)
+
+            # CRITICAL: Set geom_ref to the gathered reflection file (not stage1_refls!)
+            # This is what geometry refinement expects
+            shot_df["geom_ref"] = os.path.abspath(geom_output_name)
+            shot_df["geom_exp"] = shot_df["opt_exp_name"].values[0]
+            shot_df["geom_exp_idx"] = 0
+
+            if rank == 0:
+                print("    DEBUG: Setting geom_ref to: %s" % shot_df["geom_ref"].values[0])
+                print("    DEBUG: Setting geom_exp to: %s" % shot_df["geom_exp"].values[0])
+
+            # Re-save the pickle with the geometry columns
+            rank_pandas_outdir = os.path.join(outdir, "pandas", "rank%d" % rank)
+            pandas_path = os.path.join(rank_pandas_outdir, "stage1_%s_%d.pkl" % (basename, i_line))
+            shot_df.to_pickle(pandas_path)
+
+            if rank == 0:
+                print("    DEBUG: Saved pickle to: %s" % pandas_path)
+
+            if rank == 0:
+                print("    DEBUG: save_up() completed successfully")
+            n_success += 1
+        except Exception as e:
+            n_fail += 1
+            if rank == 0 and n_fail <= 3:  # Print first 3 errors
+                import traceback
+                print("    WARNING: Failed on image %d" % i_line)
+                print("    ERROR TYPE: %s" % type(e).__name__)
+                print("    ERROR MESSAGE: %s" % repr(str(e)))
+                print("    TRACEBACK:")
+                traceback.print_exc()
+
+    # Gather success/fail counts
+    all_success = mpi_comm.reduce(n_success, root=0)
+    all_fail = mpi_comm.reduce(n_fail, root=0)
+
+    if rank == 0:
+        print("    Generated %d pickles (%d failed)" % (all_success, all_fail))
+
+    mpi_comm.barrier()
+
+    # Step 2: Run geometry refinement
+    if rank == 0:
+        print("\n  Step 2: Running geometry refinement...")
+        # Debug: check what pickles exist
+        import glob as glob_module
+        import subprocess
+        pkl_pattern = '%s/rank*/*.pkl' % pandas_dir
+        found_pickles = glob_module.glob(pkl_pattern)
+        print("  DEBUG: Looking for pickles with pattern: %s" % pkl_pattern)
+        print("  DEBUG: Found %d pickle files" % len(found_pickles))
+        # Check actual directory structure
+        result = subprocess.run(['find', pandas_dir, '-name', '*.pkl'],
+                              capture_output=True, text=True)
+        if result.stdout:
+            print("  DEBUG: Actual pickle files found:\n%s" % result.stdout[:500])
+        else:
+            print("  DEBUG: No pickle files found with find command")
+            # Check if pandas_dir exists and what's in it
+            result2 = subprocess.run(['ls', '-laR', pandas_dir],
+                                   capture_output=True, text=True)
+            print("  DEBUG: pandas_dir contents:\n%s" % result2.stdout[:500])
+
+    # Create geometry refinement phil
+    geom_refine_phil = base_phil + '\n'
+    geom_refine_phil += 'geometry.input_pkl_glob = %s/rank*/*.pkl\n' % pandas_dir
+    geom_refine_phil += 'geometry.optimize = True\n'
+    geom_refine_phil += 'geometry.optimize_method = %s\n' % method
+    geom_refine_phil += 'geometry.max_calls = %d\n' % max_calls
+    geom_refine_phil += 'outdir = %s\n' % outdir
+
+    # CRITICAL: Load data from gathered reflection files (not images!)
+    # This is what makes geometry refinement work - it uses the obs/pred pixel data
+    # from the gathered refl files created by dump_gathered_to_refl()
+    geom_refine_phil += 'refiner.load_data_from_refl = True\n'
+
+    # Goniometer refinement
+    if refine_goniometer:
+        geom_refine_phil += 'geometry.fix.gonio_axis = False\n'
+        geom_refine_phil += 'geometry.sigma_gonio_axis = 0.01\n'
+    else:
+        geom_refine_phil += 'geometry.fix.gonio_axis = True\n'
+
+    # Panel grouping
+    if panel_group_file is not None:
+        geom_refine_phil += 'geometry.panel_group_file = %s\n' % panel_group_file
+
+    # Fix crystal parameters during geometry refinement
+    geom_refine_phil += 'fix.G = True\n'
+    geom_refine_phil += 'fix.Nabc = True\n'
+    geom_refine_phil += 'fix.Ndef = True\n'
+    geom_refine_phil += 'fix.RotXYZ = 0,0,0\n'  # REFINE crystal orientation during geometry
+    geom_refine_phil += 'fix.B = True\n'
+    geom_refine_phil += 'fix.ucell = True\n'
+    geom_refine_phil += 'fix.eta_abc = True\n'
+    geom_refine_phil += 'fix.perRoiScale = True\n'
+
+    # Parse and run
+    try:
+        params = combined_phil_scope.fetch(
+            source=parse(geom_refine_phil)
+        ).extract()
+
+        geom_min(params)
+
+        # Check for optimized detector
+        optimized_detector = os.path.join(outdir, params.geometry.optimized_detector_name)
+
+        # Broadcast result to all ranks
+        if rank == 0:
+            if os.path.exists(optimized_detector):
+                result = optimized_detector
+            else:
+                result = None
+        else:
+            result = None
+
+        result = mpi_comm.bcast(result, root=0)
+
+        if rank == 0:
+            if result is not None:
+                print("    Geometry refinement complete!")
+                print("    Detector: %s" % result)
+            else:
+                print("    WARNING: Optimized detector not found!")
+
+        return result
+
+    except Exception as e:
+        if rank == 0:
+            print("  ERROR in geometry refinement: %s" % str(e))
+            import traceback
+            traceback.print_exc()
+        return None
 
 
 # Mapping from beta param name to CSV columns and unrestricted variance key
@@ -2851,7 +3235,7 @@ Examples:
                              "refinement (provides centers from refined params).")
     parser.add_argument("--tune-params", default=None,
                         help="Comma-sep list of params to tune (default: all). "
-                             "Options: betas.G,betas.B,betas.Nabc,betas.cholesky,"
+                             "Options: geometry,betas.G,betas.B,betas.Nabc,betas.cholesky,"
                              "betas.RotXYZ,phisteps,sigma_r")
     parser.add_argument("--tune-max-calls", type=int, default=500,
                         help="Max L-BFGS-B iterations for tuning trials (default: 500)")
@@ -2864,6 +3248,23 @@ Examples:
                              "sigma_r) and beta sweep trials (default: same as "
                              "--n-frames). More frames give more stable results "
                              "for sigma_r selection and spread-ratio curves.")
+
+    # Geometry refinement (Phase 2)
+    parser.add_argument("--tune-geometry", action="store_true",
+                        help="Refine detector geometry in Phase 2 before beta sweeps. "
+                             "Uses tune_n_frames images. Requires --tune-restraints.")
+    parser.add_argument("--tune-goniometer", action="store_true",
+                        help="Include goniometer axis in geometry refinement. "
+                             "Requires --tune-geometry. Uses spherical parameterization.")
+    parser.add_argument("--geometry-method", default="lbfgsb",
+                        choices=["lbfgsb", "nelder"],
+                        help="Optimization method for geometry refinement (default: lbfgsb). "
+                             "Use 'nelder' if C++ derivatives not available.")
+    parser.add_argument("--geometry-max-calls", type=int, default=100,
+                        help="Max iterations for geometry refinement (default: 100).")
+    parser.add_argument("--panel-group-file", default=None,
+                        help="Panel grouping file for multi-panel detectors. "
+                             "See refiners/geometry.py for format.")
 
     # Parallelism
     parser.add_argument("--n-parallel", type=int, default=1,
@@ -3417,6 +3818,38 @@ Examples:
                       else '%.4g' % best_val))
             else:
                 print("\n  WARNING: No valid results for %s!" % model_param)
+
+        # --- Geometry refinement (if enabled) ---
+        if args.tune_geometry:
+            print("\n" + "=" * 60)
+            print("GEOMETRY REFINEMENT")
+            print("=" * 60)
+            print("  Images: %d" % len(tune_sample_lines))
+            print("  Method: %s" % args.geometry_method)
+            print("  Refine goniometer: %s" % args.tune_goniometer)
+            print()
+
+            optimized_detector_path = run_geometry_refinement_tuning(
+                base_phil=model_base if tuned_model else base_phil,
+                spec_lines=tune_sample_lines,
+                refined_params={},  # No centers needed for geometry
+                refine_goniometer=args.tune_goniometer,
+                method=args.geometry_method,
+                max_calls=args.geometry_max_calls,
+                panel_group_file=args.panel_group_file,
+                use_cuda=args.cuda,
+                outdir=os.path.join(tmpdir, "geometry"),
+                mpi_comm=mpi_comm
+            )
+
+            if optimized_detector_path is not None:
+                # Update base_phil with optimized detector
+                base_phil += '\ngeometry.input_expt = %s\n' % optimized_detector_path
+                tuned_model['geometry'] = optimized_detector_path
+                print("  Geometry refinement complete!")
+                print("  Detector: %s" % optimized_detector_path)
+            else:
+                print("  WARNING: Geometry refinement failed!")
 
         if tuned_model:
             # Append tuned model params to base_phil so all subsequent sweeps use them

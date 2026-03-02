@@ -261,6 +261,7 @@ with DeviceWrapper(0) as _:
     logging.basicConfig(level=logging.DEBUG, handlers=[h])
     if args.noNabcScale:
         P.no_Nabc_scale = True
+        P.init.G /= 30**6  # account for fixed spot_scale=30^6 baseline in simulator_for_refinement
         P.maxs.G = 1e16
 
     from simtbx.diffBragg import hopper_utils

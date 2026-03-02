@@ -80,12 +80,19 @@ void gpu_sum_over_steps(
         const CUDAREAL* __restrict__ Fhkl_scale, CUDAREAL* Fhkl_scale_deriv,
         bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle,
         CUDAREAL Bfactor_image, bool refine_Bfactor, CUDAREAL* d_Bfactor_images,
-        const CUDAREAL* __restrict__ Bfactor_aniso, bool refine_Bfactor_aniso, CUDAREAL* d_Bfactor_aniso_images)
+        const CUDAREAL* __restrict__ Bfactor_aniso, bool refine_Bfactor_aniso, CUDAREAL* d_Bfactor_aniso_images,
+        CUDAREAL spindle_theta_sph, CUDAREAL spindle_phi_sph,
+        bool refine_gonio_theta, bool refine_gonio_phi,
+        CUDAREAL* d_gonio_theta_images, CUDAREAL* d_gonio_phi_images)
 { // BEGIN GPU kernel
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_stride = blockDim.x * gridDim.x;
     __shared__ bool s_refine_gonio_angle;
+    __shared__ bool s_refine_gonio_theta;
+    __shared__ bool s_refine_gonio_phi;
+    __shared__ bool s_compute_gonio_axis_derivs;
+    __shared__ CUDAREAL s_spindle_theta, s_spindle_phi;
     __shared__ bool s_refine_Bfactor;
     __shared__ CUDAREAL s_Bfactor_image;
     __shared__ bool s_refine_Bfactor_aniso;
@@ -156,6 +163,11 @@ void gpu_sum_over_steps(
 
     if (threadIdx.x==0){ // TODO can we get speed gains by dividing up the following definitions over more threads ?
         s_refine_gonio_angle = refine_gonio_angle;
+        s_refine_gonio_theta = refine_gonio_theta;
+        s_refine_gonio_phi = refine_gonio_phi;
+        s_compute_gonio_axis_derivs = refine_gonio_theta || refine_gonio_phi;
+        s_spindle_theta = spindle_theta_sph;
+        s_spindle_phi = spindle_phi_sph;
         s_refine_Bfactor = refine_Bfactor;
         s_Bfactor_image = Bfactor_image;
         s_refine_Bfactor_aniso = refine_Bfactor_aniso;
@@ -359,6 +371,8 @@ void gpu_sum_over_steps(
         double pan_rot_manager_dI[3]= {0,0,0};
         double pan_rot_manager_dI2[3]= {0,0,0};
         double dI_gonio_angle = 0;
+        double dI_gonio_theta = 0;
+        double dI_gonio_phi = 0;
         double fcell_manager_dI = 0;
         double fcell_manager_dI2 = 0;
         double eta_manager_dI[3] = {0,0,0};
@@ -496,8 +510,9 @@ void gpu_sum_over_steps(
         for (int _phi_tic=0; _phi_tic<s_phisteps; ++_phi_tic){
             MAT3 Rphi;
             MAT3 dRphi;
+            MAT3 dRphi_dtheta, dRphi_dphi;
             CUDAREAL phi = s_phi0 + s_phistep*_phi_tic;
-            if (phi != 0 || s_refine_gonio_angle){
+            if (phi != 0 || s_refine_gonio_angle || s_compute_gonio_axis_derivs){
                 CUDAREAL c = cos(phi);
                 CUDAREAL omc = 1-c;
                 CUDAREAL s = sin(phi);
@@ -513,12 +528,51 @@ void gpu_sum_over_steps(
                            gy*gx*domc + gz*ds,   dc + gy*gy*domc,   gy*gz*domc - gx*ds,
                            gz*gx*domc - gy*ds,  gz*gy*domc + gx*ds, dc + gz*gz*domc;
                 }
+                // Goniometer axis derivatives (theta and phi spherical angles)
+                if (s_compute_gonio_axis_derivs){
+                    CUDAREAL sin_theta = sin(s_spindle_theta);
+                    CUDAREAL cos_theta = cos(s_spindle_theta);
+                    CUDAREAL sin_phi_sph = sin(s_spindle_phi);
+                    CUDAREAL cos_phi_sph = cos(s_spindle_phi);
+
+                    // d(gx,gy,gz)/dtheta
+                    CUDAREAL dgx_dt = cos_theta * cos_phi_sph;
+                    CUDAREAL dgy_dt = cos_theta * sin_phi_sph;
+                    CUDAREAL dgz_dt = -sin_theta;
+
+                    // d(gx,gy,gz)/dphi_sph
+                    CUDAREAL dgx_dp = -sin_theta * sin_phi_sph;
+                    CUDAREAL dgy_dp = sin_theta * cos_phi_sph;
+                    CUDAREAL dgz_dp = 0.0;
+
+                    // dRphi/dtheta via chain rule through gx,gy,gz
+                    dRphi_dtheta(0,0) = 2*gx*omc*dgx_dt;
+                    dRphi_dtheta(0,1) = omc*(gy*dgx_dt + gx*dgy_dt) - s*dgz_dt;
+                    dRphi_dtheta(0,2) = omc*(gz*dgx_dt + gx*dgz_dt) + s*dgy_dt;
+                    dRphi_dtheta(1,0) = omc*(gx*dgy_dt + gy*dgx_dt) + s*dgz_dt;
+                    dRphi_dtheta(1,1) = 2*gy*omc*dgy_dt;
+                    dRphi_dtheta(1,2) = omc*(gz*dgy_dt + gy*dgz_dt) - s*dgx_dt;
+                    dRphi_dtheta(2,0) = omc*(gx*dgz_dt + gz*dgx_dt) - s*dgy_dt;
+                    dRphi_dtheta(2,1) = omc*(gy*dgz_dt + gz*dgy_dt) + s*dgx_dt;
+                    dRphi_dtheta(2,2) = 2*gz*omc*dgz_dt;
+
+                    // dRphi/dphi_sph via chain rule through gx,gy,gz
+                    dRphi_dphi(0,0) = 2*gx*omc*dgx_dp;
+                    dRphi_dphi(0,1) = omc*(gy*dgx_dp + gx*dgy_dp) - s*dgz_dp;
+                    dRphi_dphi(0,2) = omc*(gz*dgx_dp + gx*dgz_dp) + s*dgy_dp;
+                    dRphi_dphi(1,0) = omc*(gx*dgy_dp + gy*dgx_dp) + s*dgz_dp;
+                    dRphi_dphi(1,1) = 2*gy*omc*dgy_dp;
+                    dRphi_dphi(1,2) = omc*(gz*dgy_dp + gy*dgz_dp) - s*dgx_dp;
+                    dRphi_dphi(2,0) = omc*(gx*dgz_dp + gz*dgx_dp) - s*dgy_dp;
+                    dRphi_dphi(2,1) = omc*(gy*dgz_dp + gz*dgy_dp) + s*dgx_dp;
+                    dRphi_dphi(2,2) = 2*gz*omc*dgz_dp;
+                }
             }
 
         for(int _mos_tic=0;_mos_tic<s_mosaic_domains;++_mos_tic){
             int amat_idx = _mos_tic;
             MAT3 UBO = Amatrices[amat_idx];
-            if (phi != 0 || s_refine_gonio_angle){
+            if (phi != 0 || s_refine_gonio_angle || s_compute_gonio_axis_derivs){
                 MAT3 Um = UMATS_RXYZ[_mos_tic]; // note, this will be slow - check if we can simply allow Um and Rphi to commute ...
                 UBO = UBO*Um*Rphi.transpose()*Um.transpose();
             }
@@ -759,10 +813,15 @@ void gpu_sum_over_steps(
 
             MAT3 UBOt;
             MAT3 dUBOt;
-            if (s_refine_Umat[0] || s_refine_Umat[1] ||s_refine_Umat[2] || s_refine_eta || s_refine_gonio_angle){
+            MAT3 dUBOt_theta, dUBOt_phi;
+            if (s_refine_Umat[0] || s_refine_Umat[1] ||s_refine_Umat[2] || s_refine_eta || s_refine_gonio_angle || s_compute_gonio_axis_derivs){
                 UBOt = Amat_init;
                 if (s_refine_gonio_angle)
                     dUBOt = dRphi*UBOt;
+                if (s_refine_gonio_theta)
+                    dUBOt_theta = dRphi_dtheta*UBOt;
+                if (s_refine_gonio_phi)
+                    dUBOt_phi = dRphi_dphi*UBOt;
                 if (phi != 0)
                     UBOt = Rphi*UBOt;
             }
@@ -771,6 +830,18 @@ void gpu_sum_over_steps(
                 CUDAREAL V_dot_dV = V.dot(_NABC*delta_H_prime);
                 CUDAREAL value = -two_C * V_dot_dV * Iincrement;
                 dI_gonio_angle += value;
+            }
+            if (s_refine_gonio_theta){
+                VEC3 delta_H_prime = (UMATS_RXYZ[_mos_tic]*dUBOt_theta).transpose()*q_vec;
+                CUDAREAL V_dot_dV = V.dot(_NABC*delta_H_prime);
+                CUDAREAL value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_theta += value;
+            }
+            if (s_refine_gonio_phi){
+                VEC3 delta_H_prime = (UMATS_RXYZ[_mos_tic]*dUBOt_phi).transpose()*q_vec;
+                CUDAREAL V_dot_dV = V.dot(_NABC*delta_H_prime);
+                CUDAREAL value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_phi += value;
             }
             if (s_refine_Umat[0]){
                 MAT3 RyRzUBOt = RotMats[1]*RotMats[2]*UBOt;
@@ -1162,6 +1233,12 @@ void gpu_sum_over_steps(
         if (s_refine_gonio_angle){
             CUDAREAL value = _scale_term * dI_gonio_angle;
             d_gonio_angle_images[i_pix] = value;
+        }
+        if (s_refine_gonio_theta){
+            d_gonio_theta_images[i_pix] = _scale_term * dI_gonio_theta;
+        }
+        if (s_refine_gonio_phi){
+            d_gonio_phi_images[i_pix] = _scale_term * dI_gonio_phi;
         }
 
         // update the B-factor derivative image

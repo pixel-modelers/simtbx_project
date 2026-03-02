@@ -330,7 +330,9 @@ with DeviceWrapper(0) as _:
     if args.perturb is not None and "Nabc" in args.perturb:
         P.fix.Nabc = False
         P.no_Nabc_scale = True  # decouple det(NABC) from intensity; G absorbs the scale
-        P.maxs.G = 1e16  # G is much larger with det(NABC)^2 absorbed
+        P.init.G /= 30**6  # account for fixed spot_scale=30^6 baseline in simulator_for_refinement
+        P.centers.G /= 30**6  # scale restraint center to match
+        P.maxs.G = 1e16
         P.init.Nabc = 15,15,14  # ~25% perturbation from GT (12,12,11)
         P.init.cholesky = None  # auto-compute from init.Nabc (perturbed diagonal-only start)
         # Tighten Cholesky bounds for L-BFGS-B convergence.  Default [-300,300] range
@@ -729,6 +731,8 @@ with DeviceWrapper(0) as _:
             B_factors_per_shot = [args.perturb_B * _b_pattern[i % len(_b_pattern)] for i in range(N_MULTI_SHOTS)]
         beam_dir = _col((0, 0, 1))  # beam along z
         base_G = SIM.D.spot_scale  # ground truth base G
+        if refine_nabc:
+            base_G /= 30**6  # account for fixed spot_scale=30^6 baseline
 
         # Free the original SIM.D to make GPU room
         saved_beam = SIM.D.beam

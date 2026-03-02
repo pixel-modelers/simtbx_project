@@ -55,9 +55,12 @@ enum refine_flag : uint32_t {
     REFINE_LAMBDA1 = (1u << 23),
     REFINE_LAMBDA2 = (1u << 24),
     REFINE_ICELL = (1u << 25),
-    REFINE_BFACTOR = (1u << 26)
+    REFINE_BFACTOR = (1u << 26),
+    REFINE_GONIO_THETA = (1u << 27),
+    REFINE_GONIO_PHI = (1u << 28)
 };
 
+constexpr unsigned int REFINE_GONIO_AXIS = REFINE_GONIO_THETA | REFINE_GONIO_PHI;
 constexpr unsigned int REFINE_BMAT = REFINE_BMAT1 | REFINE_BMAT2 | REFINE_BMAT3 | REFINE_BMAT4 | REFINE_BMAT5 | REFINE_BMAT6;
 constexpr unsigned int REFINE_UMAT = REFINE_UMAT1 | REFINE_UMAT2 | REFINE_UMAT3;
 constexpr unsigned int REFINE_NCELLS = REFINE_NCELLS1 | REFINE_NCELLS2 | REFINE_NCELLS3;

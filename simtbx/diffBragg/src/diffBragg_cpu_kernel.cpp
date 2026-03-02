@@ -401,6 +401,8 @@ void diffBragg_sum_over_steps(
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_latt_diffuse[6] = {0,0,0,0,0,0};
         double dI_gonio_ang = 0;
+        double dI_gonio_theta = 0;
+        double dI_gonio_phi = 0;
         double dI_Bfactor = 0;
         double dI_Bfac_aniso[6] = {0,0,0,0,0,0};
 
@@ -512,7 +514,11 @@ void diffBragg_sum_over_steps(
             Eigen::Matrix3d UBOt=U*Bmat_realspace*(db_cryst.eig_O.transpose());
             Eigen::Matrix3d dUBOt;
             double phi = db_cryst.phi0 + db_cryst.phistep*phi_tic;
-            if (phi != 0 || db_flags.refine_gonio_angle){
+            // Variables for goniometer axis derivatives (declared outside conditional)
+            Eigen::Matrix3d dUBOt_theta, dUBOt_phi;
+            bool compute_gonio_axis_derivs = db_flags.refine_gonio_theta || db_flags.refine_gonio_phi;
+
+            if (phi != 0 || db_flags.refine_gonio_angle || compute_gonio_axis_derivs){
 
                 double c = cos(phi);
                 double omc = 1-c;
@@ -533,6 +539,75 @@ void diffBragg_sum_over_steps(
                           gz*gx*domc - gy*ds,  gz*gy*domc + gx*ds, dc + gz*gz*domc;
                     dUBOt = dRphi* UBOt;
                 }
+
+                // Goniometer axis derivatives (theta and phi spherical angles)
+                // spindle_vec = (sin(theta)*cos(phi_sph), sin(theta)*sin(phi_sph), cos(theta))
+                if (compute_gonio_axis_derivs){
+                    double theta_sph = db_cryst.spindle_theta;
+                    double phi_sph = db_cryst.spindle_phi;
+                    double sin_theta = sin(theta_sph);
+                    double cos_theta = cos(theta_sph);
+                    double sin_phi_sph = sin(phi_sph);
+                    double cos_phi_sph = cos(phi_sph);
+
+                    // Derivatives of spindle_vec components w.r.t. theta
+                    double dgx_dtheta = cos_theta * cos_phi_sph;
+                    double dgy_dtheta = cos_theta * sin_phi_sph;
+                    double dgz_dtheta = -sin_theta;
+
+                    // Derivatives of spindle_vec components w.r.t. phi_sph
+                    double dgx_dphi = -sin_theta * sin_phi_sph;
+                    double dgy_dphi = sin_theta * cos_phi_sph;
+                    double dgz_dphi = 0.0;
+
+                    // Compute dRphi/dtheta using chain rule
+                    // Rphi[i,j] depends on gx, gy, gz, so dRphi/dtheta = sum(dRphi/dg_k * dg_k/dtheta)
+                    // Rodrigues matrix: Rphi = c*I + (1-c)*g*g^T + s*[g]_x
+                    // where [g]_x is the skew-symmetric cross-product matrix
+                    //
+                    // dRphi/dgx affects: Rphi[0,0], Rphi[0,1], Rphi[0,2], Rphi[1,0], Rphi[1,2], Rphi[2,0], Rphi[2,1]
+                    // Similar for dgy and dgz
+
+                    // For theta derivative: compute dRphi/dtheta * UBOt
+                    // The Rodrigues matrix is:
+                    // Rphi = [c + gx*gx*omc,    gx*gy*omc-gz*s,   gx*gz*omc+gy*s]
+                    //        [gy*gx*omc+gz*s,   c + gy*gy*omc,   gy*gz*omc-gx*s]
+                    //        [gz*gx*omc-gy*s,   gz*gy*omc+gx*s,   c + gz*gz*omc]
+
+                    Eigen::Matrix3d dRphi_dtheta;
+                    // Row 0
+                    dRphi_dtheta(0,0) = 2*gx*omc*dgx_dtheta;
+                    dRphi_dtheta(0,1) = omc*(gy*dgx_dtheta + gx*dgy_dtheta) - s*dgz_dtheta;
+                    dRphi_dtheta(0,2) = omc*(gz*dgx_dtheta + gx*dgz_dtheta) + s*dgy_dtheta;
+                    // Row 1
+                    dRphi_dtheta(1,0) = omc*(gx*dgy_dtheta + gy*dgx_dtheta) + s*dgz_dtheta;
+                    dRphi_dtheta(1,1) = 2*gy*omc*dgy_dtheta;
+                    dRphi_dtheta(1,2) = omc*(gz*dgy_dtheta + gy*dgz_dtheta) - s*dgx_dtheta;
+                    // Row 2
+                    dRphi_dtheta(2,0) = omc*(gx*dgz_dtheta + gz*dgx_dtheta) - s*dgy_dtheta;
+                    dRphi_dtheta(2,1) = omc*(gy*dgz_dtheta + gz*dgy_dtheta) + s*dgx_dtheta;
+                    dRphi_dtheta(2,2) = 2*gz*omc*dgz_dtheta;
+
+                    dUBOt_theta = dRphi_dtheta * UBOt;
+
+                    // For phi derivative: compute dRphi/dphi_sph * UBOt
+                    Eigen::Matrix3d dRphi_dphi;
+                    // Row 0
+                    dRphi_dphi(0,0) = 2*gx*omc*dgx_dphi;
+                    dRphi_dphi(0,1) = omc*(gy*dgx_dphi + gx*dgy_dphi) - s*dgz_dphi;
+                    dRphi_dphi(0,2) = omc*(gz*dgx_dphi + gx*dgz_dphi) + s*dgy_dphi;
+                    // Row 1
+                    dRphi_dphi(1,0) = omc*(gx*dgy_dphi + gy*dgx_dphi) + s*dgz_dphi;
+                    dRphi_dphi(1,1) = 2*gy*omc*dgy_dphi;
+                    dRphi_dphi(1,2) = omc*(gz*dgy_dphi + gy*dgz_dphi) - s*dgx_dphi;
+                    // Row 2
+                    dRphi_dphi(2,0) = omc*(gx*dgz_dphi + gz*dgx_dphi) - s*dgy_dphi;
+                    dRphi_dphi(2,1) = omc*(gy*dgz_dphi + gz*dgy_dphi) + s*dgx_dphi;
+                    dRphi_dphi(2,2) = 2*gz*omc*dgz_dphi;
+
+                    dUBOt_phi = dRphi_dphi * UBOt;
+                }
+
                 Rphi << c + gx*gx*omc,    gx*gy*omc-gz*s,   gx*gz*omc+gy*s,
                       gy*gx*omc + gz*s,   c + gy*gy*omc,   gy*gz*omc - gx*s,
                       gz*gx*omc - gy*s,  gz*gy*omc + gx*s, c + gz*gz*omc;
@@ -902,6 +977,18 @@ void diffBragg_sum_over_steps(
                 double V_dot_dV = V.dot(NABC*delta_H_prime);
                 double value = -two_C * V_dot_dV * Iincrement;
                 dI_gonio_ang += value;
+            }
+            if (db_flags.refine_gonio_theta){
+                Eigen::Vector3d delta_H_prime = (db_cryst.UMATS_RXYZ[mos_tic]*dUBOt_theta).transpose()*q_vec;
+                double V_dot_dV = V.dot(NABC*delta_H_prime);
+                double value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_theta += value;
+            }
+            if (db_flags.refine_gonio_phi){
+                Eigen::Vector3d delta_H_prime = (db_cryst.UMATS_RXYZ[mos_tic]*dUBOt_phi).transpose()*q_vec;
+                double V_dot_dV = V.dot(NABC*delta_H_prime);
+                double value = -two_C * V_dot_dV * Iincrement;
+                dI_gonio_phi += value;
             }
             if (db_flags.refine_Umat[0]){
                 Eigen::Matrix3d RyRzUBOt = db_cryst.RotMats[1]*db_cryst.RotMats[2]*UBOt;
@@ -1279,6 +1366,14 @@ void diffBragg_sum_over_steps(
         if (db_flags.refine_gonio_angle){
             double value = scale_term*dI_gonio_ang;
             d_image.gonio_angle[i_pix] = value;
+        }
+        if (db_flags.refine_gonio_theta){
+            double value = scale_term*dI_gonio_theta;
+            d_image.gonio_theta[i_pix] = value;
+        }
+        if (db_flags.refine_gonio_phi){
+            double value = scale_term*dI_gonio_phi;
+            d_image.gonio_phi[i_pix] = value;
         }
         /* udpate the rotation derivative images*/
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){

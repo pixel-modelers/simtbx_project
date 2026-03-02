@@ -604,6 +604,8 @@ namespace boost_python { namespace {
 
       .def("get_gonio_angle_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_gonio_angle_derivative_pixels, "get derivatives of intensity w.r.t. goniometer angle")
 
+      .def("get_gonio_axis_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_gonio_axis_derivative_pixels, "get derivatives of intensity w.r.t. goniometer axis (theta, phi)")
+
       .def("get_Bfactor_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_Bfactor_derivative_pixels, "get derivatives of intensity w.r.t. per-image B-factor")
 
       .def("get_Bfactor_aniso_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_Bfactor_aniso_derivative_pixels, "get derivatives of intensity w.r.t. anisotropic B-factor (6-tuple)")

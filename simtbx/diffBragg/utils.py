@@ -2028,3 +2028,61 @@ def smooth(x, beta=10.0, window_size=11):
     smoothed = y[b:len(y) - b]
 
     return smoothed
+
+
+def split_eiger_16M_to_panels(raw, detector=None):
+    """
+    Split a monolithic EIGER 16M (or Pilatus 6M) raw image into sub-panels
+    using connected-component labeling on non-gap pixels.
+
+    :param raw: raw 2D image (gap pixels = -1)
+    :param detector: dxtbx detector model for monolithic detector.
+        If provided, returns a multi-panel detector with per-panel origins.
+    :return: (regions, nregions, region_slices, panels[, new_detector])
+        regions: 2D label array (0=gap, 1..N=panel)
+        nregions: number of panels (32 for EIGER 16M, 60 for Pilatus 6M)
+        region_slices: list of (sY, sX) slice pairs
+        panels: list of trimmed panel images
+        new_detector: multi-panel dxtbx Detector (only if detector arg given)
+    """
+    import numpy as np
+    from scipy.ndimage import label, find_objects
+    from dxtbx.model import Panel, Detector
+
+    regions, nregions = label(raw != -1)
+    region_slices = find_objects(regions)
+    assert nregions in {32, 60}
+    panels = []
+    new_detector = Detector()
+
+    for sY, sX in region_slices:
+        assert (sY.stop - sY.start) in {512, 514, 195}
+        assert (sX.stop - sX.start) in {1028, 1030, 487}
+        raw_panel = raw[sY, sX]
+        pad_eiger = False
+        if raw_panel.shape == (514, 1030):
+            pad_eiger = True
+            raw_panel = raw_panel[1:-1, 1:-1]
+        panels.append(raw_panel)
+        if detector is not None:
+            pan_dict = detector[0].to_dict()
+            orig = np.array(pan_dict["origin"])
+            pixsize = pan_dict["pixel_size"][0]
+            fast = np.array(pan_dict["fast_axis"])
+            slow = np.array(pan_dict["slow_axis"])
+            if pad_eiger:
+                new_orig = orig + fast * (pixsize * (sX.start + 1)) + slow * (pixsize * (sY.start + 1))
+            else:
+                new_orig = orig + fast * (pixsize * sX.start) + slow * (pixsize * sY.start)
+            pan_ydim, pan_xdim = raw_panel.shape
+            new_image_size = pan_xdim, pan_ydim
+            pan_dict["origin"] = tuple(new_orig)
+            pan_dict["image_size"] = new_image_size
+            pan_dict["mask"] = []
+            new_panel = Panel.from_dict(pan_dict)
+            new_detector.add_panel(new_panel)
+
+    ret_val = regions, nregions, region_slices, panels
+    if detector is not None:
+        ret_val += (new_detector,)
+    return ret_val

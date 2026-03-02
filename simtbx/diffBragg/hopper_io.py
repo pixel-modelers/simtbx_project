@@ -9,6 +9,28 @@ import os
 import numpy as np
 
 
+def _apply_detz_shift(detector, detz_shift_m):
+    """
+    Apply a per-image detector z-shift (in meters) to a dxtbx detector.
+    Returns a new detector with shifted panel origins.
+    The shift is along each panel's normal direction.
+    """
+    from dxtbx.model import Detector, Panel
+    new_det = Detector()
+    for panel in detector:
+        pdict = panel.to_dict()
+        origin = list(panel.get_origin())
+        normal = panel.get_normal()
+        # detz_shift is in meters, dxtbx origins are in mm
+        shift_mm = detz_shift_m * 1e3
+        origin[0] += normal[0] * shift_mm
+        origin[1] += normal[1] * shift_mm
+        origin[2] += normal[2] * shift_mm
+        pdict["origin"] = tuple(origin)
+        new_det.add_panel(Panel.from_dict(pdict))
+    return new_det
+
+
 def save_expt_refl_file(filename, expts, refls, specs=None, check_exists=False, indices=None):
     """
     Save an input file for bg_and_probOri (the EMC initializer script)
@@ -160,6 +182,9 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         from simtbx.diffBragg.refiners.geometry import get_optimized_detector
         optD = get_optimized_detector(x, Mod.P, SIM)
         new_expt.detector = optD
+    elif detz_shift != 0:
+        # Bake per-image detz_shift into the detector so geometry sees correct distance
+        new_expt.detector = _apply_detz_shift(expt.detector, detz_shift)
     new_expt.beam = expt.beam
     new_expt.identifier = expt.identifier
     new_expt.imageset = expt.imageset
@@ -170,6 +195,12 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         new_exp_list.as_file(opt_exp_path)
         LOGGER.debug("saved opt_exp %s with wavelength %f" % (opt_exp_path, expt.beam.get_wavelength()))
     _,flux_vals = zip(*SIM.beam.spectrum)
+
+    # Extract Bfactor_aniso values if refined
+    Bfactor_aniso = None
+    if hasattr(Mod, 'P') and "Baniso0" in Mod.P:
+        Baniso_params = [Mod.P["Baniso%d" % i] for i in range(6)]
+        Bfactor_aniso = tuple(p.get_val(x[p.xpos]) for p in Baniso_params)
 
     df = single_expt_pandas(xtal_scale=scale, Amat=Amat,
         ncells_abc=(Na, Nb, Nc), ncells_def=(Nd,Ne,Nf),
@@ -195,7 +226,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         ncells_init=Nabc_init, spot_scales_init=scale_init,
         other_Umats = other_Umats, other_spotscales = other_spotscales,
         num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
-                            gonio_angle=gonio_angle, Bfactor=Bfactor)
+                            gonio_angle=gonio_angle, Bfactor=Bfactor,
+                            Bfactor_aniso=Bfactor_aniso)
 
     df["gonio_axis"] = [SIM.D.spindle_axis]
 
@@ -230,7 +262,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
                        spec_file, spec_stride,flux, beamsize_mm,
                        orig_exp_name, opt_exp_name, spec_from_imageset, oversample,
                        opt_det, stg1_refls, stg1_img_path, ncells_init=None, spot_scales_init = None,
-                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None, Bfactor=None):
+                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None, Bfactor=None,
+                       Bfactor_aniso=None):
     """
 
     :param xtal_scale:
@@ -298,6 +331,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         df["gonio_angle"] = gonio_angle
     if Bfactor is not None:
         df["Bfactor"] = Bfactor
+    if Bfactor_aniso is not None:
+        df["Bfactor_aniso"] = [Bfactor_aniso]
     if spec_file is not None:
         spec_file = os.path.abspath(spec_file)
     df["spectrum_filename"] = spec_file

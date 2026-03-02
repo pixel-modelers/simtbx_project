@@ -82,6 +82,8 @@ struct images{
     image_type diffuse_gamma; // diffuse gamma gradients
     image_type diffuse_sigma; // diffuse sigma gradients
     image_type gonio_angle; // goniometer angle gradients
+    image_type gonio_theta; // goniometer axis theta (polar angle) gradients
+    image_type gonio_phi;   // goniometer axis phi (azimuthal angle) gradients
     image_type Bfactor; // per-image B-factor gradients
     image_type Bfactor_aniso; // 6 * Npix: anisotropic B-factor gradients (β11,β22,β33,β12,β13,β23)
 };
@@ -138,7 +140,9 @@ struct flags{
     bool complex_miller = false;  // is the miller array complex (such thet Fhkl_linear and Fhkl2_linear are both defined)
     bool no_Nabc_scale = false; // no Nabc prefactor
     bool refine_diffuse = false; // flag for computing diffuse gradients
-    bool refine_gonio_angle = false; // flag for computing diffuse gradients
+    bool refine_gonio_angle = false; // flag for computing goniometer angle gradients
+    bool refine_gonio_theta = false; // flag for computing goniometer axis theta gradients
+    bool refine_gonio_phi = false;   // flag for computing goniometer axis phi gradients
     std::vector<bool> refine_Bmat;  //  Bmatrix
     std::vector<bool> refine_Ncells; // mosaic domain size
     bool refine_Ncells_def = false; // mosaic domain size off diag
@@ -214,7 +218,9 @@ struct crystal{
     Eigen::Matrix3d eig_O; // O-matrix
     Eigen::Matrix3d eig_B; // B matrix
     Eigen::Matrix3d RXYZ; // Rx*Ry*Rz misset perturtbation matrix (this is whats refined)
-    Eigen::Vector3d spindle_vec; // gonio
+    Eigen::Vector3d spindle_vec; // gonio axis (Cartesian)
+    double spindle_theta; // gonio axis polar angle (from z-axis)
+    double spindle_phi;   // gonio axis azimuthal angle (from x-axis)
 
     std::vector<Eigen::Matrix3d,Eigen::aligned_allocator<Eigen::Matrix3d> > UMATS_RXYZ;
     std::vector<Eigen::Matrix3d,Eigen::aligned_allocator<Eigen::Matrix3d> > UMATS_RXYZ_prime;

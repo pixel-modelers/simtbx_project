@@ -123,9 +123,18 @@ def PAR_from_params(params, experiment, best=None):
         if not params.simulator.crystal.num_mosaicity_samples == 1:
             raise ValueError("if all eta_abc are 0,0,0, num_mosaicity_samples should be 1")
 
-    # TODO allow setting diffuse gamma/sigma from stage 1 (e.g. from the `best` dataframe)
+    # Load diffuse gamma/sigma from stage 1 dataframe if available
     init_diffuse_sigma = params.init.diffuse_sigma
     init_diffuse_gamma = params.init.diffuse_gamma
+    if best is not None:
+        if "diffuse_gamma" in best:
+            dg = best.diffuse_gamma.values[0]
+            if dg is not None and not (hasattr(dg, '__len__') and all(np.isnan(v) for v in dg)):
+                init_diffuse_gamma = dg
+        if "diffuse_sigma" in best:
+            ds = best.diffuse_sigma.values[0]
+            if ds is not None and not (hasattr(ds, '__len__') and all(np.isnan(v) for v in ds)):
+                init_diffuse_sigma = ds
 
     for i in range(3):
         initN = params.init.Nabc[i] if best is None else best.ncells.values[0][i]
@@ -208,8 +217,23 @@ def PAR_from_params(params, experiment, best=None):
                                    maxval=params.maxs.detz_shift*1e-3, fix=params.fix.detz_shift,
                                    center=params.centers.detz_shift, beta=params.betas.detz_shift)
 
-    PAR.B = ParameterType(init=params.init.B, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=True,
+    initB = params.init.B if best is None else (best.Bfactor.values[0] if "Bfactor" in best else params.init.B)
+    PAR.B = ParameterType(init=initB, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=True,
                           center=params.centers.B, beta=params.betas.B)
+
+    # Anisotropic B-factor (6 components)
+    PAR.Baniso = None
+    if best is not None and "Bfactor_aniso" in best:
+        baniso_vals = best.Bfactor_aniso.values[0]
+        if baniso_vals is not None:
+            PAR.Baniso = []
+            for ii in range(6):
+                p = ParameterType(init=baniso_vals[ii], sigma=params.sigmas.Baniso[ii],
+                                  minval=params.mins.Baniso[ii], maxval=params.maxs.Baniso[ii],
+                                  fix=True,
+                                  center=params.centers.Baniso[ii] if params.centers.Baniso is not None else None,
+                                  beta=params.betas.Baniso[ii] if params.betas.Baniso is not None else None)
+                PAR.Baniso.append(p)
 
     lam0, lam1 = params.init.spec
     if best is not None:
@@ -241,3 +265,4 @@ class StageTwoParams:
         self.PanXYZ = None
         self.diffuse_sigma = None
         self.diffuse_gamma = None
+        self.Baniso = None

@@ -33,6 +33,11 @@ try:
 except ImportError:
     LineProfiler = None
 
+# Lazy-loaded CHECKER for ROI quality scoring (optional dependency).
+# Imported on first use in extract_image_score() to avoid torch import at module load
+# which would change numpy random state and break deterministic tests.
+_CHECKER = None
+_CHECKER_LOADED = False
 
 import logging
 MAIN_LOGGER = logging.getLogger("diffBragg.main")
@@ -52,6 +57,8 @@ DIFFUSE_ID = 23
 GONIO_ANGLE_ID = 24
 BFACTOR_ID = 25
 BFACTOR_ANISO_ID = 26
+GONIO_THETA_ID = 27
+GONIO_PHI_ID = 28
 LAMBDA_IDS = 12, 13
 
 DEG = 180 / np.pi
@@ -467,6 +474,11 @@ class DataModeler:
 
         npan = len(self.E.detector)
         nfast, nslow = self.E.detector[0].get_image_size()  # NOTE assumes all panels same shape
+        for _pid in range(1, npan):
+            _pf, _ps = self.E.detector[_pid].get_image_size()
+            assert (_pf, _ps) == (nfast, nslow), \
+                "Panel %d size (%d,%d) != panel 0 (%d,%d). Heterogeneous panels not supported." \
+                % (_pid, _pf, _ps, nfast, nslow)
         img_data = np.zeros((npan, nslow, nfast))
         background = np.zeros_like(img_data)
         is_trusted = np.zeros((npan, nslow, nfast), bool)
@@ -483,6 +495,14 @@ class DataModeler:
 
             xdim = x2_onPanel-x1_onPanel
             ydim = y2_onPanel-y1_onPanel
+            if xdim <= 0 or ydim <= 0:
+                MAIN_LOGGER.error(
+                    "GatherFromRefl: clipped ROI %d has zero/neg dim: "
+                    "orig_bbox=(%d,%d,%d,%d) clipped=(%d,%d,%d,%d) pid=%d "
+                    "panel_size=(%d,%d)"
+                    % (i_ref, x1, x2, y1, y2,
+                       x1_onPanel, x2_onPanel, y1_onPanel, y2_onPanel,
+                       pid, nfast, nslow))
 
             sb = ref['shoebox']
             sb_ystart = y1_onPanel - y1
@@ -677,6 +697,13 @@ class DataModeler:
         for i_roi in range(len(self.rois)):
             pid = self.pids[i_roi]
             x1, x2, y1, y2 = self.rois[i_roi]
+            if y2 - y1 <= 0 or x2 - x1 <= 0:
+                MAIN_LOGGER.error(
+                    "BAD ROI %d: bbox=(%d,%d,%d,%d) pid=%d npan=%d panel_size=(%d,%d) "
+                    "img_shape=%s n_rois=%d"
+                    % (i_roi, x1, x2, y1, y2, pid, img_data.shape[0],
+                       img_data.shape[2], img_data.shape[1],
+                       str(img_data.shape), len(self.rois)))
             Y, X = np.indices((y2 - y1, x2 - x1))
             data = img_data[pid, y1:y2, x1:x2].copy()
             pixel_counter[pid, y1:y2, x1:x2] += 1
@@ -803,6 +830,9 @@ class DataModeler:
         R = dials_flex.reflection_table()
         roi_id_map = {}  # maps old roi_id -> new sequential index in R
         for i_roi, i_ref in enumerate(self.refls_idx):
+            # Skip ROIs marked as invalid (e.g., gap-pixel centroids that couldn't be remapped)
+            if self.pids[i_roi] < 0:
+                continue
             roi_sel = self.roi_id==i_roi
             x1, x2, y1, y2 = self.rois[i_roi]
             roi_shape = y2-y1, x2-x1
@@ -1990,8 +2020,19 @@ def extract_image_score(Modeler, SIM, x, params):
         data_subimg, model_subimg, trusted_subimg, bragg_subimg = Modeler.get_data_model_pairs()
         sigma_rdout_subimg = None
 
+    # Lazy-load CHECKER on first call (avoids torch import at module load time)
+    global _CHECKER, _CHECKER_LOADED
+    if not _CHECKER_LOADED:
+        _CHECKER_LOADED = True
+        try:
+            from score_trainer import roi_check
+            _CHECKER = roi_check.roiCheck()
+        except (ImportError, Exception):
+            _CHECKER = None
+
     sigz_vals = []
     spearman_vals = []
+    checker_vals = []
     for i_roi in range(len(data_subimg)):
         dat = data_subimg[i_roi]
         fit = model_subimg[i_roi]
@@ -2009,6 +2050,14 @@ def extract_image_score(Modeler, SIM, x, params):
                 if np.isfinite(_rho):
                     spearman_vals.append(float(_rho))
 
+            if _CHECKER is not None:
+                try:
+                    checker_score = _CHECKER.score(dat, fit)
+                    if np.isfinite(checker_score):
+                        checker_vals.append(float(checker_score))
+                except Exception:
+                    pass  # Skip this ROI if CHECKER fails
+
     n_rois = len(sigz_vals)
     sigz_arr = np.array(sigz_vals) if sigz_vals else np.array([])
     n_outlier_sigz = int(is_outlier(sigz_arr).sum()) if len(sigz_arr) >= 3 else 0
@@ -2024,6 +2073,8 @@ def extract_image_score(Modeler, SIM, x, params):
         'n_outlier_sigz': n_outlier_sigz,
         'spearman_r_median': float(np.median(spearman_vals)) if spearman_vals else float('nan'),
         'spearman_vals': [float(v) for v in spearman_vals],  # raw per-ROI values
+        'checker_median': float(np.median(checker_vals)) if checker_vals else float('nan'),
+        'checker_vals': [float(v) for v in checker_vals],  # raw per-ROI CHECKER scores
         'param_vals': param_vals,
         'converged': True,
         'error': None,

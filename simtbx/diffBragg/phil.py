@@ -874,6 +874,12 @@ logging
   other_ranks_level = *low normal high
     .type = choice
     .help = console log level for all ranks > 0, ignored if logfiles=True
+  state_snapshots = False
+    .type = bool
+    .help = Write full diffBragg state snapshots at stage boundaries for propagation verification
+  state_snapshot_shots = 3
+    .type = int
+    .help = Number of shots per rank to snapshot (first N)
   overwrite = True
     .type = bool
     .help = overwrite the existing logfiles
@@ -1430,6 +1436,9 @@ geometry {
     close_distances = None
       .type = float
       .help = restraint factor for the spread of detector panel Z-distances (#TODO think about this in context of tilt)
+    gonio_axis = None
+      .type = float
+      .help = restraint factor for goniometer axis angles (higher values lead to unrestrained parameters)
   }
   fix {
     panel_rotations = 1,1,1
@@ -1441,7 +1450,52 @@ geometry {
     sourceI = True
       .type = bool
       .help = refine the source I of every beam (spectra optimization)
+    gonio_axis = True
+      .type = bool
+      .help = refinement flag for goniometer rotation axis (global parameter)
+    RotXYZ = 1,1,1
+      .type = ints(size=3)
+      .help = fix crystal rotations during geometry refinement (default: fixed)
+    G = True
+      .type = bool
+      .help = fix scale factor during geometry refinement (default: fixed)
+    Nabc = True
+      .type = bool
+      .help = fix Nabc during geometry refinement (default: fixed)
+    Ndef = True
+      .type = bool
+      .help = fix Ndef during geometry refinement (default: fixed)
+    eta_abc = True
+      .type = bool
+      .help = fix mosaicity during geometry refinement (default: fixed)
+    ucell = True
+      .type = bool
+      .help = fix unit cell during geometry refinement (default: fixed)
+    perRoiScale = True
+      .type = bool
+      .help = fix per-ROI scale factors during geometry refinement (default: fixed)
   }
+  sigma_gonio_axis = 1
+    .type = float
+    .help = sigma for goniometer axis refinement (radians for spherical angles)
+  n_images_geom_ref = 50
+    .type = int
+    .help = number of images to use for geometry refinement in heatup (separate from sigma sweep sample)
+  optimize_goniometer = False
+    .type = bool
+    .help = include goniometer axis in geometry refinement (for heatup integration)
+  multipanel = False
+    .type = bool
+    .help = Split monolithic detector into sub-panels for per-panel geometry refinement.
+  multipanel_gap_value = -1
+    .type = float
+    .help = Sentinel value for gap pixels in raw image (default -1 for EIGER).
+  multipanel_raw_image = None
+    .type = str
+    .help = Path to a raw image for panel layout detection. If None, loads from first experiment.
+  multipanel_grouping = *per_panel all_one
+    .type = choice
+    .help = Panel grouping: per_panel (each panel independent) or all_one (rigid body).
 }
 """
 
