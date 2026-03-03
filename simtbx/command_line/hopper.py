@@ -342,6 +342,14 @@ class Script:
                 from simtbx.diffBragg.diffbragg_state import should_snapshot, capture_hopper_state, write_state_snapshot
                 if should_snapshot(self.params, i_shot, COMM.rank):
                     _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_main", COMM.rank)
+                    if hasattr(Modeler, 'target') and Modeler.target is not None and Modeler.target.all_sigZ:
+                        _state["diagnostics"] = {
+                            "first_sigZ": Modeler.target.all_sigZ[0],
+                            "last_sigZ": Modeler.target.all_sigZ[-1],
+                            "first_resid": Modeler.target.all_f[0],
+                            "last_resid": Modeler.target.all_f[-1],
+                            "n_iterations": len(Modeler.target.all_f),
+                        }
                     write_state_snapshot(_state, self.params.outdir, "hopper_main_rank%d_shot%d" % (COMM.rank, i_shot))
 
                 if self.params.perRoi_finish:
@@ -406,6 +414,15 @@ class Script:
                     # State snapshot: after final refinement
                     if should_snapshot(self.params, i_shot, COMM.rank):
                         _state = capture_hopper_state(x, Modeler, SIM, self.params, i_shot, "hopper_final", COMM.rank)
+                        # Include sigma Z from the refinement trace
+                        if hasattr(Modeler, 'target') and Modeler.target is not None and Modeler.target.all_sigZ:
+                            _state["diagnostics"] = {
+                                "first_sigZ": Modeler.target.all_sigZ[0],
+                                "last_sigZ": Modeler.target.all_sigZ[-1],
+                                "first_resid": Modeler.target.all_f[0],
+                                "last_resid": Modeler.target.all_f[-1],
+                                "n_iterations": len(Modeler.target.all_f),
+                            }
                         write_state_snapshot(_state, self.params.outdir, "hopper_final_rank%d_shot%d" % (COMM.rank, i_shot))
 
                     #use_cuda = os.environ["DIFFBRAGG_USE_CUDA"]

@@ -286,6 +286,14 @@ class CrystalParameters:
     def __init__(self, phil_params, data_modelers):
         self.phil = phil_params
         self.parameters = []
+        self.alias_pairs = []  # list of (alias_name, canonical_name) string tuples
+        if phil_params.geometry.shared_crystal:
+            self._init_shared(data_modelers)
+        else:
+            self._init_per_shot(data_modelers)
+
+    def _init_per_shot(self, data_modelers):
+        """Original per-shot crystal parameters (independent RotXYZ/ucell per shot)."""
         for i_shot in data_modelers:
             Mod = data_modelers[i_shot]
 
@@ -378,6 +386,150 @@ class CrystalParameters:
                                             init=ds_p.init, center=ds_p.center, beta=ds_p.beta)
                     self.parameters.append(ref_p)
 
+    def _init_shared(self, data_modelers):
+        """Shared crystal: single RotXYZ + ucell for all shots (median init)."""
+        # First pass: collect per-shot RotXYZ and ucell inits
+        all_rot_inits = [[], [], []]  # 3 x n_shots
+        all_uc_inits = None  # will be n_uc x n_shots
+        n_uc = None
+        rot_template = [None, None, None]  # store one exemplar for bounds/sigma/beta
+        uc_templates = None
+        for i_shot in data_modelers:
+            Mod = data_modelers[i_shot]
+            for i_rot in range(3):
+                p = Mod.PAR.RotXYZ_params[i_rot]
+                all_rot_inits[i_rot].append(p.init)
+                if rot_template[i_rot] is None:
+                    rot_template[i_rot] = p
+            if n_uc is None:
+                n_uc = len(Mod.PAR.ucell)
+                all_uc_inits = [[] for _ in range(n_uc)]
+                uc_templates = [None] * n_uc
+            for i_uc in range(n_uc):
+                p = Mod.PAR.ucell[i_uc]
+                all_uc_inits[i_uc].append(p.init)
+                if uc_templates[i_uc] is None:
+                    uc_templates[i_uc] = p
+
+        # Compute local medians (global median happens via reduce/bcast in geom_min)
+        rot_medians = [float(np.median(v)) for v in all_rot_inits]
+        uc_medians = [float(np.median(v)) for v in all_uc_inits]
+
+        # Create canonical shared parameters
+        shared_rot_params = []
+        for i_rot in range(3):
+            tp = rot_template[i_rot]
+            ref_p = RangedParameter(name="shared_RotXYZ%d" % i_rot,
+                                    minval=tp.minval, maxval=tp.maxval,
+                                    fix=self.phil.geometry.fix.RotXYZ[i_rot],
+                                    init=rot_medians[i_rot],
+                                    center=rot_medians[i_rot],
+                                    beta=tp.beta, is_global=True)
+            shared_rot_params.append(ref_p)
+            self.parameters.append(ref_p)
+
+        shared_uc_params = []
+        for i_uc in range(n_uc):
+            tp = uc_templates[i_uc]
+            ref_p = RangedParameter(name="shared_Ucell%d" % i_uc,
+                                    minval=tp.minval, maxval=tp.maxval,
+                                    fix=self.phil.geometry.fix.ucell,
+                                    init=uc_medians[i_uc],
+                                    center=uc_medians[i_uc],
+                                    beta=tp.beta, is_global=True)
+            shared_uc_params.append(ref_p)
+            self.parameters.append(ref_p)
+
+        # Second pass: create per-shot params (non-crystal) and alias pairs
+        for i_shot in data_modelers:
+            Mod = data_modelers[i_shot]
+
+            # per-ROI scale factors (per-shot, as before)
+            Mod.set_slices("roi_id")
+            Mod.per_roi_scales_per_pix = np.ones_like(Mod.all_data)
+            has_scale_factor = "scale_factor" in list(Mod.refls[0].keys())
+            for roi_id, ref_idx in enumerate(Mod.refls_idx):
+                init_scale = 1.0
+                if has_scale_factor:
+                    init_scale = float(Mod.refls[ref_idx]["scale_factor"])
+                    if init_scale != 1.0:
+                        slcs = Mod.roi_id_slices[roi_id]
+                        assert len(slcs) == 1
+                        Mod.per_roi_scales_per_pix[slcs[0]] = init_scale
+                p = RangedParameter(name="rank%d_shot%d_scale_roi%d" % (COMM.rank, i_shot, roi_id),
+                                    minval=0, maxval=1e12, fix=self.phil.geometry.fix.perRoiScale,
+                                    center=init_scale, beta=1e12, init=init_scale)
+                self.parameters.append(p)
+
+            for i_N in range(3):
+                p = Mod.PAR.Nabc[i_N]
+                ref_p = RangedParameter(name="rank%d_shot%d_Nabc%d" % (COMM.rank, i_shot, i_N),
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Nabc, init=p.init,
+                                        center=p.center, beta=p.beta)
+                self.parameters.append(ref_p)
+
+            for i_N in range(3):
+                p = Mod.PAR.Ndef[i_N]
+                ref_p = RangedParameter(name="rank%d_shot%d_Ndef%d" % (COMM.rank, i_shot, i_N),
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Ndef, init=p.init,
+                                        center=p.center, beta=p.beta)
+                self.parameters.append(ref_p)
+
+            for i_eta in range(3):
+                p = Mod.PAR.eta[i_eta]
+                ref_p = RangedParameter(name="rank%d_shot%d_eta%d" % (COMM.rank, i_shot, i_eta),
+                                        minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.eta_abc, init=p.init,
+                                        center=p.center, beta=p.beta)
+                self.parameters.append(ref_p)
+
+            # RotXYZ: alias to shared params
+            for i_rot in range(3):
+                alias_name = "rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, i_rot)
+                canon_name = "shared_RotXYZ%d" % i_rot
+                self.alias_pairs.append((alias_name, canon_name))
+
+            p = Mod.PAR.Scale
+            ref_p = RangedParameter(name="rank%d_shot%d_Scale" % (COMM.rank, i_shot),
+                                    minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.G, init=p.init,
+                                    center=p.center, beta=p.beta)
+            self.parameters.append(ref_p)
+
+            # ucell: alias to shared params
+            for i_uc in range(n_uc):
+                alias_name = "rank%d_shot%d_Ucell%d" % (COMM.rank, i_shot, i_uc)
+                canon_name = "shared_Ucell%d" % i_uc
+                self.alias_pairs.append((alias_name, canon_name))
+
+            # Per-shot Bfactor (fixed by default, carries the hopper-refined value)
+            bfac_p = Mod.PAR.B
+            ref_p = RangedParameter(name="rank%d_shot%d_Bfactor" % (COMM.rank, i_shot),
+                                    minval=bfac_p.minval, maxval=bfac_p.maxval, fix=True,
+                                    init=bfac_p.init, center=bfac_p.center, beta=bfac_p.beta)
+            self.parameters.append(ref_p)
+
+            # Per-shot Bfactor_aniso (6 components, fixed by default)
+            if hasattr(Mod.PAR, 'Baniso') and Mod.PAR.Baniso is not None:
+                for i_ba in range(6):
+                    ba_p = Mod.PAR.Baniso[i_ba]
+                    ref_p = RangedParameter(name="rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i_ba),
+                                            minval=ba_p.minval, maxval=ba_p.maxval, fix=True,
+                                            init=ba_p.init, center=ba_p.center, beta=ba_p.beta)
+                    self.parameters.append(ref_p)
+
+            # Per-shot diffuse scattering params (fixed by default)
+            if hasattr(Mod.PAR, 'diffuse_gamma') and Mod.PAR.diffuse_gamma is not None:
+                for i_d in range(3):
+                    dg_p = Mod.PAR.diffuse_gamma[i_d]
+                    ref_p = RangedParameter(name="rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i_d),
+                                            minval=dg_p.minval, maxval=dg_p.maxval, fix=True,
+                                            init=dg_p.init, center=dg_p.center, beta=dg_p.beta)
+                    self.parameters.append(ref_p)
+                    ds_p = Mod.PAR.diffuse_sigma[i_d]
+                    ref_p = RangedParameter(name="rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i_d),
+                                            minval=ds_p.minval, maxval=ds_p.maxval, fix=True,
+                                            init=ds_p.init, center=ds_p.center, beta=ds_p.beta)
+                    self.parameters.append(ref_p)
+
 
 def hkl_vary_flags(SIM):
     num_fhkl_param = SIM.Num_ASU*SIM.num_Fhkl_channels
@@ -411,9 +563,12 @@ class Target:
         :param ref_params: instance of refinement Parameters (LMP in code below)
         :param save_state_freq: how often to save all models (will be overwritten each time)
         """
-        num_params = len(ref_params)
+        num_params = ref_params.n_params
         self.vary = np.zeros(num_params).astype(bool)
-        for p in ref_params.values():
+        for name in ref_params:
+            if not ref_params.is_canonical(name):
+                continue
+            p = ref_params[name]
             self.vary[p.xpos] = not p.fix
         self.x0 = np.ones(num_params)
         self.g = None
@@ -424,6 +579,9 @@ class Target:
         self.overwrite_state = overwrite_state
         self.med_offsets = [] # median prediction offsets(new number gets added everytime write_output_files is called)
         self.med_iternums = []
+        self.first_sigZ = None
+        self.first_resid = None
+        self.sigmaZ = None
         self.plot = plot and COMM.rank==0
         if self.plot:
             self.fig = plt.figure()
@@ -510,6 +668,9 @@ class Target:
 
         f, self.g, self.sigmaZ = target_and_grad(self.x0, self.ref_params, iternum=self.iternum, *args, **kwargs)
         t = time.time()-t
+        if self.first_sigZ is None:
+            self.first_sigZ = self.sigmaZ
+            self.first_resid = f
         if COMM.rank==0:
             self.all_times.append(t)
             time_per_iter = np.mean(self.all_times)
@@ -520,10 +681,10 @@ class Target:
             # Print detector geometry parameters (single or multi-panel)
             self._print_panel_stats(self.x0)
 
-            # Print RotXYZ statistics across all shots
+            # Print RotXYZ statistics across all shots (canonical only to avoid alias duplicates)
             rotxyz_vals = []
             for pname in self.ref_params:
-                if "RotXYZ" in pname:
+                if "RotXYZ" in pname and self.ref_params.is_canonical(pname):
                     p = self.ref_params[pname]
                     if not p.fix:
                         val = p.get_val(self.x0[p.xpos])
@@ -570,14 +731,18 @@ class Target:
     def at_min_callback(self, x, f, accept):
         if COMM.rank==0:
             print("Final Iteration %d:\n\tResid=%f, sigmaZ %f" % (self.iternum, f, self.sigmaZ))
+            if self.first_sigZ is not None:
+                delta = self.sigmaZ - self.first_sigZ
+                print("\tsigmaZ: first=%.6f, last=%.6f, delta=%.6f" % (
+                    self.first_sigZ, self.sigmaZ, delta), flush=True)
 
             # Print final detector geometry parameters (single or multi-panel)
             self._print_panel_stats(self.x0)
 
-            # Print final RotXYZ statistics
+            # Print final RotXYZ statistics (canonical only)
             rotxyz_vals = []
             for pname in self.ref_params:
-                if "RotXYZ" in pname:
+                if "RotXYZ" in pname and self.ref_params.is_canonical(pname):
                     p = self.ref_params[pname]
                     if not p.fix:
                         val = p.get_val(self.x0[p.xpos])
@@ -1035,6 +1200,8 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
             for name in ref_params:
                 if name.startswith("Fhkl"):
                     continue
+                if not ref_params.is_canonical(name):
+                    continue
                 par = ref_params[name]
                 if not par.is_global and not par.fix and par.beta is not None:
                     val = par.get_restraint_val(x[par.xpos])
@@ -1047,7 +1214,8 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
                 grad[par.xpos] += neg_LL_grad[name]
                 # for restraints only update the per-shot restraint gradients here
                 if params.use_restraints and not par.is_global and not par.fix and par.beta is not None:
-                    grad[par.xpos] += par.get_restraint_deriv(x[par.xpos])
+                    if ref_params.is_canonical(name):
+                        grad[par.xpos] += par.get_restraint_deriv(x[par.xpos])
 
     # sum the target functional and the gradients across all ranks
     target_functional = COMM.bcast(COMM.reduce(target_functional))
@@ -1063,6 +1231,8 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
         for name in ref_params:
             if name.startswith("Fhkl"):
                 continue
+            if not ref_params.is_canonical(name):
+                continue
             par = ref_params[name]
             if par.is_global and not par.fix and par.beta is not None:
                 target_functional += par.get_restraint_val(x[par.xpos])
@@ -1072,6 +1242,7 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
     all_shot_sigZ = COMM.reduce(all_shot_sigZ)
     if COMM.rank == 0:
         all_shot_sigZ = np.median(all_shot_sigZ)
+    all_shot_sigZ = COMM.bcast(all_shot_sigZ)
 
     return target_functional, grad, all_shot_sigZ
 
@@ -1172,10 +1343,16 @@ def geom_min(params):
     # different on each rank
     crystal_params = CrystalParameters(params,launcher.Modelers)
     crystal_params.parameters = COMM.bcast(COMM.reduce(crystal_params.parameters))
+    crystal_params.alias_pairs = COMM.bcast(COMM.reduce(crystal_params.alias_pairs))
 
     LMP = Parameters()
     for p in crystal_params.parameters + det_params.parameters + beam_params.parameters + gonio_params.parameters:
         LMP.add(p)
+
+    # Register aliases (shared_crystal mode: per-shot RotXYZ/ucell keys -> shared params)
+    for alias_name, canon_name in crystal_params.alias_pairs:
+        LMP.add_alias(alias_name, LMP[canon_name])
+
     if launcher.SIM.refining_Fhkl:
         fhkl_params = FhklParameters(params, launcher.SIM, launcher.hiasu)
         print("ADDING %d FHKL parameters!" % len(fhkl_params.parameters))
@@ -1187,6 +1364,8 @@ def geom_min(params):
         print("\n" + "="*80)
         print("GEOMETRY REFINEMENT SETTINGS:")
         print("="*80)
+        if params.geometry.shared_crystal:
+            print("Shared crystal: RotXYZ + ucell (%d aliases)" % len(crystal_params.alias_pairs))
         print("Restraints enabled: %s" % params.use_restraints)
         print("Crystal params fixed: G=%s, Nabc=%s, RotXYZ=%s, ucell=%s, eta=%s" %
               (params.geometry.fix.G, params.geometry.fix.Nabc, params.geometry.fix.RotXYZ,
@@ -1243,7 +1422,7 @@ def geom_min(params):
     from simtbx.diffBragg.diffbragg_state import (
         should_snapshot, capture_geometry_state, write_state_snapshot,
         compare_states, load_state_snapshot)
-    x0_snap = np.ones(len(LMP))  # initial x (all 1s)
+    x0_snap = np.ones(LMP.n_params)  # initial x (all 1s)
     for i_shot in launcher.Modelers:
         if should_snapshot(params, i_shot, COMM.rank):
             _state = capture_geometry_state(
@@ -1251,12 +1430,46 @@ def geom_min(params):
                 "geom_start", COMM.rank)
             write_state_snapshot(_state, params.outdir, "geom_start_rank%d_shot%d" % (COMM.rank, i_shot))
 
-            # Compare with hopper_final snapshot if it exists
-            if COMM.rank == 0:
-                hopper_state = load_state_snapshot(params.outdir, "hopper_final_rank%d_shot%d" % (COMM.rank, i_shot))
-                if hopper_state is not None:
-                    compare_states(hopper_state, _state,
-                                   label="hopper_final -> geom_start (shot %d)" % i_shot)
+            # Compare with hopper_final snapshot if it exists.
+            # Shot distribution differs between hopper and geometry (different
+            # MPI load-balancing), so match by core exper_name (strip
+            # stage prefixes, geometry suffixes, and trailing indices).
+            import glob as _glob
+            import re as _re
+            def _core_name(n):
+                """Extract core experiment ID for cross-stage matching."""
+                if n is None:
+                    return None
+                n = os.path.basename(str(n))
+                n = _re.sub(r'\.expt$', '', n)
+                n = _re.sub(r'_geomData_mp$', '', n)  # geometry cycle1 suffix
+                n = _re.sub(r'^stage\d+_', '', n)      # cycler stage prefix
+                n = _re.sub(r'_\d+$', '', n)            # trailing index
+                return n
+            _snap_dir = os.path.join(params.outdir, "state_snapshots")
+            _pattern = os.path.join(_snap_dir, "hopper_final_rank*_shot*.json")
+            _matches = sorted(_glob.glob(_pattern))
+            _geom_core = _core_name(_state.get("meta", {}).get("exper_name"))
+            hopper_state = None
+            for _mf in _matches:
+                _candidate = load_state_snapshot(
+                    params.outdir,
+                    os.path.splitext(os.path.basename(_mf))[0])
+                if _candidate is None:
+                    continue
+                _hop_core = _core_name(_candidate.get("meta", {}).get("exper_name"))
+                if _geom_core and _hop_core and _geom_core == _hop_core:
+                    hopper_state = _candidate
+                    break
+            if hopper_state is not None:
+                compare_states(hopper_state, _state,
+                               label="hopper_final -> geom_start (%s)" % _geom_core)
+                # Print hopper's final sigma Z for handoff tracking
+                hdiag = hopper_state.get("diagnostics", {})
+                if hdiag.get("last_sigZ") is not None:
+                    print("  Hopper final sigZ=%.6f (resid=%.6g, %d iters)" % (
+                        hdiag["last_sigZ"], hdiag.get("last_resid", 0),
+                        hdiag.get("n_iterations", 0)), flush=True)
 
     # set the GPU device
     launcher.SIM.D.device_Id = COMM.rank % params.refiner.num_devices
@@ -1298,11 +1511,32 @@ def geom_min(params):
     # do a barrel roll!
     target = Target(LMP, save_state_freq=params.geometry.save_state_freq, overwrite_state=params.geometry.save_state_overwrite)
     fcn_args = (launcher.Modelers, launcher.SIM, params)
+
+    # Evaluate initial sigZ before optimization and update geom_start snapshots
+    if should_snapshot(params, 0, 0):  # any snapshot requested at all
+        _init_f, _, _init_sigZ = target_and_grad(
+            target.x0, LMP, launcher.Modelers, launcher.SIM, params, iternum=0)
+        # target_and_grad already does reduce+bcast, all ranks have same values
+        if COMM.rank == 0:
+            print("Geometry initial sigZ=%.6f, resid=%.6g" % (_init_sigZ, _init_f), flush=True)
+        # Update geom_start snapshots with initial sigZ
+        _snap_dir = os.path.join(params.outdir, "state_snapshots")
+        for i_shot in launcher.Modelers:
+            if should_snapshot(params, i_shot, COMM.rank):
+                _snap_name = "geom_start_rank%d_shot%d" % (COMM.rank, i_shot)
+                _snap_path = os.path.join(_snap_dir, _snap_name + ".json")
+                if os.path.exists(_snap_path):
+                    import json as _json
+                    with open(_snap_path) as _fh:
+                        _sdata = _json.load(_fh)
+                    _sdata["diagnostics"] = {"initial_sigZ": _init_sigZ, "initial_resid": _init_f}
+                    with open(_snap_path, "w") as _fh:
+                        _json.dump(_sdata, _fh, indent=2)
+
     lbfgs_kws = {"jac": target.jac,
                  "method": "L-BFGS-B",
                  "args": fcn_args,
                  "options":  {"ftol": params.ftol, "gtol": 1e-10, "maxfun":1e5, "maxiter":params.lbfgs_maxiter}}
-
 
     result = basinhopping(target, target.x0[target.vary],
                           niter=params.niter,
@@ -1382,6 +1616,25 @@ def geom_min(params):
 
     if params.geometry.optimized_results_tag is not None:
         write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)
+
+    # Write geom_end state snapshots with sigma Z diagnostics
+    # (done here in geom_min where target/result are in scope)
+    from simtbx.diffBragg.diffbragg_state import (
+        should_snapshot as _should_snap2, capture_geometry_state as _cap_geom2,
+        write_state_snapshot as _write_snap2)
+    for i_shot in launcher.Modelers:
+        if _should_snap2(params, i_shot, COMM.rank):
+            _state = _cap_geom2(Xopt, LMP, i_shot, launcher.Modelers[i_shot],
+                                launcher.SIM, "geom_end", COMM.rank)
+            if hasattr(target, 'first_sigZ') and target.first_sigZ is not None:
+                _state["diagnostics"] = {
+                    "first_sigZ": target.first_sigZ,
+                    "first_resid": target.first_resid,
+                    "last_sigZ": target.sigmaZ,
+                    "last_resid": float(result.fun) if hasattr(result, 'fun') else None,
+                    "n_iterations": target.iternum,
+                }
+            _write_snap2(_state, params.outdir, "geom_end_rank%d_shot%d" % (COMM.rank, i_shot))
 
     if COMM.rank == 0:
         save_opt_det(params, target.x0, target.ref_params, launcher.SIM)
@@ -1629,14 +1882,6 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
                                    oversample=SIM.D.oversample,
                                    opt_det=params.opt_det, stg1_refls=Modeler.refl_name, stg1_img_path=None,
                                    Bfactor=Bfactor_val, Bfactor_aniso=Bfactor_aniso_val)
-
-            # State snapshot at geometry end
-            from simtbx.diffBragg.diffbragg_state import should_snapshot as _should_snap
-            from simtbx.diffBragg.diffbragg_state import capture_geometry_state as _cap_geom
-            from simtbx.diffBragg.diffbragg_state import write_state_snapshot as _write_snap
-            if _should_snap(params, i_shot, COMM.rank):
-                _state = _cap_geom(Xopt, LMP, i_shot, Modeler, SIM, "geom_end", COMM.rank)
-                _write_snap(_state, params.outdir, "geom_end_rank%d_shot%d" % (COMM.rank, i_shot))
 
             all_dfs.append(df)
 

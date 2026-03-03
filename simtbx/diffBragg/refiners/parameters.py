@@ -6,9 +6,29 @@ from collections import OrderedDict
 
 
 class Parameters(OrderedDict):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._n_canonical = 0
+    self._canonical_names = set()
+
   def add(self, p):
-    p.xpos = len(self)
+    p.xpos = self._n_canonical
     self[p.name] = p
+    self._n_canonical += 1
+    self._canonical_names.add(p.name)
+
+  def add_alias(self, alias_name, param):
+    """Store the same RangedParameter object under a new key (no new xpos)."""
+    self[alias_name] = param
+
+  @property
+  def n_params(self):
+    """Number of canonical (non-alias) parameters."""
+    return self._n_canonical
+
+  def is_canonical(self, name):
+    """True if name was registered via add(), False if via add_alias()."""
+    return name in self._canonical_names
 
 
 class RangedParameter:

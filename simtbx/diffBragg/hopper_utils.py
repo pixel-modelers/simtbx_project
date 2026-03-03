@@ -913,6 +913,20 @@ class DataModeler:
             self.params.init.eta_abc = tuple(best.eta_abc.values[0])
             self.params.init.eta_abc = tuple([eta_val if eta_val > self.params.mins.eta_abc[i_eta] else self.params.mins.eta_abc[i_eta]+1e-2 for i_eta, eta_val in enumerate(self.params.init.eta_abc)])
 
+            # B-factor (isotropic)
+            if "Bfactor" in list(best):
+                self.params.init.B = best.Bfactor.values[0]
+
+            # Anisotropic B-factor (6 components)
+            if "Bfactor_aniso" in list(best):
+                self.params.init.Baniso = list(best.Bfactor_aniso.values[0])
+
+            # Diffuse scattering parameters
+            if "diffuse_gamma" in list(best):
+                self.params.init.diffuse_gamma = tuple(best.diffuse_gamma.values[0])
+            if "diffuse_sigma" in list(best):
+                self.params.init.diffuse_sigma = tuple(best.diffuse_sigma.values[0])
+
             lam0, lam1 = get_lam0_lam1_from_pandas(best)
             self.params.init.spec = lam0, lam1
 

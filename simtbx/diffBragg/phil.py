@@ -1484,6 +1484,9 @@ geometry {
   optimize_goniometer = False
     .type = bool
     .help = include goniometer axis in geometry refinement (for heatup integration)
+  shared_crystal = False
+    .type = bool
+    .help = Share a single crystal orientation (RotXYZ) and unit cell across all shots. Median of per-shot values is used as the initial shared value.
   multipanel = False
     .type = bool
     .help = Split monolithic detector into sub-panels for per-panel geometry refinement.
