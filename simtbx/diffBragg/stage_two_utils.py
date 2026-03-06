@@ -173,6 +173,55 @@ def PAR_from_params(params, experiment, best=None):
                                              center=params.centers.diffuse_gamma[i] if params.centers.diffuse_gamma is not None else None,
                                              beta=params.betas.diffuse_gamma[i] if params.betas.diffuse_gamma is not None else None)
 
+    # Cholesky Nabc parameterization
+    PAR.cholesky = None
+    PAR.use_cholesky_Nabc = getattr(params, 'use_cholesky_Nabc', False)
+    if PAR.use_cholesky_Nabc:
+        # Initialize Cholesky L from Nabc values
+        Na = PAR.Nabc[0].init
+        Nb = PAR.Nabc[1].init
+        Nc = PAR.Nabc[2].init
+        if best is not None and "cholesky" in best:
+            chol_vals = best.cholesky.values[0]
+            if chol_vals is not None:
+                chol_init = list(chol_vals)
+            else:
+                chol_init = [np.sqrt(Na), 0, np.sqrt(Nb), 0, 0, np.sqrt(Nc)]
+        else:
+            chol_init = [np.sqrt(Na), 0, np.sqrt(Nb), 0, 0, np.sqrt(Nc)]
+
+        # Compute bounds from Nabc bounds
+        Na_min, Nb_min, Nc_min = [PAR.Nabc[i].minval for i in range(3)]
+        Na_max, Nb_max, Nc_max = [PAR.Nabc[i].maxval for i in range(3)]
+
+        chol_mins = [0]*6
+        chol_maxs = [0]*6
+        chol_mins[0] = np.sqrt(max(0, Na_min))
+        chol_maxs[0] = np.sqrt(Na_max)
+        chol_mins[1] = -np.sqrt(Nb_max)
+        chol_maxs[1] = np.sqrt(Nb_max)
+        chol_mins[2] = np.sqrt(max(0, Nb_min)) * 0.1
+        chol_maxs[2] = np.sqrt(Nb_max)
+        chol_mins[3] = -np.sqrt(Nc_max)
+        chol_maxs[3] = np.sqrt(Nc_max)
+        chol_mins[4] = -np.sqrt(Nc_max)
+        chol_maxs[4] = np.sqrt(Nc_max)
+        chol_mins[5] = np.sqrt(max(0, Nc_min)) * 0.1
+        chol_maxs[5] = np.sqrt(Nc_max)
+
+        # Get sigma/center/beta from phil if available
+        chol_sigmas = params.sigmas.cholesky if hasattr(params.sigmas, 'cholesky') and params.sigmas.cholesky is not None else [1]*6
+        chol_centers = params.centers.cholesky if hasattr(params.centers, 'cholesky') and params.centers.cholesky is not None else [None]*6
+        chol_betas = params.betas.cholesky if hasattr(params.betas, 'cholesky') and params.betas.cholesky is not None else [None]*6
+
+        PAR.cholesky = []
+        for ii in range(6):
+            p = ParameterType(init=chol_init[ii], sigma=chol_sigmas[ii],
+                              minval=chol_mins[ii], maxval=chol_maxs[ii],
+                              fix=params.fix.Nabc,
+                              center=chol_centers[ii], beta=chol_betas[ii])
+            PAR.cholesky.append(p)
+
     # unit cell parameters
     ucell_man = utils.manager_from_crystal(experiment.crystal)  # Note ucell man contains the best parameters (if best is not None)
     ucell_vary_perc = params.ucell_edge_perc / 100.
@@ -218,7 +267,7 @@ def PAR_from_params(params, experiment, best=None):
                                    center=params.centers.detz_shift, beta=params.betas.detz_shift)
 
     initB = params.init.B if best is None else (best.Bfactor.values[0] if "Bfactor" in best else params.init.B)
-    PAR.B = ParameterType(init=initB, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=True,
+    PAR.B = ParameterType(init=initB, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=params.fix.B,
                           center=params.centers.B, beta=params.betas.B)
 
     # Anisotropic B-factor (6 components)
@@ -230,7 +279,7 @@ def PAR_from_params(params, experiment, best=None):
             for ii in range(6):
                 p = ParameterType(init=baniso_vals[ii], sigma=params.sigmas.Baniso[ii],
                                   minval=params.mins.Baniso[ii], maxval=params.maxs.Baniso[ii],
-                                  fix=True,
+                                  fix=params.fix.Baniso,
                                   center=params.centers.Baniso[ii] if params.centers.Baniso is not None else None,
                                   beta=params.betas.Baniso[ii] if params.betas.Baniso is not None else None)
                 PAR.Baniso.append(p)
@@ -266,3 +315,5 @@ class StageTwoParams:
         self.diffuse_sigma = None
         self.diffuse_gamma = None
         self.Baniso = None
+        self.cholesky = None
+        self.use_cholesky_Nabc = False

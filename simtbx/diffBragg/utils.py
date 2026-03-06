@@ -1775,6 +1775,167 @@ def show_diffBragg_state(D, debug_pixel_panelfastslow):
     D.raw_pixels*=0
 
 
+def log_kernel_debug_state(D, Modeler, stage_name, rank, i_shot, exp_name=None):
+    """Log diffBragg kernel state at a stage boundary for debugging.
+
+    Reads actual D properties that the kernel uses (reliable, works with GPU).
+    Also prints Python-side state (sigma_rdout, background, data, scales).
+    """
+    import sys
+    import numpy as np
+    if not Modeler.rois:
+        return
+
+    x1, x2, y1, y2 = Modeler.rois[0]
+    f_center = (x1 + x2) // 2
+    s_center = (y1 + y2) // 2
+    pid = Modeler.pids[0] if hasattr(Modeler, 'pids') and len(Modeler.pids) > 0 else 0
+
+    print("\n" + "=" * 80, flush=True)
+    print("KERNEL DEBUG: %s (rank=%d, i_shot=%d)" % (stage_name, rank, i_shot), flush=True)
+    if exp_name:
+        print("  exp_name: %s" % exp_name, flush=True)
+    print("  Debug pixel: panel=%d, fast=%d, slow=%d (center of ROI 0: [%d:%d, %d:%d])"
+          % (pid, f_center, s_center, x1, x2, y1, y2), flush=True)
+
+    # --- diffBragg D properties (what the kernel actually uses) ---
+    print("  --- D properties (kernel inputs) ---", flush=True)
+    try:
+        U = D.Umatrix
+        print("  D.Umatrix: [%.8f %.8f %.8f / %.8f %.8f %.8f / %.8f %.8f %.8f]"
+              % (U[0], U[1], U[2], U[3], U[4], U[5], U[6], U[7], U[8]), flush=True)
+    except Exception as e:
+        print("  D.Umatrix: ERROR %s" % e, flush=True)
+    try:
+        B = D.Bmatrix
+        print("  D.Bmatrix: [%.10f %.10f %.10f / %.10f %.10f %.10f / %.10f %.10f %.10f]"
+              % (B[0], B[1], B[2], B[3], B[4], B[5], B[6], B[7], B[8]), flush=True)
+    except Exception as e:
+        print("  D.Bmatrix: ERROR %s" % e, flush=True)
+    try:
+        Nabc = D.Ncells_abc
+        print("  D.Ncells_abc: (%.4f, %.4f, %.4f)" % tuple(Nabc), flush=True)
+    except Exception:
+        pass
+    try:
+        Ndef = D.Ncells_def
+        print("  D.Ncells_def: (%.4f, %.4f, %.4f)" % tuple(Ndef), flush=True)
+    except Exception:
+        pass
+    for rid, name in [(0, "RotX"), (1, "RotY"), (2, "RotZ")]:
+        try:
+            print("  D.get_value(%s=%d): %.10f" % (name, rid, D.get_value(rid)), flush=True)
+        except Exception:
+            pass
+    try:
+        print("  D.spot_scale: %g" % D.spot_scale, flush=True)
+    except Exception:
+        pass
+    try:
+        print("  D.Bfactor_image: %g" % D.Bfactor_image, flush=True)
+    except Exception:
+        pass
+    try:
+        lc = D.lambda_coefficients
+        print("  D.lambda_coefficients: (%g, %g)" % (lc[0], lc[1]), flush=True)
+    except Exception:
+        pass
+    try:
+        print("  D.use_lambda_coefficients: %s" % D.use_lambda_coefficients, flush=True)
+    except Exception:
+        pass
+
+    # Beam: read actual source from xray_beams (what the kernel uses, not beam_vector)
+    try:
+        xrb = D.xray_beams
+        if len(xrb) > 0:
+            b0 = xrb[0]
+            s0 = b0.get_unit_s0()
+            print("  D.xray_beams[0].unit_s0: (%.8f, %.8f, %.8f)" % tuple(s0), flush=True)
+            print("  D.xray_beams[0].wavelength: %.8f A" % b0.get_wavelength(), flush=True)
+            print("  D.xray_beams[0].flux: %g" % b0.get_flux(), flush=True)
+            print("  D.xray_beams n_sources: %d" % len(xrb), flush=True)
+    except Exception as e:
+        print("  D.xray_beams: ERROR %s" % e, flush=True)
+
+    # Detector origin (first panel)
+    try:
+        det = D.detector
+        p0 = det[pid]
+        origin = p0.get_origin()
+        fast = p0.get_fast_axis()
+        slow = p0.get_slow_axis()
+        print("  detector[%d].origin: (%.4f, %.4f, %.4f)" % (pid, origin[0], origin[1], origin[2]), flush=True)
+        print("  detector[%d].fast_axis: (%.6f, %.6f, %.6f)" % (pid, fast[0], fast[1], fast[2]), flush=True)
+        print("  detector[%d].slow_axis: (%.6f, %.6f, %.6f)" % (pid, slow[0], slow[1], slow[2]), flush=True)
+    except Exception as e:
+        print("  detector: ERROR %s" % e, flush=True)
+
+    # Goniometer / phi
+    try:
+        print("  D.phi_deg: %g" % D.phi_deg, flush=True)
+        print("  D.osc_deg: %g" % D.osc_deg, flush=True)
+        print("  D.phisteps: %d" % D.phisteps, flush=True)
+    except Exception:
+        pass
+    try:
+        sa = D.spindle_axis
+        print("  D.spindle_axis: (%.10f, %.10f, %.10f)" % tuple(sa), flush=True)
+    except Exception:
+        pass
+
+    # --- Python-side Modeler state ---
+    print("  --- Modeler state ---", flush=True)
+    if hasattr(Modeler, 'nominal_sigma_rdout'):
+        print("  sigma_rdout (nominal): %g" % Modeler.nominal_sigma_rdout, flush=True)
+    if hasattr(Modeler, 'all_sigma_rdout'):
+        sr = Modeler.all_sigma_rdout
+        if hasattr(sr, '__len__') and len(sr) > 1:
+            print("  sigma_rdout (all): min=%g, max=%g, median=%g"
+                  % (np.min(sr), np.max(sr), np.median(sr)), flush=True)
+        else:
+            val = sr[0] if hasattr(sr, '__len__') else sr
+            print("  sigma_rdout (all): %g" % val, flush=True)
+    if hasattr(Modeler, 'all_background'):
+        bg = Modeler.all_background
+        print("  background: sum=%g, mean=%g, min=%g, max=%g"
+              % (bg.sum(), bg.mean(), bg.min(), bg.max()), flush=True)
+    if hasattr(Modeler, 'all_data'):
+        dat = Modeler.all_data
+        print("  data: sum=%g, mean=%g, min=%g, max=%g"
+              % (dat.sum(), dat.mean(), dat.min(), dat.max()), flush=True)
+    if hasattr(Modeler, 'all_trusted'):
+        print("  trusted pixels: %d / %d"
+              % (int(Modeler.all_trusted.sum()), len(Modeler.all_trusted)), flush=True)
+    for attr in ('roiScalesPerPix', 'per_roi_scales_per_pix'):
+        if hasattr(Modeler, attr):
+            rsp = getattr(Modeler, attr)
+            if hasattr(rsp, '__len__') and len(rsp) > 0:
+                print("  %s: min=%g, max=%g, mean=%g"
+                      % (attr, np.min(rsp), np.max(rsp), np.mean(rsp)), flush=True)
+            else:
+                print("  %s: %s" % (attr, rsp), flush=True)
+
+    # --- C++ show_params (display-only, may differ from actual kernel inputs) ---
+    print("  --- D.show_params() (nanoBragg display, may not match kernel) ---", flush=True)
+    sys.stdout.flush()
+    D.show_params()
+
+    # --- Per-pixel C++ kernel debug ---
+    # Temporarily force CPU for the single-pixel debug call so it doesn't
+    # corrupt the GPU allocation needed by the subsequent full forward pass.
+    print("  --- show_diffBragg_state (per-pixel kernel internals) ---", flush=True)
+    sys.stdout.flush()
+    saved_cuda = os.environ.pop("DIFFBRAGG_USE_CUDA", None)
+    show_diffBragg_state(D, (pid, f_center, s_center))
+    if saved_cuda is not None:
+        os.environ["DIFFBRAGG_USE_CUDA"] = saved_cuda
+    D.printout = False
+
+    print("=" * 80 + "\n", flush=True)
+    sys.stdout.flush()
+
+
 def get_phil(params):
     """
     recursively print the phil param string, given a phil scope extract obj

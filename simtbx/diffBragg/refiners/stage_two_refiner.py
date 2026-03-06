@@ -58,8 +58,7 @@ from simtbx.diffBragg.refiners import BaseRefiner
 from cctbx import miller, sgtbx
 from simtbx.diffBragg.refiners.parameters import RangedParameter
 
-# how many parameters per shot, currently just scale, B-factor (currently ignored), and Ncells abc
-N_PARAM_PER_SHOT = 5
+from simtbx.diffBragg.hopper_utils import BFACTOR_ID, BFACTOR_ANISO_ID, NCELLS_ID, NCELLS_ID_OFFDIAG
 
 
 class StageTwoRefiner(BaseRefiner):
@@ -132,6 +131,21 @@ class StageTwoRefiner(BaseRefiner):
         self.region_params = {}  # dictionary for storuing diffBragg/refiners/parameters.RangerParameter for gain correction params
 
         self.I_AM_ROOT = COMM.rank==0
+
+    def _compute_n_param_per_shot(self):
+        """Compute number of per-shot parameters from config.
+
+        Layout: G (1) + B (1) + Nabc/Cholesky (3 or 6) + Baniso (0 or 6)
+        """
+        n = 2  # G + B always present
+        test_mod = self.Modelers[self.shot_ids[0]]
+        if getattr(test_mod.PAR, 'use_cholesky_Nabc', False):
+            n += 6  # Cholesky L11..L33
+        else:
+            n += 3  # Na, Nb, Nc
+        if hasattr(test_mod.PAR, 'Baniso') and test_mod.PAR.Baniso is not None:
+            n += 6  # B11..B23
+        return n
 
     def _load_gain_regions(self):
         npan = len(self.S.detector)
@@ -215,21 +229,32 @@ class StageTwoRefiner(BaseRefiner):
 
         test_shot = self.shot_ids[0]
         self.n_ucell_param = len(self.Modelers[test_shot].PAR.ucell_man.variables)  # not used
-        self.n_total_params = self.n_total_shots*N_PARAM_PER_SHOT + self.n_global_fcell + self.num_regions
+        self.n_param_per_shot = self._compute_n_param_per_shot()
+        self._use_cholesky = getattr(self.Modelers[test_shot].PAR, 'use_cholesky_Nabc', False)
+        self._refining_Baniso = (hasattr(self.Modelers[test_shot].PAR, 'Baniso')
+                                 and self.Modelers[test_shot].PAR.Baniso is not None
+                                 and not self.params.fix.Baniso)
+        LOGGER.info("Per-shot params: %d (cholesky=%s, Baniso=%s)"
+                     % (self.n_param_per_shot, self._use_cholesky, self._refining_Baniso))
+        self.n_total_params = self.n_total_shots*self.n_param_per_shot + self.n_global_fcell + self.num_regions
 
+        # Build per-shot xpos mappings
+        # Layout: [G, B, Nabc/Chol (3 or 6), Baniso (0 or 6)] per shot
         self.spot_scale_xpos = {}
         self.Bfactor_xpos = {}
         self.Ncells_xstart = {}
+        self.Baniso_xstart = {}
+        n_nabc = 6 if self._use_cholesky else 3
         for shot_id in self.shot_ids:
-            self.spot_scale_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT
-            self.Bfactor_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 1
-            self.Ncells_xstart[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 2
+            base = self.shot_mapping[shot_id] * self.n_param_per_shot
+            self.spot_scale_xpos[shot_id] = base
+            self.Bfactor_xpos[shot_id] = base + 1
+            self.Ncells_xstart[shot_id] = base + 2
+            if self._refining_Baniso:
+                self.Baniso_xstart[shot_id] = base + 2 + n_nabc
         LOGGER.info("--0 create an Fcell mapping")
         if self.refine_Fcell:
-            #idx, data = self.S.D.Fhkl_tuple
-            #self.idx_from_p1 = {h: i for i, h in enumerate(idx)}
             self._make_p1_equiv_mapping()
-            # self.p1_from_idx = {i: h for i, h in zip(idx, data)}
 
         # Make a mapping of panel id to parameter index and backwards
         self.pid_from_idx = {}
@@ -238,11 +263,17 @@ class StageTwoRefiner(BaseRefiner):
         self.x = flex.double(np.ones(self.n_total_params))
         LOGGER.info("--Setting up per shot parameters")
 
-        self.fcell_xstart = self.n_total_shots*N_PARAM_PER_SHOT
+        self.fcell_xstart = self.n_total_shots*self.n_param_per_shot
         self.regions_xstart = self.fcell_xstart + self.n_global_fcell
 
         self._setup_region_refinement_parameters()
-        self._setup_ncells_refinement_parameters()
+        self._setup_Bfactor_refinement_parameters()
+        if self._use_cholesky:
+            self._setup_cholesky_refinement_parameters()
+        else:
+            self._setup_ncells_refinement_parameters()
+        if self._refining_Baniso:
+            self._setup_Baniso_refinement_parameters()
         self._track_num_times_pixel_was_modeled()
 
         self._setup_nominal_hkl_p1()
@@ -265,6 +296,12 @@ class StageTwoRefiner(BaseRefiner):
         self.D.refine(self._fcell_id)
         if self.params.refiner.refine_Nabc:
             self.D.refine(self._ncells_id)
+            if self._use_cholesky:
+                self.D.refine(self._ncells_def_id)
+        if not self.params.fix.B:
+            self.D.refine(BFACTOR_ID)
+        if self._refining_Baniso:
+            self.D.refine(BFACTOR_ANISO_ID)
         self.D.initialize_managers()
 
         for sid in self.shot_ids:
@@ -273,6 +310,9 @@ class StageTwoRefiner(BaseRefiner):
             Modeler.unique_i_fcell = set(Modeler.all_fcell_global_idx)
             Modeler.i_fcell_slices = self._get_i_fcell_slices(Modeler)
             self.Modelers[sid] = Modeler  # TODO: VERIFY IF THIS IS NECESSARY ?
+
+        if getattr(self.params, 'auto_Fhkl_sigma', False) and self.refine_Fcell:
+            self._compute_auto_sigma()
 
         self._MPI_barrier()
         LOGGER.info("Setup ends!")
@@ -312,6 +352,28 @@ class StageTwoRefiner(BaseRefiner):
             for i_n, p in enumerate(Ncells_params):
                 p.xpos = self.Ncells_xstart[i_shot] + i_n
                 p.name = "%s_shot%d_rank%d" % ( names[i_n], i_shot, COMM.rank)
+
+    def _setup_Bfactor_refinement_parameters(self):
+        for i_shot in self.shot_ids:
+            p = self.Modelers[i_shot].PAR.B
+            p.xpos = self.Bfactor_xpos[i_shot]
+            p.name = "Bfactor_shot%d_rank%d" % (i_shot, COMM.rank)
+
+    def _setup_cholesky_refinement_parameters(self):
+        names = "chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"
+        for i_shot in self.shot_ids:
+            chol_params = self.Modelers[i_shot].PAR.cholesky
+            for i_c, p in enumerate(chol_params):
+                p.xpos = self.Ncells_xstart[i_shot] + i_c
+                p.name = "%s_shot%d_rank%d" % (names[i_c], i_shot, COMM.rank)
+
+    def _setup_Baniso_refinement_parameters(self):
+        names = ["Baniso%d" % i for i in range(6)]
+        for i_shot in self.shot_ids:
+            baniso_params = self.Modelers[i_shot].PAR.Baniso
+            for i_b, p in enumerate(baniso_params):
+                p.xpos = self.Baniso_xstart[i_shot] + i_b
+                p.name = "%s_shot%d_rank%d" % (names[i_b], i_shot, COMM.rank)
 
     def _gain_restraints(self):
         if self.params.refiner.gain_restraint:
@@ -401,6 +463,96 @@ class StageTwoRefiner(BaseRefiner):
             self.fcell_sigmas_from_i_fcell = self.params.sigmas.Fhkl
             LOGGER.info("DONE make fcell_init")
 
+    def _compute_auto_sigma(self):
+        """Compute per-Fhkl sigma from diagonal Hessian across all shots and MPI ranks.
+
+        Aggregates curvature contributions from each shot, reduces across MPI,
+        then sets self.fcell_sigmas_from_i_fcell = 1/sqrt(|H_ii|) (rescaled).
+        """
+        LOGGER.info("Computing auto Fhkl sigma from Hessian diagonal across all shots")
+        nfcell = self.n_global_fcell
+        hessian_accum = np.zeros(nfcell)
+
+        # Iterate over shots, accumulate Hessian diagonal for each Fhkl index
+        for i_shot in self.shot_ids:
+            Mod = self.Modelers[i_shot]
+            gains = self.REGIONS[Mod.all_pid, Mod.all_slow, Mod.all_fast]
+            # Use initial gain = 1 for sigma estimation
+            scale = Mod.PAR.Scale.init ** 2  # squared because Scale stores sqrt
+
+            # Set up SIM state for this shot
+            self._i_shot = i_shot
+            self._update_beams()
+            self._update_umatrix()
+            self._update_ucell()
+            self._update_ncells()
+            self._update_ncells_def()
+            self._update_eta()
+            self._update_Bfactor()
+            self._update_Baniso()
+            self._update_dxtbx_detector()
+
+            # Run forward model
+            pfs = Mod.pan_fast_slow
+            self.D.add_diffBragg_spots(pfs)
+            npix = len(Mod.all_data)
+            model_pix = self.D.raw_pixels_roi[:npix].as_numpy_array()
+            model_bragg = scale * model_pix
+            model_lambda = Mod.all_background + model_bragg
+            resid = Mod.all_data - model_lambda
+            V = model_lambda + Mod.nominal_sigma_rdout ** 2
+
+            # Compute per-Fhkl Hessian contribution from this shot
+            # For each unique i_fcell in this shot, accumulate |dI/dF|^2 / V
+            dF = self.D.get_derivative_pixels(self._fcell_id)
+            dF_arr = dF[:npix].as_numpy_array()
+            dF_scaled = scale * dF_arr
+
+            for i_fcell in Mod.unique_i_fcell:
+                for slc in Mod.i_fcell_slices[i_fcell]:
+                    trust = Mod.all_trusted[slc]
+                    v_slc = V[slc][trust]
+                    d_slc = dF_scaled[slc][trust]
+                    # Diagonal Hessian ≈ sum(d^2/v)
+                    hessian_accum[i_fcell] += np.sum(d_slc**2 / v_slc)
+
+            self.D.raw_pixels_roi *= 0
+
+        # MPI reduce Hessian across ranks
+        hessian_accum = self._MPI_reduce_broadcast(hessian_accum)
+
+        # Convert to sigmas
+        abs_hess = np.abs(hessian_accum)
+        has_signal = abs_hess > 1e-12
+        default_sigma = float(self.params.sigmas.Fhkl)
+        sigmas = np.full(nfcell, default_sigma)
+        raw_sigmas = np.full(nfcell, 0.0)
+        raw_sigmas[has_signal] = 1.0 / np.sqrt(abs_hess[has_signal])
+
+        if self.log_fcells:
+            # For log parameterization: dI/dx = sigma*F*dI/dF
+            # Already accounted for in get_deriv chain rule
+            pass
+
+        sigmas[has_signal] = raw_sigmas[has_signal]
+
+        # Rescale to match default sigma magnitude
+        if has_signal.any():
+            median_observed = float(np.median(sigmas[has_signal]))
+            scale_factor = default_sigma / median_observed
+            sigmas[has_signal] *= scale_factor
+            if self.I_AM_ROOT:
+                LOGGER.info("Fhkl auto-sigma: rescale=%.4g (default=%.4g / median=%.4g)"
+                            % (scale_factor, default_sigma, median_observed))
+
+        sigmas = np.clip(sigmas, 1e-4, 100)
+        self.fcell_sigmas_from_i_fcell = sigmas
+
+        if self.I_AM_ROOT:
+            LOGGER.info("Fhkl auto-sigma: min=%.4g, max=%.4g, median=%.4g, signal=%d/%d"
+                         % (sigmas.min(), sigmas.max(), np.median(sigmas),
+                            has_signal.sum(), nfcell))
+
     def _get_sausage_parameters(self, i_shot):
         pass
 
@@ -467,12 +619,8 @@ class StageTwoRefiner(BaseRefiner):
         return val
 
     def _get_bfactor(self, i_shot):
-        xval = self.x[self.Bfactor_xpos[i_shot]]
         PAR = self.Modelers[i_shot].PAR
-        sig = PAR.B.sigma
-        init = PAR.B.init
-        val = sig*(xval-1) + init
-        return val
+        return PAR.B.get_val(self.x[PAR.B.xpos])
 
     def _get_bg_vals(self, i_shot, i_spot):
         pass
@@ -568,12 +716,39 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _update_ncells(self):
-        vals = self._get_ncells_abc(self._i_shot)
-        self.D.set_ncells_values(tuple(vals))
+        Mod = self.Modelers[self._i_shot]
+        if self._use_cholesky:
+            chol = Mod.PAR.cholesky
+            L11, L21, L22, L31, L32, L33 = [p.get_val(self.x[p.xpos]) for p in chol]
+            Na = L11**2
+            Nb = L21**2 + L22**2
+            Nc = L31**2 + L32**2 + L33**2
+            Nd = L11*L21
+            Ne = L21*L31 + L22*L32
+            Nf = L11*L31
+            self.D.set_ncells_values((Na, Nb, Nc))
+            self.D.Ncells_def = Nd, Ne, Nf
+            self._chol_vals = (L11, L21, L22, L31, L32, L33)
+        else:
+            vals = self._get_ncells_abc(self._i_shot)
+            self.D.set_ncells_values(tuple(vals))
 
     def _update_ncells_def(self):
+        if self._use_cholesky:
+            return  # already set in _update_ncells
         vals = self._get_ncells_def(self._i_shot)
         self.D.Ncells_def = tuple(vals)
+
+    def _update_Bfactor(self):
+        if not self.params.fix.B:
+            self.D.Bfactor_image = self._get_bfactor(self._i_shot)
+
+    def _update_Baniso(self):
+        if not self._refining_Baniso:
+            return
+        Mod = self.Modelers[self._i_shot]
+        vals = tuple(p.get_val(self.x[p.xpos]) for p in Mod.PAR.Baniso)
+        self.D.Bfactor_aniso = vals
 
     def _update_dxtbx_detector(self):
         shiftZ = self._get_detector_distance_val(self._i_shot)
@@ -595,8 +770,16 @@ class StageTwoRefiner(BaseRefiner):
 
         if self.params.refiner.refine_Nabc:
             self.dNabc = [d[:npix].as_numpy_array() for d in self.D.get_ncells_derivative_pixels()]
+            if self._use_cholesky:
+                self.dNdef = [d[:npix].as_numpy_array() for d in self.D.get_ncells_def_derivative_pixels()]
             if self.calc_curvatures:
                 raise NotImplementedError("update the code")
+
+        if not self.params.fix.B:
+            self.dBfactor = self.D.get_Bfactor_derivative_pixels().as_numpy_array()[:npix]
+
+        if self._refining_Baniso:
+            self.dBaniso = [d[:npix].as_numpy_array() for d in self.D.get_Bfactor_aniso_derivative_pixels()]
 
     def _extract_sausage_derivs(self):
         pass
@@ -634,19 +817,27 @@ class StageTwoRefiner(BaseRefiner):
     def _scale_Nabc_derivative_pixels(self):
         if self.params.refiner.refine_Nabc:
             self.dNabc = [self.scale_fac*d for d in self.dNabc]
+            if self._use_cholesky:
+                self.dNdef = [self.scale_fac*d for d in self.dNdef]
+
+    def _scale_Bfactor_derivative_pixels(self):
+        if not self.params.fix.B:
+            self.dBfactor = self.scale_fac * self.dBfactor
+
+    def _scale_Baniso_derivative_pixels(self):
+        if self._refining_Baniso:
+            self.dBaniso = [self.scale_fac*d for d in self.dBaniso]
 
     def _get_per_spot_scale(self, i_shot, i_spot):
         pass
 
     def _scale_pixel_data(self):
-        #Mod = self.Modelers[self._i_shot]
-        #self.Bfactor_qterm = Mod.all_q_perpix**2 / 4.
-        #self._expBq = np.exp(-self.b_fac**2 * self.Bfactor_qterm)
-        #self.model_bragg_spots = self._expBq*self.scale_fac*(self._model_pix)
         self.model_bragg_spots_no_gains = self.scale_fac_no_gains*self._model_pix
         self.model_bragg_spots = self.scale_fac*self._model_pix
         self._scale_Fcell_derivative_pixels()
         self._scale_Nabc_derivative_pixels()
+        self._scale_Bfactor_derivative_pixels()
+        self._scale_Baniso_derivative_pixels()
 
     def _update_ucell(self):
         self.D.Bmatrix = self.Modelers[self._i_shot].PAR.Bmatrix
@@ -727,7 +918,6 @@ class StageTwoRefiner(BaseRefiner):
             self.b_fac = self._get_bfactor(self._i_shot)
 
             # TODO: Omatrix update? All crystal models here should have the same to_primitive operation, ideally
-            #LOGGER.info("update models shot %d " % self._i_shot)
             self._update_beams()
             self._update_umatrix()
             self._update_ucell()
@@ -735,6 +925,8 @@ class StageTwoRefiner(BaseRefiner):
             self._update_ncells_def()
             self._update_rotXYZ()
             self._update_eta()  # mosaic spread
+            self._update_Bfactor()
+            self._update_Baniso()
             self._symmetrize_Flatt()
             self._update_dxtbx_detector()
             self._update_sausages()
@@ -788,8 +980,12 @@ class StageTwoRefiner(BaseRefiner):
             self._is_trusted = self.Modelers[self._i_shot].all_trusted
             self.target_functional += self._target_accumulate()
             self._spot_scale_derivatives()
-            #self._Bfactor_derivatives()
-            self._accumulate_Nabc_derivatives()
+            self._Bfactor_derivatives()
+            self._Baniso_derivatives()
+            if self._use_cholesky:
+                self._accumulate_cholesky_derivatives()
+            else:
+                self._accumulate_Nabc_derivatives()
             self._Fcell_derivatives()
             self._gain_region_derivatives()
 
@@ -944,20 +1140,39 @@ class StageTwoRefiner(BaseRefiner):
             return d, d2
 
     def _Bfactor_derivatives(self):
-        LOGGER.info("derivatives of Bfactors for shot %d: current B=%e Ang^2" % (self._i_shot, self.b_fac**2))
         if self.params.fix.B:
             return
-        dI_dtheta = -.5*self.model_bragg_spots*self.Bfactor_qterm * self.b_fac
-        d2I_dtheta2 = 0 #-.5*self.model_bragg_spots*self.Bfactor_qterm
-        # second derivative is 0 with respect to scale factor
-        sig = self.Modelers[self._i_shot].PAR.B.sigma
-        d = dI_dtheta*sig
-        d2 = d2I_dtheta2*(sig**2)
+        Mod = self.Modelers[self._i_shot]
+        d = Mod.PAR.B.get_deriv(self.x[Mod.PAR.B.xpos], self.dBfactor)
+        self.grad[self.Bfactor_xpos[self._i_shot]] += self._grad_accumulate(d)
 
-        xpos = self.Bfactor_xpos[self._i_shot]
-        self.grad[xpos] += self._grad_accumulate(d)
-        if self.calc_curvatures:
-            self.curv[xpos] += self._curv_accumulate(d, d2)
+    def _Baniso_derivatives(self):
+        if not self._refining_Baniso:
+            return
+        Mod = self.Modelers[self._i_shot]
+        for i_ba in range(6):
+            p = Mod.PAR.Baniso[i_ba]
+            d = p.get_deriv(self.x[p.xpos], self.dBaniso[i_ba])
+            self.grad[p.xpos] += self._grad_accumulate(d)
+
+    def _accumulate_cholesky_derivatives(self):
+        if not self.params.refiner.refine_Nabc:
+            return
+        Mod = self.Modelers[self._i_shot]
+        L11, L21, L22, L31, L32, L33 = self._chol_vals
+        # Chain rule: dI/dLij from dI/dN{abc} and dI/dN{def}
+        dI_dL = [
+            self.dNabc[0]*2*L11 + self.dNdef[0]*L21 + self.dNdef[2]*L31,  # dI/dL11
+            self.dNdef[0]*L11 + self.dNabc[1]*2*L21 + self.dNdef[1]*L31,  # dI/dL21
+            self.dNabc[1]*2*L22 + self.dNdef[1]*L32,                       # dI/dL22
+            self.dNdef[2]*L11 + self.dNdef[1]*L21 + self.dNabc[2]*2*L31,  # dI/dL31
+            self.dNdef[1]*L22 + self.dNabc[2]*2*L32,                       # dI/dL32
+            self.dNabc[2]*2*L33,                                            # dI/dL33
+        ]
+        for i_chol in range(6):
+            p = Mod.PAR.cholesky[i_chol]
+            d = p.get_deriv(self.x[p.xpos], dI_dL[i_chol])
+            self.grad[p.xpos] += self._grad_accumulate(d)
 
     def _mpi_aggregation(self):
         # reduce the broadcast summed results:

@@ -156,6 +156,7 @@ class Script:
         exp_gatheredRef_spec = []  # optional list of expt, refls, spectra
         trefs = []
         this_rank_dfs = []  # dataframes storing the modeling results for each shot
+        this_rank_hopper_stats = []  # per-shot sigZ and pred_offset tracking
         this_rank_Elints = ExperimentList()
         this_rank_Rints = None
         this_rank_Ridxs = None
@@ -325,8 +326,24 @@ class Script:
             x0 = [1] * nparam
             tref = time.time()
             MAIN_LOGGER.info("Beginning refinement of shot %d / %d" % (i_shot+1, len(input_lines)))
+
+            # Kernel debug: log full C++ state at hopper init (inside model(), right before add_diffBragg_spots)
+            from simtbx.diffBragg.diffbragg_state import should_snapshot
+            _kd_label = None
+            if should_snapshot(self.params, i_shot, COMM.rank):
+                _kd_label = "HOPPER_INIT (rank=%d, i_shot=%d, %s)" % (COMM.rank, i_shot, os.path.basename(exp))
+                try:
+                    hopper_utils.model(x0, Modeler, SIM, compute_grad=False, kernel_debug=_kd_label)
+                except Exception as _e:
+                    print("KERNEL DEBUG hopper_init failed: %s" % _e, flush=True)
+
             try:
                 x = Modeler.Minimize(x0, SIM, i_shot=i_shot)
+                # Capture initial sigZ from first refinement stage
+                # (perRoi_finish will overwrite Modeler.target with a new TargetFunc)
+                _stage1_init_sigZ = None
+                if hasattr(Modeler, 'target') and Modeler.target is not None and Modeler.target.all_sigZ:
+                    _stage1_init_sigZ = float(Modeler.target.all_sigZ[0])
                 for i_rep in range(self.params.filter_after_refinement.max_attempts):
                     if not self.params.filter_after_refinement.enable:
                         continue
@@ -359,9 +376,11 @@ class Script:
                     for fix_name in dir(self.params.fix):
                         if fix_name.startswith("_"):
                             continue
-                        if "RotXYZ" in fix_name:
-                            setattr(self.params.fix, fix_name, [1,1,1])
-                        else:
+                        cur_val = getattr(self.params.fix, fix_name, None)
+                        if isinstance(cur_val, (list, tuple)):
+                            # List-type fix params (RotXYZ, panel_rotations, panel_translations)
+                            setattr(self.params.fix, fix_name, [1]*len(cur_val))
+                        elif not callable(cur_val):
                             setattr(self.params.fix, fix_name, True)
                     self.params.geometry.fix.panel_rotations=[1,1,1]
                     self.params.geometry.fix.panel_translations=[1,1,1]
@@ -434,6 +453,9 @@ class Script:
 
             except StopIteration:
                 x = Modeler.target.x0
+                _stage1_init_sigZ = None
+                if hasattr(Modeler, 'target') and Modeler.target is not None and Modeler.target.all_sigZ:
+                    _stage1_init_sigZ = float(Modeler.target.all_sigZ[0])
             tref = time.time()-tref
             sigz = niter = None
             try:
@@ -462,6 +484,76 @@ class Script:
                             save_fhkl_data=dbg, save_refl=save_refl, save_modeler_file=dbg,
                             save_sim_info=dbg, save_pandas=dbg, save_traces=dbg, save_expt=save_expt,
                             checker=CHECKER)
+
+            # Per-shot sigZ and pred_offset tracking
+            # Metrics are computed WITHOUT perRoiScale so they are comparable
+            # to geometry refinement metrics (which don't have per-ROI scales).
+            init_sigZ = _stage1_init_sigZ  # already clean: perRoiScale=1.0 at first eval
+            final_sigZ = None
+
+            # Recompute final sigZ without perRoiScale for apples-to-apples comparison
+            try:
+                _saved_roiScales = Modeler.roiScalesPerPix
+                Modeler.roiScalesPerPix = 1
+                _, _, _, _, _noRoi_sigZ, _ = hopper_utils.target_func(
+                    x, None, Modeler, SIM, compute_grad=False)
+                final_sigZ = float(_noRoi_sigZ)
+
+                # Kernel debug: log full C++ state at hopper final (inside model(), right before add_diffBragg_spots)
+                if should_snapshot(self.params, i_shot, COMM.rank):
+                    _kd_final = "HOPPER_FINAL (rank=%d, i_shot=%d, %s)" % (COMM.rank, i_shot, os.path.basename(exp))
+                    try:
+                        hopper_utils.model(x, Modeler, SIM, compute_grad=False, kernel_debug=_kd_final)
+                    except Exception as _e:
+                        print("KERNEL DEBUG hopper_final failed: %s" % _e, flush=True)
+
+                Modeler.roiScalesPerPix = _saved_roiScales
+            except Exception:
+                # Fallback to last target eval (includes perRoiScale)
+                if hasattr(Modeler, 'target') and Modeler.target is not None and Modeler.target.all_sigZ:
+                    final_sigZ = float(Modeler.target.all_sigZ[-1])
+
+            init_pred_offset = final_pred_offset = None
+            try:
+                from simtbx.diffBragg.refiners.geometry import get_dist_from_R
+
+                # Final pred_offset: from refined model (best_model set by save_up)
+                _new_crystal = hopper_utils.update_crystal_from_x(Modeler, SIM, x)
+                _new_exp = deepcopy(Modeler.E)
+                _new_exp.crystal = _new_crystal
+                _new_exp.detector = hopper_utils.update_detector_from_x(Modeler, SIM, x)
+                _new_refl = hopper_utils.get_new_xycalcs(Modeler, _new_exp, x=x)
+                _dists = get_dist_from_R(_new_refl)
+                final_pred_offset = float(np.median(_dists))
+
+                # Initial pred_offset: re-evaluate model at x0 (warm-start params)
+                _saved_best = Modeler.best_model.copy()
+                _init_x = np.array([1.0] * len(x))
+                _init_model, _ = hopper_utils.model(_init_x, Modeler, SIM, compute_grad=False)
+                Modeler.best_model = _init_model
+                Modeler.best_model_includes_background = False
+                _init_crystal = hopper_utils.update_crystal_from_x(Modeler, SIM, _init_x)
+                _init_exp = deepcopy(Modeler.E)
+                _init_exp.crystal = _init_crystal
+                _init_exp.detector = hopper_utils.update_detector_from_x(Modeler, SIM, _init_x)
+                _init_refl = hopper_utils.get_new_xycalcs(Modeler, _init_exp, x=_init_x)
+                _dists = get_dist_from_R(_init_refl)
+                init_pred_offset = float(np.median(_dists))
+                Modeler.best_model = _saved_best  # restore
+            except Exception:
+                pass
+
+            shot_df["init_sigZ"] = init_sigZ
+            shot_df["final_sigZ"] = final_sigZ
+            shot_df["init_pred_offset"] = init_pred_offset
+            shot_df["final_pred_offset"] = final_pred_offset
+            _n_trusted = int(Modeler.all_trusted.sum()) if hasattr(Modeler, 'all_trusted') else None
+            this_rank_hopper_stats.append({
+                "shot_id": os.path.basename(exp),
+                "init_sigZ": init_sigZ, "final_sigZ": final_sigZ,
+                "init_pred_offset": init_pred_offset, "final_pred_offset": final_pred_offset,
+                "n_rois": len(Modeler.rois), "n_trusted": _n_trusted,
+            })
 
             # Dump post-refinement gathered refls for geometry refinement
             if self.params.geometry.optimize:
@@ -785,6 +877,41 @@ class Script:
         save_composite_files(this_rank_dfs, this_rank_Elints, this_rank_Ridxs, this_rank_Rints,
                              pd_dir, expt_ref_dir, chunk_id)
 
+        # Write hopper summary (sigZ and pred_offset tracking)
+        all_hopper_stats = COMM.gather(this_rank_hopper_stats)
+        if COMM.rank == 0:
+            import json
+            flat_stats = [s for rank_stats in all_hopper_stats if rank_stats for s in rank_stats]
+            if flat_stats:
+                _isZ = [s["init_sigZ"] for s in flat_stats if s["init_sigZ"] is not None]
+                _fsZ = [s["final_sigZ"] for s in flat_stats if s["final_sigZ"] is not None]
+                _ipo = [s["init_pred_offset"] for s in flat_stats if s["init_pred_offset"] is not None]
+                _fpo = [s["final_pred_offset"] for s in flat_stats if s["final_pred_offset"] is not None]
+                hopper_summary = {
+                    "n_shots": len(flat_stats),
+                    "median_init_sigZ": float(np.median(_isZ)) if _isZ else None,
+                    "median_final_sigZ": float(np.median(_fsZ)) if _fsZ else None,
+                    "median_init_pred_offset": float(np.median(_ipo)) if _ipo else None,
+                    "median_final_pred_offset": float(np.median(_fpo)) if _fpo else None,
+                    "per_shot": [
+                        {"shot_id": s["shot_id"], "n_rois": s["n_rois"],
+                         "n_trusted": s.get("n_trusted"),
+                         "init_sigZ": s["init_sigZ"], "final_sigZ": s["final_sigZ"],
+                         "init_pred_offset": s["init_pred_offset"],
+                         "final_pred_offset": s["final_pred_offset"]}
+                        for s in flat_stats
+                    ],
+                }
+                summary_path = os.path.join(self.params.outdir, "hopper_summary.json")
+                with open(summary_path, "w") as fh:
+                    json.dump(hopper_summary, fh, indent=2)
+                MAIN_LOGGER.info("Hopper summary: %d shots, sigZ %.4f->%.4f, pred_offset %.4f->%.4f"
+                                 % (hopper_summary["n_shots"],
+                                    hopper_summary["median_init_sigZ"] or 0,
+                                    hopper_summary["median_final_sigZ"] or 0,
+                                    hopper_summary["median_init_pred_offset"] or 0,
+                                    hopper_summary["median_final_pred_offset"] or 0))
+
         # Phase 2: geometry refinement on the pool of shots
         if self.params.geometry.optimize:
             COMM.barrier()
@@ -812,7 +939,6 @@ class Script:
                 if COMM.rank == 0:
                     MAIN_LOGGER.info("Converting gathers to multi-panel format...")
                     from simtbx.diffBragg.multipanel_utils import convert_gathers_to_multipanel
-                    import pandas
                     fnames = sorted(glob.glob(pkl_glob))
                     df = pandas.concat([pandas.read_pickle(f) for f in fnames])
                     df = convert_gathers_to_multipanel(self.params, df)

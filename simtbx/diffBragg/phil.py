@@ -298,6 +298,12 @@ betas
   Fhkl = None
     .type = float
     .help = restraint factor for structure factor intensity scales
+  panel_rot = 1e6,1e6,1e6
+    .type = floats(size=3)
+    .help = restraint variance for per-shot panel rotations (Orth, Fast, Slow). Higher = weaker restraint.
+  panel_xyz = 1e6,1e6,1e6
+    .type = floats(size=3)
+    .help = restraint variance for per-shot panel translations (X, Y, Z). Higher = weaker restraint.
 }
 dual
   .help = configuration parameters for dual annealing
@@ -381,6 +387,12 @@ centers
   spec = None
     .type = floats(size=2)
     .help = restraint target for specturm correction (0 + 1*Lambda )
+  panel_rotations = 0,0,0
+    .type = floats(size=3)
+    .help = restraint target in degrees for per-shot panel rotations (Orth, Fast, Slow)
+  panel_translations = 0,0,0
+    .type = floats(size=3)
+    .help = restraint target in mm for per-shot panel translations (X, Y, Z)
 }
 skip = None
   .type = int
@@ -503,6 +515,12 @@ sigmas
   Fhkl = 1
     .type = float
     .help = sensitivity for structure factors
+  panel_rotations = [1,1,1]
+    .type = floats(size=3)
+    .help = sensitivity for per-shot panel rotations (Orth, Fast, Slow)
+  panel_translations = [1,1,1]
+    .type = floats(size=3)
+    .help = sensitivity for per-shot panel translations (X, Y, Z)
 }
 auto_Fhkl_sigma = False
   .type = bool
@@ -632,6 +650,12 @@ mins
   spec = [-0.01, 0.95]
     .type = floats(size=2)
     .help = min value for spectrum correction (-0.01 + Lambda *1.05)
+  panel_rotations = -1,-1,-1
+    .type = floats(size=3)
+    .help = min value in degrees for per-shot panel rotations (Orth, Fast, Slow)
+  panel_translations = -1,-1,-1
+    .type = floats(size=3)
+    .help = min value in mm for per-shot panel translations (X, Y, Z)
 }
 maxs
   .help = max value allowed for parameter
@@ -682,6 +706,12 @@ maxs
   spec = [0.01, 1.05]
     .type = floats(size=2)
     .help = max value for spectrum correction (0.01 + Lambda *1.05)
+  panel_rotations = 1,1,1
+    .type = floats(size=3)
+    .help = max value in degrees for per-shot panel rotations (Orth, Fast, Slow)
+  panel_translations = 1,1,1
+    .type = floats(size=3)
+    .help = max value in mm for per-shot panel translations (X, Y, Z)
 }
 fix
   .help = flags for fixing parameters during refinement
@@ -732,6 +762,12 @@ fix
   detz_shift = True
     .type = bool
     .help = fix the detector distance shift during refinement
+  panel_rotations = 1,1,1
+    .type = ints(size=3)
+    .help = fix per-shot detector panel rotations during hopper refinement (1=fixed, 0=refine)
+  panel_translations = 1,1,1
+    .type = ints(size=3)
+    .help = fix per-shot detector panel translations during hopper refinement (1=fixed, 0=refine)
 }
 relative_tilt = False
   .type = bool
@@ -1396,6 +1432,15 @@ geometry {
   cycler_outdir = None
     .type = str
     .help = parent output directory for macro-cycling (creates cycler_outdir/cycle1, cycler_outdir/cycle2, etc.)
+  ftol = None
+    .type = float
+    .help = "ftol convergence threshold for L-BFGS-B in geometry refinement."
+            "If None, falls back to the global ftol (default 1e-10)."
+            "A looser tolerance (e.g. 1e-7) prevents Hessian degradation near convergence."
+  gtol = None
+    .type = float
+    .help = "gtol convergence threshold for L-BFGS-B in geometry refinement."
+            "If None, uses 1e-10 (the current hardcoded default)."
   save_optimized_det_freq = 1
     .type = int
     .help = Save the optimzied detector model every X iterations

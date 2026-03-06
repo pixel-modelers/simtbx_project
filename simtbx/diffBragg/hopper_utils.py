@@ -990,10 +990,27 @@ class DataModeler:
             # L = [[L11,  0,   0 ],
             #      [L21, L22,  0 ],
             #      [L31, L32, L33]]
-            # Initialize from diagonal Nabc: L11=sqrt(Na), L22=sqrt(Nb), L33=sqrt(Nc), off-diag=0
             if init.cholesky is not None:
                 chol_init = list(init.cholesky)
+            elif any(v != 0 for v in init.Ndef):
+                # Warm-start: recover full Cholesky L from saved Nabc (diagonal) and Ndef (off-diagonal)
+                # NABC matrix = L^T * L, where:
+                #   Na = L11^2,  Nd = L11*L21,  Nf = L11*L31
+                #   Nb = L21^2 + L22^2,  Ne = L21*L31 + L22*L32
+                #   Nc = L31^2 + L32^2 + L33^2
+                Na, Nb, Nc = init.Nabc
+                Nd, Ne, Nf = init.Ndef
+                L11 = np.sqrt(max(Na, 1e-12))
+                L21 = Nd / L11
+                L22_sq = Nb - L21**2
+                L22 = np.sqrt(max(L22_sq, 1e-12))
+                L31 = Nf / L11
+                L32 = (Ne - L21 * L31) / L22 if L22 > 1e-12 else 0
+                L33_sq = Nc - L31**2 - L32**2
+                L33 = np.sqrt(max(L33_sq, 1e-12))
+                chol_init = [L11, L21, L22, L31, L32, L33]
             else:
+                # Fresh start: diagonal only
                 chol_init = [np.sqrt(init.Nabc[0]), 0, np.sqrt(init.Nabc[1]),
                              0, 0, np.sqrt(init.Nabc[2])]
 
@@ -1202,48 +1219,63 @@ class DataModeler:
                             beta=betas.spec[1] if betas.spec is not None else None)
         P.add(p)
 
-        GEO = self.params.geometry
         DEG_TO_PI = np.pi/180
-        vary_rots = [not fixed_flag for fixed_flag in GEO.fix.panel_rotations]
+        # Per-shot detector refinement uses root-level params (fix/mins/maxs/betas/centers/sigmas)
+        # separate from geometry.* which controls multi-shot geometry refinement
+        vary_rots = [not fixed_flag for fixed_flag in self.params.fix.panel_rotations]
         o = RangedParameter(name="group0_RotOrth",
                             init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[0] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[0] * DEG_TO_PI,
-                            fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
+                            sigma=self.params.sigmas.panel_rotations[0],
+                            minval=self.params.mins.panel_rotations[0] * DEG_TO_PI,
+                            maxval=self.params.maxs.panel_rotations[0] * DEG_TO_PI,
+                            fix=not vary_rots[0],
+                            center=self.params.centers.panel_rotations[0] * DEG_TO_PI,
+                            beta=self.params.betas.panel_rot[0], is_global=True)
 
         f = RangedParameter(name="group0_RotFast",
                             init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[1] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[1] * DEG_TO_PI,
-                            fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
+                            sigma=self.params.sigmas.panel_rotations[1],
+                            minval=self.params.mins.panel_rotations[1] * DEG_TO_PI,
+                            maxval=self.params.maxs.panel_rotations[1] * DEG_TO_PI,
+                            fix=not vary_rots[1],
+                            center=self.params.centers.panel_rotations[1] * DEG_TO_PI,
+                            beta=self.params.betas.panel_rot[1],
                             is_global=True)
 
         s = RangedParameter(name="group0_RotSlow",
                             init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[2] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[2] * DEG_TO_PI,
-                            fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
+                            sigma=self.params.sigmas.panel_rotations[2],
+                            minval=self.params.mins.panel_rotations[2] * DEG_TO_PI,
+                            maxval=self.params.maxs.panel_rotations[2] * DEG_TO_PI,
+                            fix=not vary_rots[2],
+                            center=self.params.centers.panel_rotations[2] * DEG_TO_PI,
+                            beta=self.params.betas.panel_rot[2],
                             is_global=True)
 
-        vary_shifts = [not fixed_flag for fixed_flag in GEO.fix.panel_translations]
-        # vary_shifts = [True]*3
+        vary_shifts = [not fixed_flag for fixed_flag in self.params.fix.panel_translations]
         x = RangedParameter(name="group0_ShiftX", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[0] * 1e-3, maxval=GEO.max.panel_translations[0] * 1e-3,
-                            fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
+                            sigma=self.params.sigmas.panel_translations[0],
+                            minval=self.params.mins.panel_translations[0] * 1e-3,
+                            maxval=self.params.maxs.panel_translations[0] * 1e-3,
+                            fix=not vary_shifts[0],
+                            center=self.params.centers.panel_translations[0] * 1e-3,
+                            beta=self.params.betas.panel_xyz[0],
                             is_global=True)
         y = RangedParameter(name="group0_ShiftY", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[1] * 1e-3, maxval=GEO.max.panel_translations[1] * 1e-3,
-                            fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
+                            sigma=self.params.sigmas.panel_translations[1],
+                            minval=self.params.mins.panel_translations[1] * 1e-3,
+                            maxval=self.params.maxs.panel_translations[1] * 1e-3,
+                            fix=not vary_shifts[1],
+                            center=self.params.centers.panel_translations[1] * 1e-3,
+                            beta=self.params.betas.panel_xyz[1],
                             is_global=True)
         z = RangedParameter(name="group0_ShiftZ", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[2] * 1e-3, maxval=GEO.max.panel_translations[2] * 1e-3,
-                            fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
+                            sigma=self.params.sigmas.panel_translations[2],
+                            minval=self.params.mins.panel_translations[2] * 1e-3,
+                            maxval=self.params.maxs.panel_translations[2] * 1e-3,
+                            fix=not vary_shifts[2],
+                            center=self.params.centers.panel_translations[2] * 1e-3,
+                            beta=self.params.betas.panel_xyz[2],
                             is_global=True)
         for p in [o,f,s,x,y,z]:
             P.add(p)
@@ -2186,7 +2218,7 @@ def print_params(Mod, x):
 
 
 def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_spectrum=False,
-          update_Fhkl_scales=True):
+          update_Fhkl_scales=True, kernel_debug=False):
 
     if Mod.P.refining_detector:
         if not hasattr(SIM, "panel_group_from_id"):
@@ -2375,6 +2407,10 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
 
         G = Mod.P["G_xtal%d" % i_xtal]
         scale = G.get_val(x[G.xpos])
+
+        if kernel_debug and i_xtal == 0:
+            from simtbx.diffBragg.utils import log_kernel_debug_state
+            log_kernel_debug_state(SIM.D, Mod, kernel_debug, 0, 0)
 
         SIM.D.add_diffBragg_spots(pfs)
 

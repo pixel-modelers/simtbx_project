@@ -202,6 +202,21 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         Baniso_params = [Mod.P["Baniso%d" % i] for i in range(6)]
         Bfactor_aniso = tuple(p.get_val(x[p.xpos]) for p in Baniso_params)
 
+    # Extract per-ROI scale factors keyed by ASU HKL for MTZ update propagation
+    perRoiScale = None
+    if not params.fix.perRoiScale or params.use_perRoiScale:
+        if hasattr(Mod, 'roi_id_unique') and hasattr(Mod, 'Hi_asu'):
+            perRoiScale = {}
+            for roi_id in Mod.roi_id_unique:
+                pname = "scale_roi%d" % roi_id
+                if pname in Mod.P:
+                    p = Mod.P[pname]
+                    scale_val = float(p.get_val(x[p.xpos]))
+                    slc = Mod.roi_id_slices[roi_id][0]
+                    refl_idx = int(Mod.all_refls_idx[slc][0])
+                    hkl = tuple(Mod.Hi_asu[refl_idx])
+                    perRoiScale[hkl] = scale_val
+
     df = single_expt_pandas(xtal_scale=scale, Amat=Amat,
         ncells_abc=(Na, Nb, Nc), ncells_def=(Nd,Ne,Nf),
         eta_abc=(eta_a, eta_b, eta_c),
@@ -227,7 +242,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         other_Umats = other_Umats, other_spotscales = other_spotscales,
         num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
                             gonio_angle=gonio_angle, Bfactor=Bfactor,
-                            Bfactor_aniso=Bfactor_aniso)
+                            Bfactor_aniso=Bfactor_aniso,
+                            perRoiScale=perRoiScale)
 
     df["gonio_axis"] = [SIM.D.spindle_axis]
 
@@ -263,7 +279,7 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
                        orig_exp_name, opt_exp_name, spec_from_imageset, oversample,
                        opt_det, stg1_refls, stg1_img_path, ncells_init=None, spot_scales_init = None,
                        other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None, Bfactor=None,
-                       Bfactor_aniso=None):
+                       Bfactor_aniso=None, perRoiScale=None):
     """
 
     :param xtal_scale:
@@ -333,6 +349,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         df["Bfactor"] = Bfactor
     if Bfactor_aniso is not None:
         df["Bfactor_aniso"] = [Bfactor_aniso]
+    if perRoiScale is not None:
+        df["perRoiScale"] = [perRoiScale]
     if spec_file is not None:
         spec_file = os.path.abspath(spec_file)
     df["spectrum_filename"] = spec_file
@@ -358,3 +376,86 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
     df["stage1_refls"] = stg1_refls
     df["stage1_output_img"] = stg1_img_path
     return df
+
+
+def update_mtz_with_roi_scales(input_mtz_path, output_mtz_path, pandas_paths,
+                                mtz_column=None, damping=1.0):
+    """
+    Update MTZ structure factors using per-ROI scale corrections from refinement.
+
+    Reads perRoiScale dicts {(h,k,l): scale} from pandas pkls, computes median
+    correction per HKL across all shots, and applies:
+        F_corrected = F_orig * (median_scale ** (0.5 * damping))
+
+    This folds per-ROI scale corrections into the reference Fhkl so the next
+    refinement cycle starts with perRoiScale ~1.0 (self-consistent).
+
+    Args:
+        input_mtz_path: path to original MTZ file
+        output_mtz_path: path for corrected MTZ output
+        pandas_paths: list of pandas pkl paths containing perRoiScale dicts
+        mtz_column: column label for reading original MTZ (default: "fobs(+)fobs(-)")
+        damping: fraction of correction to apply (0=none, 1=full)
+
+    Returns:
+        dict with keys: n_corrected, n_unique_hkl, n_total_mtz, median_correction
+    """
+    # Collect all HKL -> scale pairs from all shots
+    all_hkl_scales = {}  # (h,k,l) -> [scale1, scale2, ...]
+    for pkl_path in pandas_paths:
+        df = pandas.read_pickle(pkl_path)
+        for _, row in df.iterrows():
+            if "perRoiScale" not in row or row["perRoiScale"] is None:
+                continue
+            scales_dict = row["perRoiScale"]
+            if not isinstance(scales_dict, dict):
+                continue
+            for hkl, scale in scales_dict.items():
+                hkl = tuple(int(h) for h in hkl)
+                if hkl not in all_hkl_scales:
+                    all_hkl_scales[hkl] = []
+                all_hkl_scales[hkl].append(scale)
+
+    if not all_hkl_scales:
+        return {"n_corrected": 0, "n_unique_hkl": 0, "n_total_mtz": 0,
+                "median_correction": 1.0}
+
+    # Compute median scale per HKL
+    corrections = {}
+    for hkl, scales in all_hkl_scales.items():
+        corrections[hkl] = np.median(scales)
+
+    median_correction = np.median(list(corrections.values()))
+
+    # Read original MTZ (returns amplitude array)
+    original_ma = utils.open_mtz(input_mtz_path, mtz_column)
+
+    # KEEP anomalous data - do NOT merge Bijvoet mates (preserves anomalous signal)
+    # if original_ma.anomalous_flag():
+    #     original_ma = original_ma.average_bijvoet_mates()
+
+    # Apply corrections to amplitudes: F_new = F_old * (scale ^ (0.5*damping))
+    # For anomalous data, Friedel mates can have different corrections (true anomalous signal)
+    indices = original_ma.indices()
+    data = original_ma.data().deep_copy()
+    n_corrected = 0
+    for i in range(len(indices)):
+        hkl = tuple(indices[i])
+        if hkl in corrections:
+            corr = corrections[hkl]
+            if corr > 0:
+                data[i] = data[i] * (corr ** (0.5 * damping))
+                n_corrected += 1
+
+    # Create corrected miller array and write MTZ
+    corrected_ma = original_ma.customized_copy(data=data)
+    mtz_dataset = corrected_ma.as_mtz_dataset(column_root_label="FP")
+    mtz_dataset.mtz_object().write(output_mtz_path)
+
+    # Determine output column name (anomalous: "FP(+),SIGFP(+),FP(-),SIGFP(-)", merged: "FP,SIGFP")
+    is_anomalous = corrected_ma.anomalous_flag()
+    output_column = "FP(+),SIGFP(+),FP(-),SIGFP(-)" if is_anomalous else "FP,SIGFP"
+
+    return {"n_corrected": n_corrected, "n_unique_hkl": len(corrections),
+            "n_total_mtz": len(indices), "median_correction": median_correction,
+            "is_anomalous": is_anomalous, "mtz_column": output_column}

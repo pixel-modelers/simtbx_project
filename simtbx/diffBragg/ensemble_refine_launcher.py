@@ -444,6 +444,9 @@ class RefineLauncher:
             shot_modeler.exper_name = exper_name
             shot_modeler.exper_idx = exper_id
             shot_modeler.refl_name = refl_name
+            # Store original exp_name for cross-stage tracking (geometry uses geom_exp as exp_key)
+            if "exp_name" in list(exper_dataframe):
+                shot_modeler.orig_exp_name = exper_dataframe["exp_name"].values[0]
 
             shot_panel_groups_refined = self.determine_refined_panel_groups(shot_modeler.pids)
             rank_panel_groups_refined = rank_panel_groups_refined.union(set(shot_panel_groups_refined))

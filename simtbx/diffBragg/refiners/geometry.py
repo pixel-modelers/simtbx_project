@@ -319,48 +319,48 @@ class CrystalParameters:
                 p = Mod.PAR.Nabc[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Nabc%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Nabc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_N in range(3):
                 p = Mod.PAR.Ndef[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ndef%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Ndef, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_eta in range(3):
                 p = Mod.PAR.eta[i_eta]
                 ref_p = RangedParameter(name="rank%d_shot%d_eta%d" % (COMM.rank, i_shot, i_eta),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.eta_abc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_rot in range(3):
                 p = Mod.PAR.RotXYZ_params[i_rot]
                 ref_p = RangedParameter(name="rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, i_rot),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.RotXYZ[i_rot], init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             p = Mod.PAR.Scale
             ref_p = RangedParameter(name="rank%d_shot%d_Scale" % (COMM.rank, i_shot),
                                     minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.G, init=p.init,
-                                    center=p.center, beta=p.beta)
+                                    sigma=p.sigma, center=p.center, beta=p.beta)
             self.parameters.append(ref_p)
 
             for i_uc in range(len(Mod.PAR.ucell)):
                 p = Mod.PAR.ucell[i_uc]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ucell%d" % (COMM.rank, i_shot, i_uc),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.ucell, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             # Per-shot Bfactor (fixed by default, carries the hopper-refined value)
             bfac_p = Mod.PAR.B
             ref_p = RangedParameter(name="rank%d_shot%d_Bfactor" % (COMM.rank, i_shot),
                                     minval=bfac_p.minval, maxval=bfac_p.maxval, fix=True,
-                                    init=bfac_p.init, center=bfac_p.center, beta=bfac_p.beta)
+                                    init=bfac_p.init, sigma=bfac_p.sigma, center=bfac_p.center, beta=bfac_p.beta)
             self.parameters.append(ref_p)
 
             # Per-shot Bfactor_aniso (6 components, fixed by default)
@@ -369,7 +369,7 @@ class CrystalParameters:
                     ba_p = Mod.PAR.Baniso[i_ba]
                     ref_p = RangedParameter(name="rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i_ba),
                                             minval=ba_p.minval, maxval=ba_p.maxval, fix=True,
-                                            init=ba_p.init, center=ba_p.center, beta=ba_p.beta)
+                                            init=ba_p.init, sigma=ba_p.sigma, center=ba_p.center, beta=ba_p.beta)
                     self.parameters.append(ref_p)
 
             # Per-shot diffuse scattering params (fixed by default)
@@ -378,12 +378,12 @@ class CrystalParameters:
                     dg_p = Mod.PAR.diffuse_gamma[i_d]
                     ref_p = RangedParameter(name="rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i_d),
                                             minval=dg_p.minval, maxval=dg_p.maxval, fix=True,
-                                            init=dg_p.init, center=dg_p.center, beta=dg_p.beta)
+                                            init=dg_p.init, sigma=dg_p.sigma, center=dg_p.center, beta=dg_p.beta)
                     self.parameters.append(ref_p)
                     ds_p = Mod.PAR.diffuse_sigma[i_d]
                     ref_p = RangedParameter(name="rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i_d),
                                             minval=ds_p.minval, maxval=ds_p.maxval, fix=True,
-                                            init=ds_p.init, center=ds_p.center, beta=ds_p.beta)
+                                            init=ds_p.init, sigma=ds_p.sigma, center=ds_p.center, beta=ds_p.beta)
                     self.parameters.append(ref_p)
 
     def _init_shared(self, data_modelers):
@@ -421,6 +421,7 @@ class CrystalParameters:
             tp = rot_template[i_rot]
             ref_p = RangedParameter(name="shared_RotXYZ%d" % i_rot,
                                     minval=tp.minval, maxval=tp.maxval,
+                                    sigma=tp.sigma,
                                     fix=self.phil.geometry.fix.RotXYZ[i_rot],
                                     init=rot_medians[i_rot],
                                     center=rot_medians[i_rot],
@@ -433,6 +434,7 @@ class CrystalParameters:
             tp = uc_templates[i_uc]
             ref_p = RangedParameter(name="shared_Ucell%d" % i_uc,
                                     minval=tp.minval, maxval=tp.maxval,
+                                    sigma=tp.sigma,
                                     fix=self.phil.geometry.fix.ucell,
                                     init=uc_medians[i_uc],
                                     center=uc_medians[i_uc],
@@ -465,21 +467,21 @@ class CrystalParameters:
                 p = Mod.PAR.Nabc[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Nabc%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Nabc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_N in range(3):
                 p = Mod.PAR.Ndef[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ndef%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.Ndef, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_eta in range(3):
                 p = Mod.PAR.eta[i_eta]
                 ref_p = RangedParameter(name="rank%d_shot%d_eta%d" % (COMM.rank, i_shot, i_eta),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.eta_abc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             # RotXYZ: alias to shared params
@@ -491,7 +493,7 @@ class CrystalParameters:
             p = Mod.PAR.Scale
             ref_p = RangedParameter(name="rank%d_shot%d_Scale" % (COMM.rank, i_shot),
                                     minval=p.minval, maxval=p.maxval, fix=self.phil.geometry.fix.G, init=p.init,
-                                    center=p.center, beta=p.beta)
+                                    sigma=p.sigma, center=p.center, beta=p.beta)
             self.parameters.append(ref_p)
 
             # ucell: alias to shared params
@@ -504,7 +506,7 @@ class CrystalParameters:
             bfac_p = Mod.PAR.B
             ref_p = RangedParameter(name="rank%d_shot%d_Bfactor" % (COMM.rank, i_shot),
                                     minval=bfac_p.minval, maxval=bfac_p.maxval, fix=True,
-                                    init=bfac_p.init, center=bfac_p.center, beta=bfac_p.beta)
+                                    init=bfac_p.init, sigma=bfac_p.sigma, center=bfac_p.center, beta=bfac_p.beta)
             self.parameters.append(ref_p)
 
             # Per-shot Bfactor_aniso (6 components, fixed by default)
@@ -513,7 +515,7 @@ class CrystalParameters:
                     ba_p = Mod.PAR.Baniso[i_ba]
                     ref_p = RangedParameter(name="rank%d_shot%d_Baniso%d" % (COMM.rank, i_shot, i_ba),
                                             minval=ba_p.minval, maxval=ba_p.maxval, fix=True,
-                                            init=ba_p.init, center=ba_p.center, beta=ba_p.beta)
+                                            init=ba_p.init, sigma=ba_p.sigma, center=ba_p.center, beta=ba_p.beta)
                     self.parameters.append(ref_p)
 
             # Per-shot diffuse scattering params (fixed by default)
@@ -522,12 +524,12 @@ class CrystalParameters:
                     dg_p = Mod.PAR.diffuse_gamma[i_d]
                     ref_p = RangedParameter(name="rank%d_shot%d_diffuse_gamma%d" % (COMM.rank, i_shot, i_d),
                                             minval=dg_p.minval, maxval=dg_p.maxval, fix=True,
-                                            init=dg_p.init, center=dg_p.center, beta=dg_p.beta)
+                                            init=dg_p.init, sigma=dg_p.sigma, center=dg_p.center, beta=dg_p.beta)
                     self.parameters.append(ref_p)
                     ds_p = Mod.PAR.diffuse_sigma[i_d]
                     ref_p = RangedParameter(name="rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i_d),
                                             minval=ds_p.minval, maxval=ds_p.maxval, fix=True,
-                                            init=ds_p.init, center=ds_p.center, beta=ds_p.beta)
+                                            init=ds_p.init, sigma=ds_p.sigma, center=ds_p.center, beta=ds_p.beta)
                     self.parameters.append(ref_p)
 
 
@@ -754,7 +756,7 @@ class Target:
                          np.min(rotxyz_vals), np.max(rotxyz_vals)), flush=True)
 
 
-def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
+def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False, kernel_debug=False):
     """
 
     :param x: rescaled parameter array (global)
@@ -907,6 +909,10 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
         SIM.D.diffuse_sigma = tuple(diff_sigma)
 
     npix = int(len(Modeler.pan_fast_slow)/3.)
+
+    if kernel_debug:
+        from simtbx.diffBragg.utils import log_kernel_debug_state
+        log_kernel_debug_state(SIM.D, Modeler, kernel_debug, COMM.rank, i_shot)
 
     # calculate the forward Bragg scattering and gradients
     SIM.D.add_diffBragg_spots(Modeler.pan_fast_slow)
@@ -1512,14 +1518,18 @@ def geom_min(params):
     target = Target(LMP, save_state_freq=params.geometry.save_state_freq, overwrite_state=params.geometry.save_state_overwrite)
     fcn_args = (launcher.Modelers, launcher.SIM, params)
 
-    # Evaluate initial sigZ before optimization and update geom_start snapshots
-    if should_snapshot(params, 0, 0):  # any snapshot requested at all
-        _init_f, _, _init_sigZ = target_and_grad(
-            target.x0, LMP, launcher.Modelers, launcher.SIM, params, iternum=0)
-        # target_and_grad already does reduce+bcast, all ranks have same values
-        if COMM.rank == 0:
-            print("Geometry initial sigZ=%.6f, resid=%.6g" % (_init_sigZ, _init_f), flush=True)
-        # Update geom_start snapshots with initial sigZ
+    # Evaluate initial state before optimization
+    _init_f, _, _init_sigZ = target_and_grad(
+        target.x0, LMP, launcher.Modelers, launcher.SIM, params, iternum=0)
+    _init_pred_offset = compute_pred_offsets(target.x0, LMP, launcher.Modelers, launcher.SIM)
+    _init_sigZ_noRoi, _init_per_shot = compute_sigZ_noRoiScale(
+        target.x0, LMP, launcher.Modelers, launcher.SIM, return_per_shot=True)
+    if COMM.rank == 0:
+        print("Geometry initial: sigZ=%.6f (noRoiScale=%.6f), resid=%.6g, pred_offsets=%.4f pixels"
+              % (_init_sigZ, _init_sigZ_noRoi, _init_f, _init_pred_offset), flush=True)
+
+    # Update geom_start snapshots with initial diagnostics
+    if should_snapshot(params, 0, 0):
         _snap_dir = os.path.join(params.outdir, "state_snapshots")
         for i_shot in launcher.Modelers:
             if should_snapshot(params, i_shot, COMM.rank):
@@ -1533,11 +1543,28 @@ def geom_min(params):
                     with open(_snap_path, "w") as _fh:
                         _json.dump(_sdata, _fh, indent=2)
 
+    # Kernel debug: log full C++ state at geometry init (inside model(), right before add_diffBragg_spots)
+    if should_snapshot(params, 0, 0):
+        _first_shot = min(launcher.Modelers.keys()) if launcher.Modelers else None
+        if _first_shot is not None:
+            try:
+                _Mod = launcher.Modelers[_first_shot]
+                _ename = getattr(_Mod, 'orig_exp_name', '') or getattr(_Mod, 'exper_name', '')
+                _kd_label = "GEOM_INIT (rank=%d, i_shot=%d, %s)" % (COMM.rank, _first_shot, os.path.basename(_ename))
+                model(target.x0, LMP, _first_shot, _Mod, launcher.SIM, kernel_debug=_kd_label)
+            except Exception as _e:
+                print("KERNEL DEBUG geom_init failed: %s" % _e, flush=True)
+
+    geom_ftol = params.geometry.ftol if params.geometry.ftol is not None else params.ftol
+    geom_gtol = params.geometry.gtol if params.geometry.gtol is not None else 1e-10
     lbfgs_kws = {"jac": target.jac,
                  "method": "L-BFGS-B",
                  "args": fcn_args,
-                 "options":  {"ftol": params.ftol, "gtol": 1e-10, "maxfun":1e5, "maxiter":params.lbfgs_maxiter}}
+                 "options":  {"ftol": geom_ftol, "gtol": geom_gtol, "maxfun":1e5, "maxiter":params.lbfgs_maxiter}}
 
+    if COMM.rank == 0:
+        print("DEBUG geom_min: params.niter=%s, params.lbfgs_maxiter=%s, ftol=%s, gtol=%s"
+              % (params.niter, params.lbfgs_maxiter, geom_ftol, geom_gtol), flush=True)
     result = basinhopping(target, target.x0[target.vary],
                           niter=params.niter,
                           minimizer_kwargs=lbfgs_kws,
@@ -1614,8 +1641,51 @@ def geom_min(params):
             print("  Axis change: %.4f deg" % angle_change_deg)
         print("="*80 + "\n", flush=True)
 
-    if params.geometry.optimized_results_tag is not None:
-        write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)
+    # Always write final output (models_rank*.pkl, expts, refls) after geometry completes
+    write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)
+
+    # Compute and print final prediction offsets
+    final_pred_offset = compute_pred_offsets(Xopt, LMP, launcher.Modelers, launcher.SIM)
+    _final_sigZ = target.sigmaZ if hasattr(target, 'sigmaZ') else None
+    _final_resid = float(result.fun) if hasattr(result, 'fun') else None
+    _final_sigZ_noRoi, _final_per_shot = compute_sigZ_noRoiScale(
+        Xopt, LMP, launcher.Modelers, launcher.SIM, return_per_shot=True)
+    if COMM.rank == 0:
+        print("Geometry final:  sigZ=%.6f (noRoiScale=%.6f), resid=%.6g, pred_offsets=%.4f pixels"
+              % (_final_sigZ or 0, _final_sigZ_noRoi, _final_resid or 0, final_pred_offset), flush=True)
+        print("Geometry improvement: pred_offsets %.4f -> %.4f (delta=%.4f), sigZ %.6f -> %.6f"
+              % (_init_pred_offset, final_pred_offset, final_pred_offset - _init_pred_offset,
+                 _init_sigZ, _final_sigZ or 0), flush=True)
+
+        # Write summary JSON for hopper_cycler to collect
+        # sigZ values are WITHOUT perRoiScale for apples-to-apples comparison with hopper
+        import json as _json
+        _summary = {
+            "initial_pred_offset": float(_init_pred_offset),
+            "final_pred_offset": float(final_pred_offset),
+            "initial_sigZ": float(_init_sigZ_noRoi),
+            "final_sigZ": float(_final_sigZ_noRoi),
+            "initial_resid": float(_init_f),
+            "final_resid": _final_resid,
+            "n_iterations": target.iternum,
+            "per_shot_init": _init_per_shot if _init_per_shot else [],
+            "per_shot_final": _final_per_shot if _final_per_shot else [],
+        }
+        _summary_path = os.path.join(params.outdir, "geometry_summary.json")
+        with open(_summary_path, "w") as _fh:
+            _json.dump(_summary, _fh, indent=2)
+
+    # Kernel debug: log full C++ state at geometry final (inside model(), right before add_diffBragg_spots)
+    if should_snapshot(params, 0, 0):
+        _first_shot = min(launcher.Modelers.keys()) if launcher.Modelers else None
+        if _first_shot is not None:
+            try:
+                _Mod = launcher.Modelers[_first_shot]
+                _ename = getattr(_Mod, 'orig_exp_name', '') or getattr(_Mod, 'exper_name', '')
+                _kd_label = "GEOM_FINAL (rank=%d, i_shot=%d, %s)" % (COMM.rank, _first_shot, os.path.basename(_ename))
+                model(Xopt, LMP, _first_shot, _Mod, launcher.SIM, kernel_debug=_kd_label)
+            except Exception as _e:
+                print("KERNEL DEBUG geom_final failed: %s" % _e, flush=True)
 
     # Write geom_end state snapshots with sigma Z diagnostics
     # (done here in geom_min where target/result are in scope)
@@ -1694,6 +1764,85 @@ def save_opt_Fhkl(params, LMP, SIM, tag='current'):
         mset = miller.set(sym, hkl_inds, True)
         ma = miller.array(mset, data=scaled_amps).set_observation_type_xray_amplitude()
         ma.as_mtz_dataset(column_root_label="F").mtz_object().write(mtz_name)
+
+
+def compute_sigZ_noRoiScale(Xopt, LMP, Modelers, SIM, return_per_shot=False):
+    """Compute per-shot sigZ WITHOUT perRoiScale, for apples-to-apples comparison with hopper.
+    Returns median of per-shot sigZ values across all shots and ranks.
+    If return_per_shot=True, also returns list of {shot_id, sigZ, n_rois} dicts."""
+    all_shot_sigZ = []
+    per_shot_info = []
+    for i_shot in Modelers:
+        Modeler = Modelers[i_shot]
+        saved_scales = Modeler.per_roi_scales_per_pix
+        Modeler.per_roi_scales_per_pix = np.ones_like(Modeler.all_data)
+        try:
+            _, _, _, per_shot_sigZ = model(Xopt, LMP, i_shot, Modeler, SIM)
+            all_shot_sigZ.append(per_shot_sigZ)
+            if return_per_shot:
+                _ename = getattr(Modeler, 'orig_exp_name', '') or getattr(Modeler, 'exper_name', '')
+                shot_id = os.path.basename(_ename) or "shot_%d_%d" % (COMM.rank, i_shot)
+                _n_trusted = int(Modeler.all_trusted.sum()) if hasattr(Modeler, 'all_trusted') else None
+                per_shot_info.append({"shot_id": shot_id, "sigZ": float(per_shot_sigZ),
+                                      "n_rois": len(Modeler.rois), "n_trusted": _n_trusted})
+        finally:
+            Modeler.per_roi_scales_per_pix = saved_scales
+    all_shot_sigZ = COMM.reduce(all_shot_sigZ)
+    if return_per_shot:
+        per_shot_info = COMM.reduce(per_shot_info)
+    if COMM.rank == 0:
+        result = float(np.median(all_shot_sigZ)) if all_shot_sigZ else float('nan')
+    else:
+        result = None
+    result = COMM.bcast(result)
+    if return_per_shot:
+        per_shot_info = COMM.bcast(per_shot_info)
+        return result, per_shot_info
+    return result
+
+
+def compute_pred_offsets(Xopt, LMP, Modelers, SIM):
+    """Compute prediction offsets by running model() for each shot (no gradients).
+    Returns median |xobs - xcal| in pixels across all shots and ranks."""
+    opt_det = get_optimized_detector(Xopt, LMP, SIM)
+    all_offsets = []
+    for i_shot in Modelers:
+        Modeler = Modelers[i_shot]
+        rotX = LMP["rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, 0)]
+        rotY = LMP["rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, 1)]
+        rotZ = LMP["rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, 2)]
+        num_uc_p = len(Modeler.ucell_man.variables)
+        ucell_pars = [LMP["rank%d_shot%d_Ucell%d" % (COMM.rank, i_shot, i_uc)] for i_uc in range(num_uc_p)]
+
+        rotXYZ = (rotX.get_val(Xopt[rotX.xpos]),
+                  rotY.get_val(Xopt[rotY.xpos]),
+                  rotZ.get_val(Xopt[rotZ.xpos]))
+        Modeler.ucell_man.variables = [p.get_val(Xopt[p.xpos]) for p in ucell_pars]
+        ucpar = Modeler.ucell_man.unit_cell_parameters
+
+        new_crystal = hopper_utils.new_cryst_from_rotXYZ_and_ucell(rotXYZ, ucpar, Modeler.E.crystal)
+        new_exp = deepcopy(Modeler.E)
+        new_exp.crystal = new_crystal
+        wave, wt = map(np.array, zip(*Modeler.spectra))
+        new_exp.beam.set_wavelength((wave * wt).sum() / wt.sum())
+        new_exp.detector = opt_det
+
+        # Run forward model (no gradients) to populate best_model for centroid calc
+        Modeler.best_model = model(Xopt, LMP, i_shot, Modeler, SIM, return_bragg_model=True)
+        Modeler.best_model_includes_background = False
+
+        new_refl = hopper_utils.get_new_xycalcs(Modeler, new_exp, old_refl_tag="before_geom_ref")
+        shot_dists = get_dist_from_R(new_refl)
+        if len(shot_dists):
+            all_offsets.append(float(np.median(shot_dists)))
+
+    all_offsets = COMM.reduce(all_offsets)
+    if COMM.rank == 0:
+        median_offset = np.median(all_offsets) if all_offsets else float('nan')
+    else:
+        median_offset = None
+    median_offset = COMM.bcast(median_offset)
+    return median_offset
 
 
 def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
@@ -1859,6 +2008,16 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
                         Xopt[LMP["rank%d_shot%d_diffuse_sigma%d" % (COMM.rank, i_shot, i)].xpos])
                     for i in range(3))
 
+            # Extract per-ROI scale factors keyed by ASU HKL for MTZ update propagation
+            _perRoiScale = {}
+            for roi_id in Modeler.roi_id_unique:
+                p = LMP["rank%d_shot%d_scale_roi%d" % (COMM.rank, i_shot, roi_id)]
+                scale_val = float(p.get_val(Xopt[p.xpos]))
+                slc = Modeler.roi_id_slices[roi_id][0]
+                refl_idx = int(Modeler.all_refls_idx[slc][0])
+                hkl = tuple(Modeler.Hi_asu[refl_idx])
+                _perRoiScale[hkl] = scale_val
+
             _,fluxes = zip(*SIM.beam.spectrum)
             df= single_expt_pandas(xtal_scale=scale, Amat=new_crystal.get_A(),
                                    ncells_abc=(Na, Nb, Nc), ncells_def=(Nd, Ne, Nf),
@@ -1876,12 +2035,13 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
                                    spec_file=Modeler.spec_name,
                                    spec_stride=params.simulator.spectrum.stride,
                                    flux=sum(fluxes), beamsize_mm=SIM.beam.size_mm,
-                                   orig_exp_name=Modeler.exper_name,
+                                   orig_exp_name=getattr(Modeler, 'orig_exp_name', Modeler.exper_name),
                                    opt_exp_name=os.path.abspath(new_expt_fname),
                                    spec_from_imageset=params.spectrum_from_imageset,
                                    oversample=SIM.D.oversample,
                                    opt_det=params.opt_det, stg1_refls=Modeler.refl_name, stg1_img_path=None,
-                                   Bfactor=Bfactor_val, Bfactor_aniso=Bfactor_aniso_val)
+                                   Bfactor=Bfactor_val, Bfactor_aniso=Bfactor_aniso_val,
+                                   perRoiScale=_perRoiScale)
 
             all_dfs.append(df)
 

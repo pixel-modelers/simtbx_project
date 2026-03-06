@@ -172,6 +172,24 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
         if "gamma_miller_units" in list(df):
             diffuse_params["gamma_miller_units"] = df.gamma_miller_units.values[0]
 
+    # B-factor parameters
+    bfactor = None
+    bfactor_aniso = None
+    if "Bfactor" in columns:
+        bval = df.Bfactor.values[0]
+        try:
+            bval = float(bval)
+            if not np.isnan(bval):
+                bfactor = bval
+        except (TypeError, ValueError):
+            pass
+    if "Bfactor_aniso" in columns:
+        ba = df.Bfactor_aniso.values[0]
+        if ba is not None:
+            try:
+                bfactor_aniso = tuple(ba)
+            except (TypeError, ValueError):
+                pass
 
     if use_db:
         mos_dom = 1
@@ -202,9 +220,10 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
                                     show_timings=show_timings,
                                     perpixel_wavelen=perpixel_wavelen,
                                     det_thicksteps=det_thicksteps, Ncells_def=Ncells_def,
-                                    no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi, 
+                                    no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi,
                                     num_phi_steps=phisteps, return_sim=return_sim,
-                                    spindle_axis=spindle_axis)
+                                    spindle_axis=spindle_axis,
+                                    Bfactor=bfactor, Bfactor_aniso=bfactor_aniso)
         return results, expt
 
     else:
@@ -239,7 +258,8 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                       det_thicksteps=None, eta_abc=None, Ncells_def=None,
                       num_phi_steps=1, delta_phi=None, div_mrad=0, divsteps=0,
                       spindle_axis=None, fudge=1, no_Nabc_scale=False,
-                      return_sim=False, spread_data=None):
+                      return_sim=False, spread_data=None,
+                      Bfactor=None, Bfactor_aniso=None):
     if spread_data is not None:
         assert isinstance(spread_data, dict)
         assert all(k in spread_data for k in ("atoms", "fprime", "fdblprime"))
@@ -308,6 +328,11 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
         S.D.gamma_miller_units = diffuse_params["gamma_miller_units"]
         S.D.diffuse_gamma = diffuse_params["gamma"]
         S.D.diffuse_sigma = diffuse_params["sigma"]
+
+    if Bfactor is not None:
+        S.D.Bfactor_image = Bfactor
+    if Bfactor_aniso is not None:
+        S.D.Bfactor_aniso = Bfactor_aniso
 
     if delta_phi is not None:
         utils.update_SIM_with_gonio(S, delta_phi=delta_phi, num_phi_steps=num_phi_steps, spindle_axis=spindle_axis)
