@@ -900,6 +900,9 @@ class DataModeler:
             # mosaic block
             self.params.init.Nabc = tuple(best.ncells.values[0])
             self.params.init.Ndef = tuple(best.ncells_def.values[0])
+            # Clear init.cholesky so per-shot Nabc/Ndef recovery is used
+            # (otherwise static phil values override warm-start)
+            self.params.init.cholesky = None
             # scale factor
             self.params.init.G = best.spot_scales.values[0]
 
@@ -2040,6 +2043,83 @@ class DataModeler:
             sum_df.to_csv(summary_path, mode='a', header=write_header, index=False, float_format='%.4f')
 
         return shot_df
+
+
+def shifted_spearman_grid(data_roi, model_roi, grid_size=3, trust=None):
+    """Compute Spearman R between data and model ROIs on a grid of pixel shifts.
+
+    Shifts the model ROI by integer pixels in x and y, computing Spearman R
+    at each shift using only the overlapping region (no wrap-around).
+
+    Args:
+        data_roi: 2D array of observed pixel values
+        model_roi: 2D array of model pixel values (same shape as data_roi)
+        grid_size: half-width of shift grid (shifts from -grid_size to +grid_size)
+        trust: optional 2D boolean mask (same shape); only trusted pixels are used
+
+    Returns:
+        dict with:
+            grid: (2*grid_size+1, 2*grid_size+1) array of Spearman R values
+            peak_dx: x-shift of peak Spearman R (pixels, 0 = centered)
+            peak_dy: y-shift of peak Spearman R (pixels, 0 = centered)
+            peak_offset: distance of peak from center (pixels)
+            peak_spearman_r: Spearman R at the peak
+            center_spearman_r: Spearman R at (0,0) shift
+    """
+    from scipy.stats import spearmanr as _spearmanr
+
+    h, w = data_roi.shape
+    n = 2 * grid_size + 1
+    grid = np.full((n, n), np.nan)
+
+    for iy, dy in enumerate(range(-grid_size, grid_size + 1)):
+        for ix, dx in enumerate(range(-grid_size, grid_size + 1)):
+            # Overlapping slices after shifting model by (dx, dy)
+            # Model source region
+            sy = slice(max(0, dy), min(h, h + dy))
+            sx = slice(max(0, dx), min(w, w + dx))
+            # Data target region
+            ty = slice(max(0, -dy), min(h, h - dy))
+            tx = slice(max(0, -dx), min(w, w - dx))
+
+            d = data_roi[ty, tx]
+            m = model_roi[sy, sx]
+
+            if trust is not None:
+                t = trust[ty, tx]
+                d = d[t]
+                m = m[t]
+            else:
+                d = d.ravel()
+                m = m.ravel()
+
+            if len(d) < 5:
+                continue
+
+            rho, _ = _spearmanr(d, m)
+            if np.isfinite(rho):
+                grid[iy, ix] = rho
+
+    # Find peak
+    valid = np.isfinite(grid)
+    if not valid.any():
+        return {'grid': grid, 'peak_dx': 0, 'peak_dy': 0,
+                'peak_offset': np.nan, 'peak_spearman_r': np.nan,
+                'center_spearman_r': np.nan}
+
+    peak_iy, peak_ix = np.unravel_index(np.nanargmax(grid), grid.shape)
+    peak_dy = peak_iy - grid_size
+    peak_dx = peak_ix - grid_size
+    peak_offset = np.sqrt(peak_dx**2 + peak_dy**2)
+
+    return {
+        'grid': grid,
+        'peak_dx': int(peak_dx),
+        'peak_dy': int(peak_dy),
+        'peak_offset': float(peak_offset),
+        'peak_spearman_r': float(grid[peak_iy, peak_ix]),
+        'center_spearman_r': float(grid[grid_size, grid_size]),
+    }
 
 
 def extract_image_score(Modeler, SIM, x, params):

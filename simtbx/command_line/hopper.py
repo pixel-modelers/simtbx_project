@@ -245,7 +245,8 @@ class Script:
 
             _multipanel_remap = False
             if self.params.refiner.reference_geom is not None:
-                ref_detector = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0].detector
+                ref_El = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)
+                ref_detector = ref_El[0].detector
                 from simtbx.diffBragg.multipanel_utils import is_multipanel_reference, remap_modeler_to_multipanel
                 if is_multipanel_reference(ref_detector, Modeler.E.detector):
                     mono_detector = Modeler.E.detector
@@ -253,6 +254,12 @@ class Script:
                     _multipanel_remap = True
                 else:
                     Modeler.E.detector = ref_detector
+                # Load optimized goniometer axis from reference_geom (for macro-cycling)
+                if ref_El[0].goniometer is not None:
+                    ref_axis = list(ref_El[0].goniometer.get_rotation_axis())
+                    self.params.simulator.gonio.axis = ref_axis
+                    if i_shot == 0:
+                        MAIN_LOGGER.info("Loaded gonio axis from reference_geom: (%.6f, %.6f, %.6f)" % tuple(ref_axis))
 
             # here we support inputting an experiment list with multiple crystals
             # the first crystal in the exp list is used to instantiate a diffBragg instance,

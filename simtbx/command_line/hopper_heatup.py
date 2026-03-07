@@ -154,6 +154,32 @@ DEFAULT_BETAS['ucell'] = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
 DEFAULT_PHISTEPS = [1, 2, 5, 10, 20, 30, 50, 75, 100]
 DEFAULT_SIGMA_R = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
 
+# Maximum angular step size per phi slice (degrees).
+# phisteps = ceil(delta_phi / MAX_PHI_STEP_DEG) is the minimum allowed.
+MAX_PHI_STEP_DEG = 0.02
+
+
+def min_phisteps_for_delta_phi(delta_phi_deg):
+    """Minimum phisteps so each phi slice is <= MAX_PHI_STEP_DEG.
+
+    Returns 1 if delta_phi is None or very small (stills-like).
+    """
+    if delta_phi_deg is None or delta_phi_deg <= MAX_PHI_STEP_DEG:
+        return 1
+    return int(np.ceil(delta_phi_deg / MAX_PHI_STEP_DEG))
+
+
+def filter_phisteps_sweep(sweep_vals, delta_phi_deg):
+    """Remove phisteps values below the physics minimum for given delta_phi.
+
+    Returns filtered list and the minimum value used.
+    """
+    mn = min_phisteps_for_delta_phi(delta_phi_deg)
+    filtered = [v for v in sweep_vals if v >= mn]
+    if not filtered:
+        filtered = [mn]
+    return filtered, mn
+
 # Tunable model/restraint params and their phil paths
 TUNE_PARAMS = {
     'phisteps':  'simulator.gonio.phi_steps',
@@ -3394,6 +3420,14 @@ Examples:
     # Detect if using cholesky from the phil
     use_cholesky = 'use_cholesky_Nabc' in base_phil and 'True' in base_phil.split('use_cholesky_Nabc')[1].split('\n')[0]
 
+    # Extract delta_phi from phil for phisteps minimum enforcement
+    _base_params = _parse_phil_str(base_phil)
+    delta_phi_deg = getattr(_base_params.simulator.gonio, 'delta_phi', None)
+    _min_ps = min_phisteps_for_delta_phi(delta_phi_deg)
+    if _min_ps > 1:
+        print("delta_phi=%.4f deg -> minimum phisteps=%d (max %.4f deg/step)"
+              % (delta_phi_deg, _min_ps, MAX_PHI_STEP_DEG))
+
     # Find spec file
     spec_path = args.spec
     if spec_path is None:
@@ -3743,6 +3777,10 @@ Examples:
         for model_param in ['phisteps', 'sigma_r']:
             sweep_vals = list(DEFAULT_PHISTEPS if model_param == 'phisteps'
                               else DEFAULT_SIGMA_R)
+            if model_param == 'phisteps':
+                sweep_vals, _mn = filter_phisteps_sweep(sweep_vals, delta_phi_deg)
+                if _mn > 1:
+                    print("  Filtered phisteps < %d (delta_phi=%.4f deg)" % (_mn, delta_phi_deg))
             phil_path = TUNE_PARAMS[model_param]
 
             print("\n  --- %s ---" % model_param)
@@ -4139,6 +4177,9 @@ Examples:
 
                 if tune_name == 'phisteps':
                     sweep_vals = list(DEFAULT_PHISTEPS)
+                    sweep_vals, _mn = filter_phisteps_sweep(sweep_vals, delta_phi_deg)
+                    if _mn > 1:
+                        print("  Filtered phisteps < %d (delta_phi=%.4f deg)" % (_mn, delta_phi_deg))
                     phil_path = TUNE_PARAMS['phisteps']
                 elif tune_name == 'sigma_r':
                     sweep_vals = list(DEFAULT_SIGMA_R)

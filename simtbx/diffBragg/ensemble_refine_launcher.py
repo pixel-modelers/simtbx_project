@@ -274,7 +274,10 @@ class RefineLauncher:
         flex_inds = flex.miller_index(new_midx)
         mset = miller.set(sym,flex_inds , True)
         ma = miller.array(mset, Fhkl_model.data())
-        Fhkl_model_p1 = ma.expand_to_p1().generate_bijvoet_mates()
+        # Use complete miller set for HKL filtering so geometry and hopper
+        # use the same reflection set (hopper's SIM uses complete_miller_array)
+        ma_complete = utils.complete_miller_array(ma, log=False)
+        Fhkl_model_p1 = ma_complete.expand_to_p1().generate_bijvoet_mates()
         Fhkl_model_p1_indices = set(Fhkl_model_p1.indices())
 
         for i_work, i_df in enumerate(worklist):
