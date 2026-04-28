@@ -195,26 +195,27 @@ class GoniometerParameters:
         theta_init, phi_init = self.cartesian_to_spherical(init_axis)
 
         beta = phil_params.geometry.betas.gonio_axis
+        delta_rad = np.radians(phil_params.geometry.max_gonio_axis_delta)
 
-        # Create theta parameter (polar angle)
+        # Create theta parameter (polar angle) — bounded by delta from init
         theta_param = RangedParameter(
             name="gonio_theta",
             init=theta_init,
             sigma=phil_params.geometry.sigma_gonio_axis,
-            minval=0.0,
-            maxval=np.pi,
+            minval=max(0.0, theta_init - delta_rad),
+            maxval=min(np.pi, theta_init + delta_rad),
             fix=phil_params.geometry.fix.gonio_axis,
             center=theta_init,
             beta=beta,
             is_global=True)
 
-        # Create phi parameter (azimuthal angle)
+        # Create phi parameter (azimuthal angle) — bounded by delta from init
         phi_param = RangedParameter(
             name="gonio_phi",
             init=phi_init,
             sigma=phil_params.geometry.sigma_gonio_axis,
-            minval=0.0,
-            maxval=2*np.pi,
+            minval=max(0.0, phi_init - delta_rad),
+            maxval=min(2*np.pi, phi_init + delta_rad),
             fix=phil_params.geometry.fix.gonio_axis,
             center=phi_init,
             beta=beta,
@@ -1202,7 +1203,7 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
         # accumulate the target functional for this rank/shot
         target_functional += neg_LL
 
-        if params.use_restraints:
+        if params.geometry.use_restraints:
             for name in ref_params:
                 if name.startswith("Fhkl"):
                     continue
@@ -1219,7 +1220,7 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
                 par = ref_params[name]
                 grad[par.xpos] += neg_LL_grad[name]
                 # for restraints only update the per-shot restraint gradients here
-                if params.use_restraints and not par.is_global and not par.fix and par.beta is not None:
+                if params.geometry.use_restraints and not par.is_global and not par.fix and par.beta is not None:
                     if ref_params.is_canonical(name):
                         grad[par.xpos] += par.get_restraint_deriv(x[par.xpos])
 
@@ -1227,13 +1228,13 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
     target_functional = COMM.bcast(COMM.reduce(target_functional))
     grad = COMM.bcast(COMM.reduce(grad))
 
-    if params.use_restraints and params.geometry.betas.close_distances is not None:
+    if params.geometry.use_restraints and params.geometry.betas.close_distances is not None:
         target_functional += np.std(SIM.D.close_distances) / params.geometry.betas.close_distances
     #if SIM.refining_sourceI:
     #    target_functional += np.std(SIM.update_sourceI_scales)
 
     ## add in the detector parameter restraints
-    if params.use_restraints:
+    if params.geometry.use_restraints:
         for name in ref_params:
             if name.startswith("Fhkl"):
                 continue
@@ -1372,7 +1373,7 @@ def geom_min(params):
         print("="*80)
         if params.geometry.shared_crystal:
             print("Shared crystal: RotXYZ + ucell (%d aliases)" % len(crystal_params.alias_pairs))
-        print("Restraints enabled: %s" % params.use_restraints)
+        print("Restraints enabled: %s" % params.geometry.use_restraints)
         print("Crystal params fixed: G=%s, Nabc=%s, RotXYZ=%s, ucell=%s, eta=%s" %
               (params.geometry.fix.G, params.geometry.fix.Nabc, params.geometry.fix.RotXYZ,
                params.geometry.fix.ucell, params.geometry.fix.eta_abc))
@@ -1391,9 +1392,12 @@ def geom_min(params):
             print("  theta init: %.6f rad (%.2f deg)" % (gonio_theta_p.init, np.degrees(gonio_theta_p.init)))
             print("  phi init: %.6f rad (%.2f deg)" % (gonio_phi_p.init, np.degrees(gonio_phi_p.init)))
             print("  sigma: %.4f" % params.geometry.sigma_gonio_axis)
+            print("  max_delta: %.1f deg" % params.geometry.max_gonio_axis_delta)
             if params.geometry.betas.gonio_axis is not None:
-                print("  beta: %.2e" % params.geometry.betas.gonio_axis)
-        if params.use_restraints:
+                print("  beta: %.2e (sigma ~%.2f deg)" % (
+                    params.geometry.betas.gonio_axis,
+                    np.degrees(np.sqrt(params.geometry.betas.gonio_axis))))
+        if params.geometry.use_restraints:
             print("\nRestraint betas:")
             print("  panel_rot: %s" % str(params.geometry.betas.panel_rot))
             print("  panel_xyz: %s" % str(params.geometry.betas.panel_xyz))
@@ -1782,6 +1786,9 @@ def compute_sigZ_noRoiScale(Xopt, LMP, Modelers, SIM, return_per_shot=False):
             if return_per_shot:
                 _ename = getattr(Modeler, 'orig_exp_name', '') or getattr(Modeler, 'exper_name', '')
                 shot_id = os.path.basename(_ename) or "shot_%d_%d" % (COMM.rank, i_shot)
+                _eidx = getattr(Modeler, 'exper_idx', 0)
+                if _eidx > 0:
+                    shot_id = "%s:%d" % (shot_id, _eidx)
                 _n_trusted = int(Modeler.all_trusted.sum()) if hasattr(Modeler, 'all_trusted') else None
                 per_shot_info.append({"shot_id": shot_id, "sigZ": float(per_shot_sigZ),
                                       "n_rois": len(Modeler.rois), "n_trusted": _n_trusted})
@@ -2014,8 +2021,7 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
                 p = LMP["rank%d_shot%d_scale_roi%d" % (COMM.rank, i_shot, roi_id)]
                 scale_val = float(p.get_val(Xopt[p.xpos]))
                 slc = Modeler.roi_id_slices[roi_id][0]
-                refl_idx = int(Modeler.all_refls_idx[slc][0])
-                hkl = tuple(Modeler.Hi_asu[refl_idx])
+                hkl = tuple(Modeler.hi_asu_perpix[slc.start])
                 _perRoiScale[hkl] = scale_val
 
             _,fluxes = zip(*SIM.beam.spectrum)

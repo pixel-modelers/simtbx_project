@@ -213,8 +213,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
                     p = Mod.P[pname]
                     scale_val = float(p.get_val(x[p.xpos]))
                     slc = Mod.roi_id_slices[roi_id][0]
-                    refl_idx = int(Mod.all_refls_idx[slc][0])
-                    hkl = tuple(Mod.Hi_asu[refl_idx])
+                    hkl = tuple(Mod.hi_asu_perpix[slc.start])
                     perRoiScale[hkl] = scale_val
 
     df = single_expt_pandas(xtal_scale=scale, Amat=Amat,

@@ -1481,9 +1481,9 @@ geometry {
     close_distances = None
       .type = float
       .help = restraint factor for the spread of detector panel Z-distances (#TODO think about this in context of tilt)
-    gonio_axis = None
+    gonio_axis = 1e-4
       .type = float
-      .help = restraint factor for goniometer axis angles (higher values lead to unrestrained parameters)
+      .help = restraint beta (variance) for goniometer axis angles in rad^2. Default 1e-4 ~ 0.57 deg sigma.
   }
   fix {
     panel_rotations = 1,1,1
@@ -1520,9 +1520,12 @@ geometry {
       .type = bool
       .help = fix per-ROI scale factors during geometry refinement (default: fixed)
   }
-  sigma_gonio_axis = 1
+  sigma_gonio_axis = 0.1
     .type = float
     .help = sigma for goniometer axis refinement (radians for spherical angles)
+  max_gonio_axis_delta = 5
+    .type = float
+    .help = maximum allowed change in goniometer axis direction (degrees). Hard bound on theta/phi.
   n_images_geom_ref = 50
     .type = int
     .help = number of images to use for geometry refinement in heatup (separate from sigma sweep sample)
@@ -1623,5 +1626,24 @@ predictions {
 }
 """
 
-philz = simulator_phil + refiner_phil + roi_phil + predictions_phil
+prediction_expansion_phil = """
+prediction_expansion {
+  expand_rois = False
+    .type = bool
+    .help = "Predict new ROIs using full-detector forward model after refinement"
+  threshold = 0.01
+    .type = float
+    .help = "Spot-finding threshold as fraction of max model intensity"
+  max_new_rois = 500
+    .type = int
+    .help = "Max predicted ROIs to add per shot"
+  use_flat_fhkl = True
+    .type = bool
+    .help = "Use constant Fhkl (default_F) and skip B-factors during prediction forward model."
+            " This ensures all HKLs are predicted with equal weight, independent of structure"
+            " factor or thermal motion, giving more complete prediction coverage."
+}
+"""
+
+philz = simulator_phil + refiner_phil + roi_phil + predictions_phil + prediction_expansion_phil
 phil_scope = parse(philz)

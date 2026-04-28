@@ -674,7 +674,7 @@ void diffBragg_sum_over_steps(
 
             double I0 = 0;
             double step_diffuse_param[6] = {0,0,0,0,0,0};
-            if (db_flags.use_diffuse){
+            if (db_flags.use_diffuse && !db_flags.use_flat_Fhkl){
               calc_diffuse_at_hkl(H_vec,H0,dHH,Hmin,Hmax,Hrange,Ainv,&db_cryst.FhklLinear[0],num_laue_mats,laue_mats,anisoG_local,anisoU_local,dG_dgam,db_flags.refine_diffuse,&I0,step_diffuse_param);
             }
 
@@ -689,7 +689,7 @@ void diffBragg_sum_over_steps(
             double F_cell2 = 0;
             int i_hklasu=0;
             int Fhkl_linear_index=-1;
-            if ( (h0<=db_cryst.h_max) && (h0>=db_cryst.h_min) && (k0<=db_cryst.k_max) && (k0>=db_cryst.k_min) && (l0<=db_cryst.l_max) && (l0>=db_cryst.l_min)  ) {
+            if ( !db_flags.use_flat_Fhkl && (h0<=db_cryst.h_max) && (h0>=db_cryst.h_min) && (k0<=db_cryst.k_max) && (k0>=db_cryst.k_min) && (l0<=db_cryst.l_max) && (l0>=db_cryst.l_min)  ) {
                 /* just take nearest-neighbor */
                 Fhkl_linear_index = (h0-db_cryst.h_min) * db_cryst.k_range * db_cryst.l_range +
                                 (k0- db_cryst.k_min) * db_cryst.l_range +
@@ -841,7 +841,7 @@ void diffBragg_sum_over_steps(
             if (db_flags.Fhkl_have_scale_factors)
                 s_hkl = d_image.Fhkl_scale[i_hklasu + Fhkl_channel*db_cryst.Num_ASU];
 
-            if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
+            if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients && !db_flags.use_flat_Fhkl){
                 double Fhkl_Bfac = 1.0;
                 if (db_cryst.Bfactor_image != 0)
                     Fhkl_Bfac = exp(-db_cryst.Bfactor_image * stol*stol*1e-20);
@@ -882,7 +882,7 @@ void diffBragg_sum_over_steps(
             // stol is in m^-1 in the kernel, B is in Angstrom^2, so convert: stol_A^2 = stol^2 * 1e-20
             double Bfac_term = 1.0;
             double stol_sqr_Ang = stol*stol*1e-20;
-            if (db_cryst.Bfactor_image != 0){
+            if (db_cryst.Bfactor_image != 0 && !db_flags.use_flat_Fhkl){
                 Bfac_term = exp(-db_cryst.Bfactor_image * stol_sqr_Ang);
                 Iincrement *= Bfac_term;
             }
@@ -894,7 +894,7 @@ void diffBragg_sum_over_steps(
             // Anisotropic B-factor: T = exp(-(β11*h² + β22*k² + β33*l² + 2*β12*h*k + 2*β13*h*l + 2*β23*k*l))
             // h,k,l are continuous fractional coords from H_vec (already computed above)
             {
-                bool use_Baniso = (db_cryst.Bfactor_aniso[0] != 0 || db_cryst.Bfactor_aniso[1] != 0 ||
+                bool use_Baniso = !db_flags.use_flat_Fhkl && (db_cryst.Bfactor_aniso[0] != 0 || db_cryst.Bfactor_aniso[1] != 0 ||
                                    db_cryst.Bfactor_aniso[2] != 0 || db_cryst.Bfactor_aniso[3] != 0 ||
                                    db_cryst.Bfactor_aniso[4] != 0 || db_cryst.Bfactor_aniso[5] != 0 ||
                                    db_flags.refine_Bfactor_aniso);

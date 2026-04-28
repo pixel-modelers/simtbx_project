@@ -83,7 +83,8 @@ void gpu_sum_over_steps(
         const CUDAREAL* __restrict__ Bfactor_aniso, bool refine_Bfactor_aniso, CUDAREAL* d_Bfactor_aniso_images,
         CUDAREAL spindle_theta_sph, CUDAREAL spindle_phi_sph,
         bool refine_gonio_theta, bool refine_gonio_phi,
-        CUDAREAL* d_gonio_theta_images, CUDAREAL* d_gonio_phi_images)
+        CUDAREAL* d_gonio_theta_images, CUDAREAL* d_gonio_phi_images,
+        bool use_flat_Fhkl)
 { // BEGIN GPU kernel
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -117,6 +118,7 @@ void gpu_sum_over_steps(
     __shared__ int s_num_atoms;
     __shared__ bool s_aniso_eta;
     __shared__ bool s_no_Nabc_scale;
+    __shared__ bool s_use_flat_Fhkl;
     __shared__ bool s_compute_curvatures;
     __shared__ MAT3 s_Ot;
     __shared__ MAT3 Ainv;
@@ -198,6 +200,7 @@ void gpu_sum_over_steps(
         s_use_nominal_hkl = use_nominal_hkl;
         s_aniso_eta = aniso_eta;
         s_no_Nabc_scale = no_Nabc_scale;
+        s_use_flat_Fhkl = use_flat_Fhkl;
         s_complex_miller = complex_miller;
         s_refine_lambda[0] = refine_lambda[0];
         s_refine_lambda[1] = refine_lambda[1];
@@ -498,7 +501,7 @@ void gpu_sum_over_steps(
             CUDAREAL stol = 0.5 * _scattering.norm();
             CUDAREAL stol_sqr_Ang = stol * stol * 1e-20;
             CUDAREAL Bfac_term = 1.0;
-            if (s_Bfactor_image != 0)
+            if (s_Bfactor_image != 0 && !s_use_flat_Fhkl)
                 Bfac_term = exp(-s_Bfactor_image * stol_sqr_Ang);
 
             // TODO rename
@@ -621,7 +624,7 @@ void gpu_sum_over_steps(
 
             // are we doing diffuse scattering
             CUDAREAL step_diffuse_param[6]  = {0,0,0,0,0,0};
-            if (s_use_diffuse){
+            if (s_use_diffuse && !s_use_flat_Fhkl){
               calc_diffuse_at_hkl(H_vec,H0,dHH,Hmin,Hmax,Hrange,Ainv,&_FhklLinear[0],num_laue_mats,laue_mats,anisoG_local,anisoU_local,dG_dgam,s_refine_diffuse,&I0,step_diffuse_param);
             } // end s_use_diffuse outer
 
@@ -629,7 +632,7 @@ void gpu_sum_over_steps(
             CUDAREAL _F_cell2 = 0;
             int i_hklasu=0;
 
-            if ( (_h0<=s_h_max) && (_h0>=s_h_min) && (_k0<=s_k_max) && (_k0>=s_k_min) && (_l0<=s_l_max) && (_l0>=s_l_min)  ) {
+            if ( !s_use_flat_Fhkl && (_h0<=s_h_max) && (_h0>=s_h_min) && (_k0<=s_k_max) && (_k0>=s_k_min) && (_l0<=s_l_max) && (_l0>=s_l_min)  ) {
                 int Fhkl_linear_index = (_h0-s_h_min) * s_k_range * s_l_range + (_k0-s_k_min) * s_l_range + (_l0-s_l_min);
                 //_F_cell = __ldg(&_FhklLinear[Fhkl_linear_index]);
                 _F_cell = _FhklLinear[Fhkl_linear_index];
@@ -729,7 +732,7 @@ void gpu_sum_over_steps(
             if (s_Fhkl_have_scale_factors)
                 s_hkl = Fhkl_scale[i_hklasu + Fhkl_channel*s_Num_ASU];
             // Anisotropic B-factor in fractional hkl space (depends on _h,_k,_l from mosaic loop)
-            bool use_Baniso = (s_Bfactor_aniso[0] != 0 || s_Bfactor_aniso[1] != 0 ||
+            bool use_Baniso = !s_use_flat_Fhkl && (s_Bfactor_aniso[0] != 0 || s_Bfactor_aniso[1] != 0 ||
                                s_Bfactor_aniso[2] != 0 || s_Bfactor_aniso[3] != 0 ||
                                s_Bfactor_aniso[4] != 0 || s_Bfactor_aniso[5] != 0 ||
                                s_refine_Bfactor_aniso);
@@ -744,7 +747,7 @@ void gpu_sum_over_steps(
                 Bfac_aniso_val = exp(-Baniso_term);
             }
 
-            if (s_gradient_mode && s_calc_Fhkl_gradients){
+            if (s_gradient_mode && s_calc_Fhkl_gradients && !s_use_flat_Fhkl){
                 CUDAREAL Fhkl_deriv_scale = s_overall_scale*polar_for_grad;
                 CUDAREAL I_noFcell=texture_scale*I0;
                 CUDAREAL dfhkl = I_noFcell*_I_cell * Fhkl_deriv_scale * Bfac_term * Bfac_aniso_val;

@@ -169,6 +169,7 @@ struct flags{
     bool gamma_miller_units = false; // use Miller index units for diffuse gamma matrix
     bool refine_Bfactor = false; // per-image B-factor refinement
     bool refine_Bfactor_aniso = false; // anisotropic B-factor refinement (6 components)
+    bool use_flat_Fhkl = false; // skip Fhkl lookup and B-factors, use default_F for prediction
 };
 
 struct crystal{

@@ -2122,9 +2122,34 @@ def load_Fhkl_model_from_params_and_expt(params, expt):
         miller_data = open_mtz(sf.mtz_name, sf.mtz_column)
 
     # Auto-complete missing reflections if requested
+    # When prediction expansion is active, extend completion to detector corner
+    # resolution so that predicted HKLs beyond the MTZ d_min get interpolated
+    # Fcalc values instead of falling back to default_F=0
+    complete_dmin = sf.dmin if sf.dmin is not None else None
+    pe = getattr(params, 'prediction_expansion', None)
+    if pe is not None and getattr(pe, 'expand_rois', False):
+        try:
+            corner_dmin = min(p.get_max_resolution_at_corners(expt.beam)
+                              for p in expt.detector)
+            # Determine reference d_min: explicit sf.dmin, or MTZ's own d_min
+            ref_dmin = complete_dmin
+            if ref_dmin is None and miller_data is not None:
+                _, ref_dmin = miller_data.resolution_range()
+            # Only extend if corner resolution is finer than reference
+            if ref_dmin is not None and corner_dmin < ref_dmin:
+                MAIN_LOGGER.info("Extending Fhkl completion to detector corner resolution "
+                                 "%.3f A (was %.3f A) for prediction expansion"
+                                 % (corner_dmin, ref_dmin))
+                complete_dmin = corner_dmin
+            else:
+                MAIN_LOGGER.debug("Detector corner resolution %.3f A is coarser than "
+                                  "MTZ d_min %.3f A; no extension needed"
+                                  % (corner_dmin, ref_dmin if ref_dmin else 0))
+        except Exception as e:
+            MAIN_LOGGER.warning("Could not compute detector corner resolution: %s" % e)
     if getattr(sf, 'auto_complete', True) and miller_data is not None:
         miller_data = complete_miller_array(
-            miller_data, d_min=sf.dmin if sf.dmin is not None else None)
+            miller_data, d_min=complete_dmin)
 
     return miller_data
 

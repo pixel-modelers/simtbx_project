@@ -482,6 +482,8 @@ class DataModeler:
         img_data = np.zeros((npan, nslow, nfast))
         background = np.zeros_like(img_data)
         is_trusted = np.zeros((npan, nslow, nfast), bool)
+        self.tilt_abc = []
+        self.tilt_cov = []
         for i_ref in range(nref):
             ref = self.refls[i_ref]
             pid = ref['panel']
@@ -537,6 +539,18 @@ class DataModeler:
 
             self.rois[i_ref] = x1_onPanel, x2_onPanel, y1_onPanel, y2_onPanel
 
+            # Recover tilt_abc from shoebox background via least-squares plane fit
+            if sb_bkgrnd.size >= 3:
+                Yc, Xc = np.indices(sb_bkgrnd.shape)
+                A = np.column_stack([Xc.ravel(), Yc.ravel(), np.ones(sb_bkgrnd.size)])
+                result = np.linalg.lstsq(A, sb_bkgrnd.ravel(), rcond=None)
+                tilt_a, tilt_b, tilt_c = result[0]
+            else:
+                tilt_a = tilt_b = 0
+                tilt_c = np.mean(sb_bkgrnd) if sb_bkgrnd.size > 0 else 0
+            self.tilt_abc.append((tilt_a, tilt_b, tilt_c))
+            self.tilt_cov.append(None)
+
 
         if self.params.refiner.refldata_to_photons:
             MAIN_LOGGER.debug("Re-scaling reflection data to photon units: conversion factor=%f" % self.params.refiner.adu_per_photon)
@@ -544,7 +558,11 @@ class DataModeler:
             background /= self.params.refiner.adu_per_photon
 
         # can be used for Bfactor modeling
-        self.Q = np.linalg.norm(self.refls["rlp"], axis=1)
+        if "rlp" in list(self.refls.keys()):
+            self.Q = np.linalg.norm(self.refls["rlp"], axis=1)
+        else:
+            self.no_rlp_info = True
+            self.Q = None
         self.nominal_sigma_rdout = self.params.refiner.sigma_r / self.params.refiner.adu_per_photon
 
         self.Hi = list(self.refls["miller_index"])
@@ -554,6 +572,13 @@ class DataModeler:
             self.Hi_asu = self.Hi
 
         self.data_to_one_dim(img_data, is_trusted, background)
+
+        # Read back is_predicted column if present (from expanded .refl files)
+        if 'is_predicted' in list(self.refls.keys()):
+            self.is_predicted = np.array(self.refls['is_predicted'])
+        else:
+            self.is_predicted = np.zeros(len(self.rois), dtype=bool)
+
         return True
 
     def GatherFromExperiment(self, exp, ref, remove_duplicate_hkl=True, sg_symbol=None, exp_idx=0):
@@ -871,6 +896,11 @@ class DataModeler:
                 if roi_id in roi_id_map:
                     per_refl_scales[roi_id_map[roi_id]] = scale_val
             R["scale_factor"] = per_refl_scales
+        if hasattr(self, 'is_predicted') and self.is_predicted is not None:
+            is_pred_col = dials_flex.bool(len(R), False)
+            for roi_id, new_idx in roi_id_map.items():
+                is_pred_col[new_idx] = bool(self.is_predicted[roi_id])
+            R["is_predicted"] = is_pred_col
         R.as_file(output_name)
 
     def set_parameters_for_experiment(self, best=None):
@@ -1713,7 +1743,8 @@ class DataModeler:
             Modeler.niter = len(trace0)
             Modeler.sigz = trace2[-1]
 
-        shot_df = hopper_io.save_to_pandas(x, Modeler, SIM, self.exper_name, Modeler.params, Modeler.E, i_shot,
+        _pandas_exp_name = getattr(self, 'orig_exp_name', None) or self.exper_name
+        shot_df = hopper_io.save_to_pandas(x, Modeler, SIM, _pandas_exp_name, Modeler.params, Modeler.E, i_shot,
                                            self.refl_name, None, rank, write_expt=save_expt, write_pandas=save_pandas,
                                            exp_idx=self.exper_idx)
 
@@ -1946,7 +1977,10 @@ class DataModeler:
                 # HKL and d-spacing
                 hkl = Modeler.Hi[i_roi] if Modeler.Hi else (0, 0, 0)
                 hkl_asu = Modeler.Hi_asu[i_roi] if Modeler.Hi_asu else hkl
-                d_spacing = 1.0 / Modeler.Q[i_roi] if hasattr(Modeler, 'Q') and Modeler.Q else np.nan
+                if hasattr(Modeler, 'Q') and Modeler.Q is not None and Modeler.Q[i_roi] != 0:
+                    d_spacing = 1.0 / Modeler.Q[i_roi]
+                else:
+                    d_spacing = np.nan
                 # panel and centroid (pixels)
                 x1, x2, y1, y2 = Modeler.rois[i_roi]
                 pid = Modeler.pids[i_roi]
@@ -2042,7 +2076,365 @@ class DataModeler:
             write_header = not os.path.exists(summary_path)
             sum_df.to_csv(summary_path, mode='a', header=write_header, index=False, float_format='%.4f')
 
+        # --- Prediction expansion: predict new ROIs using full-detector forward model ---
+        pe = getattr(Modeler.params, 'prediction_expansion', None)
+        if pe is not None and pe.expand_rois:
+            try:
+                sg_sym = getattr(Modeler.params, 'space_group', None)
+                new_refls = self.predict_new_rois(
+                    SIM, x,
+                    thresh_frac=pe.threshold,
+                    max_new_rois=pe.max_new_rois,
+                    sg_symbol=sg_sym)
+                if new_refls is not None and len(new_refls) > 0:
+                    # Get raw image data for predicted ROI extraction.
+                    # When loading from refls, the current expt may lack imageset data,
+                    # so fall back to the original experiment file.
+                    img_data = None
+                    for _img_src in [Modeler.E, getattr(self, 'orig_exp_name', None)]:
+                        try:
+                            if _img_src is None:
+                                continue
+                            if isinstance(_img_src, str):
+                                from dxtbx.model import ExperimentList as ExptList
+                                _img_src = ExptList.from_file(_img_src)[self.exper_idx]
+                            img_data = utils.image_data_from_expt(_img_src)
+                            img_data /= Modeler.params.refiner.adu_per_photon
+                            break
+                        except Exception:
+                            continue
+                    if img_data is None:
+                        MAIN_LOGGER.warning("Prediction expansion: no image data available, skipping")
+                    else:
+                        pred_mod = PredictedDataModeler(Modeler.params)
+                        if pred_mod.GatherFromPrediction(Modeler.E, new_refls, img_data, sg_symbol=sg_sym):
+                            merged = merge_data_modelers(Modeler, pred_mod)
+                            rank_refls_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "refls", rank)
+                            expanded_name = os.path.join(rank_refls_outdir,
+                                "%s_%s_%d_%d_expanded.refl"
+                                % (Modeler.params.tag, basename, i_shot, self.exper_idx))
+                            merged.dump_gathered_to_refl(expanded_name)
+                            MAIN_LOGGER.info("Prediction expansion: added %d new ROIs (%d total), saved to %s"
+                                             % (len(pred_mod.rois), len(merged.rois), expanded_name))
+            except Exception as e:
+                import traceback
+                MAIN_LOGGER.warning("Prediction expansion failed for shot %s: %s" % (basename, e))
+                MAIN_LOGGER.warning("Prediction expansion traceback:\n%s" % traceback.format_exc())
+
         return shot_df
+
+    def predict_new_rois(self, SIM, x, thresh_frac=0.01, max_new_rois=500, sg_symbol=None):
+        """Predict new ROIs using full-detector forward model after refinement.
+
+        While SIM is live and fully configured with optimized parameters, run the
+        forward model on the full detector and spot-find to discover new reflections
+        beyond the initial indexed strong spots.
+
+        :param SIM: sim_data.SimData instance (live, with optimized parameters)
+        :param x: refined parameter vector
+        :param thresh_frac: spot-finding threshold as fraction of max model intensity
+        :param max_new_rois: max predicted ROIs to add per shot
+        :param sg_symbol: space group symbol for ASU mapping
+        :return: tuple (new_refls, full_bragg, h_img, k_img, l_img) or None if no new spots
+        """
+        # 1. Enable HKL tracking
+        was_tracking = SIM.D.store_ave_wavelength_image
+        SIM.D.store_ave_wavelength_image = True
+
+        # 2. Forward-model full detector image (force CPU to avoid GPU OOM)
+        was_force_cpu = SIM.D.force_cpu
+        SIM.D.force_cpu = True
+        # Use flat Fhkl (constant default_F, no B-factors) for more complete prediction
+        pe = getattr(self.params, 'prediction_expansion', None)
+        use_flat = pe is not None and getattr(pe, 'use_flat_fhkl', True)
+        if use_flat:
+            SIM.D.use_flat_Fhkl = True
+        Gparam = self.P["G_xtal0"]
+        G = Gparam.get_val(x[Gparam.xpos])
+        raw_pix = SIM.D.add_diffBragg_spots_full()
+        if use_flat:
+            SIM.D.use_flat_Fhkl = False
+        SIM.D.force_cpu = was_force_cpu
+        nfast, nslow = SIM.detector[0].get_image_size()
+        n_panels = len(SIM.detector)
+        full_bragg = (G * raw_pix.as_numpy_array()).reshape((n_panels, nslow, nfast))
+
+        # 3. Get per-pixel HKL from kernel
+        h_raw, k_raw, l_raw = SIM.D.ave_hkl_image()
+        h_img = h_raw.as_numpy_array().reshape((n_panels, nslow, nfast))
+        k_img = k_raw.as_numpy_array().reshape((n_panels, nslow, nfast))
+        l_img = l_raw.as_numpy_array().reshape((n_panels, nslow, nfast))
+
+        # 4. Spot-find on model image
+        thresh = thresh_frac * full_bragg.max()
+        if thresh <= 0:
+            MAIN_LOGGER.warning("predict_new_rois: max model intensity is 0, no predictions")
+            SIM.D.store_ave_wavelength_image = was_tracking
+            return None
+
+        beam = SIM.beam.nanoBragg_constructor_beam
+        pred_refls = utils.refls_from_sims(full_bragg, SIM.detector, beam, thresh=thresh)
+
+        if len(pred_refls) == 0:
+            MAIN_LOGGER.info("predict_new_rois: no spots found above threshold")
+            SIM.D.store_ave_wavelength_image = was_tracking
+            return None
+
+        # 5. Assign HKLs from per-pixel h/k/l images
+        assign_hkl_from_images(pred_refls, full_bragg, h_img, k_img, l_img, SIM.detector)
+
+        # 6. Remove spots with (0,0,0) miller index (failed assignment)
+        pred_hkls = [tuple(h) for h in pred_refls['miller_index']]
+        keep = flex.bool([h != (0, 0, 0) for h in pred_hkls])
+        pred_refls = pred_refls.select(keep)
+
+        if len(pred_refls) == 0:
+            MAIN_LOGGER.info("predict_new_rois: all spots got (0,0,0) HKL, no predictions")
+            SIM.D.store_ave_wavelength_image = was_tracking
+            return None
+
+        # 7. Remove spots that overlap with existing ROIs (by HKL)
+        existing_hkls = set()
+        if self.Hi is not None:
+            existing_hkls = set(self.Hi)
+        if sg_symbol is not None and self.Hi_asu is not None:
+            # Also map predicted HKLs to ASU for comparison
+            pred_hkls_asu = utils.map_hkl_list(
+                [tuple(h) for h in pred_refls['miller_index']], True, sg_symbol)
+            existing_asu = set(self.Hi_asu)
+            keep = flex.bool([h not in existing_asu for h in pred_hkls_asu])
+        else:
+            pred_hkls = [tuple(h) for h in pred_refls['miller_index']]
+            keep = flex.bool([h not in existing_hkls for h in pred_hkls])
+        new_refls = pred_refls.select(keep)
+
+        # 8. Limit to max_new_rois
+        if len(new_refls) > max_new_rois:
+            # Keep the brightest predictions
+            intensities = []
+            for i in range(len(new_refls)):
+                x_c, y_c, _ = new_refls['xyzobs.px.value'][i]
+                pid = new_refls['panel'][i]
+                intensities.append(full_bragg[pid, int(y_c), int(x_c)])
+            order = np.argsort(intensities)[::-1][:max_new_rois]
+            sel = flex.bool(len(new_refls), False)
+            for idx in order:
+                sel[int(idx)] = True
+            new_refls = new_refls.select(sel)
+
+        MAIN_LOGGER.info("predict_new_rois: found %d new reflections (from %d total predicted, %d existing)"
+                         % (len(new_refls), len(pred_refls), len(existing_hkls)))
+
+        # 9. Restore HKL tracking state
+        SIM.D.store_ave_wavelength_image = was_tracking
+
+        if len(new_refls) == 0:
+            return None
+
+        return new_refls
+
+
+def assign_hkl_from_images(refls, bragg_img, h_img, k_img, l_img, detector):
+    """Assign miller indices to reflections using per-pixel HKL images from diffBragg kernel.
+
+    For each spot found by refls_from_sims, extract the spot's bounding box from the
+    HKL images and compute the intensity-weighted average HKL, then round to integer.
+
+    :param refls: DIALS reflection table with 'xyzobs.px.value' and 'panel' columns
+    :param bragg_img: Bragg model image, shape (n_panels, nslow, nfast)
+    :param h_img: per-pixel h index, shape (n_panels, nslow, nfast)
+    :param k_img: per-pixel k index, shape (n_panels, nslow, nfast)
+    :param l_img: per-pixel l index, shape (n_panels, nslow, nfast)
+    :param detector: dxtbx detector model
+    """
+    miller_indices = flex.miller_index(len(refls))
+    for i_ref in range(len(refls)):
+        x, y, _ = refls['xyzobs.px.value'][i_ref]
+        pid = refls['panel'][i_ref]
+        # Use small region around centroid for intensity-weighted HKL average
+        sz = 5  # half-width
+        x1 = max(0, int(x) - sz)
+        x2 = min(bragg_img.shape[2], int(x) + sz + 1)
+        y1 = max(0, int(y) - sz)
+        y2 = min(bragg_img.shape[1], int(y) + sz + 1)
+        roi_I = bragg_img[pid, y1:y2, x1:x2]
+        Isum = roi_I.sum()
+        if Isum > 0:
+            h = (h_img[pid, y1:y2, x1:x2] * roi_I).sum() / Isum
+            k = (k_img[pid, y1:y2, x1:x2] * roi_I).sum() / Isum
+            l = (l_img[pid, y1:y2, x1:x2] * roi_I).sum() / Isum
+            miller_indices[i_ref] = (int(round(h)), int(round(k)), int(round(l)))
+    refls['miller_index'] = miller_indices
+
+
+class PredictedDataModeler(DataModeler):
+    """DataModeler for predicted (non-indexed) reflections."""
+
+    def GatherFromPrediction(self, expt, pred_refls, img_data, sg_symbol=None):
+        """Build ROI arrays from predicted reflection centroids + raw image data.
+
+        :param expt: dxtbx Experiment object
+        :param pred_refls: DIALS reflection table with predicted spots
+        :param img_data: image data array, shape (npan, nslow, nfast), already in photon units
+        :param sg_symbol: space group symbol for ASU mapping
+        :return: True if successful, False otherwise
+        """
+        self.E = expt
+        self.refls = pred_refls
+        self.nominal_sigma_rdout = self.params.refiner.sigma_r / self.params.refiner.adu_per_photon
+        self.no_rlp_info = True  # predicted refls have no rlp column
+
+        hotpix_mask = None
+        if self.params.roi.hotpixel_mask is not None:
+            is_trusted = utils.load_mask(self.params.roi.hotpixel_mask)
+            hotpix_mask = ~is_trusted
+
+        roi_packet = utils.get_roi_background_and_selection_flags(
+            pred_refls, img_data, shoebox_sz=self.params.roi.shoebox_size,
+            reject_edge_reflections=self.params.roi.reject_edge_reflections,
+            reject_roi_with_hotpix=self.params.roi.reject_roi_with_hotpix,
+            background_mask=None, hotpix_mask=hotpix_mask,
+            bg_thresh=self.params.roi.background_threshold,
+            use_robust_estimation=not self.params.roi.fit_tilt,
+            set_negative_bg_to_zero=self.params.roi.force_negative_background_to_zero,
+            pad_for_background_estimation=self.params.roi.pad_shoebox_for_background_estimation,
+            sigma_rdout=self.nominal_sigma_rdout,
+            weighted_fit=self.params.roi.fit_tilt_using_weights,
+            allow_overlaps=self.params.roi.allow_overlapping_spots,
+            ret_cov=True,
+            skip_roi_with_negative_bg=self.params.roi.skip_roi_with_negative_bg,
+            only_high=self.params.roi.only_filter_zingers_above_mean,
+            centroid=self.params.roi.centroid)
+
+        if roi_packet is None:
+            return False
+        self.rois, self.pids, self.tilt_abc, self.selection_flags, background, self.tilt_cov = roi_packet
+        self.selection_flags = np.array(self.selection_flags)
+
+        if sum(self.selection_flags) == 0:
+            return False
+
+        self.refls_idx = [i for i in range(len(pred_refls)) if self.selection_flags[i]]
+
+        self.Hi = [tuple(pred_refls['miller_index'][i]) for i in self.refls_idx]
+        if sg_symbol:
+            self.Hi_asu = utils.map_hkl_list(self.Hi, True, sg_symbol)
+        else:
+            self.Hi_asu = self.Hi
+
+        # Filter per-ROI arrays by selection_flags (same as GatherFromExperiment)
+        self.rois = [roi for i, roi in enumerate(self.rois) if self.selection_flags[i]]
+        self.tilt_abc = [abc for i, abc in enumerate(self.tilt_abc) if self.selection_flags[i]]
+        self.pids = [pid for i, pid in enumerate(self.pids) if self.selection_flags[i]]
+        self.tilt_cov = [cov for i, cov in enumerate(self.tilt_cov) if self.selection_flags[i]]
+
+        is_trusted = np.ones(img_data.shape, bool)
+        if self.params.roi.hotpixel_mask is not None:
+            is_trusted = utils.load_mask(self.params.roi.hotpixel_mask)
+
+        self.data_to_one_dim(img_data, is_trusted, background)
+        return True
+
+
+def merge_data_modelers(original, predicted):
+    """Combine original + predicted DataModelers into a single merged modeler.
+
+    Concatenates per-pixel and per-ROI arrays. The merged modeler has an
+    `is_predicted` array (per-ROI boolean) to track which ROIs came from prediction.
+
+    :param original: DataModeler with indexed (original) reflections
+    :param predicted: PredictedDataModeler with predicted reflections
+    :return: merged DataModeler
+    """
+    merged = DataModeler(original.params)
+    merged.E = original.E
+    from dials.array_family import flex as dials_flex
+    combined_refls = dials_flex.reflection_table()
+    combined_refls.extend(original.refls)
+    combined_refls.extend(predicted.refls)
+    merged.refls = combined_refls
+    merged.nominal_sigma_rdout = original.nominal_sigma_rdout
+    merged.no_rlp_info = original.no_rlp_info
+
+    n_orig_rois = len(original.rois)
+
+    # Per-pixel arrays: concatenate
+    for attr in ['all_data', 'all_background', 'all_trusted', 'all_sigmas',
+                 'all_fast', 'all_slow', 'all_pid']:
+        orig_arr = getattr(original, attr)
+        pred_arr = getattr(predicted, attr)
+        if orig_arr is not None and pred_arr is not None:
+            setattr(merged, attr, np.concatenate([orig_arr, pred_arr]))
+
+    # Handle sigma_rdout (may be scalar or array)
+    orig_srdout = original.all_sigma_rdout
+    pred_srdout = predicted.all_sigma_rdout
+    if isinstance(orig_srdout, np.ndarray) and isinstance(pred_srdout, np.ndarray):
+        merged.all_sigma_rdout = np.concatenate([orig_srdout, pred_srdout])
+    else:
+        merged.all_sigma_rdout = original.nominal_sigma_rdout
+
+    # roi_id: offset predicted IDs so they are contiguous with original
+    merged.roi_id = np.concatenate([original.roi_id, predicted.roi_id + n_orig_rois])
+
+    # all_freq
+    if original.all_freq is not None and predicted.all_freq is not None:
+        merged.all_freq = np.concatenate([original.all_freq, predicted.all_freq])
+
+    # Per-ROI arrays: concatenate
+    merged.rois = list(original.rois) + list(predicted.rois)
+    merged.pids = list(original.pids) + list(predicted.pids)
+    merged.Hi = list(original.Hi) + list(predicted.Hi)
+    merged.Hi_asu = list(original.Hi_asu) + list(predicted.Hi_asu)
+    orig_tilt = original.tilt_abc if original.tilt_abc is not None else [(0, 0, 0)] * len(original.rois)
+    pred_tilt = predicted.tilt_abc if predicted.tilt_abc is not None else [(0, 0, 0)] * len(predicted.rois)
+    merged.tilt_abc = list(orig_tilt) + list(pred_tilt)
+    merged.refls_idx = list(original.refls_idx) + [i + len(original.refls) for i in predicted.refls_idx]
+    orig_cov = original.tilt_cov if (hasattr(original, 'tilt_cov') and original.tilt_cov is not None) else [None] * len(original.rois)
+    pred_cov = predicted.tilt_cov if (hasattr(predicted, 'tilt_cov') and predicted.tilt_cov is not None) else [None] * len(predicted.rois)
+    if any(c is not None for c in orig_cov) or any(c is not None for c in pred_cov):
+        merged.tilt_cov = list(orig_cov) + list(pred_cov)
+
+    # Tracking: ROI-length bool array
+    merged.is_predicted = np.concatenate([
+        np.zeros(n_orig_rois, dtype=bool),
+        np.ones(len(predicted.rois), dtype=bool)
+    ])
+
+    # Rebuild contiguous pan_fast_slow + index structures
+    pfs = np.ascontiguousarray(
+        np.vstack([merged.all_pid, merged.all_fast, merged.all_slow]).T.ravel())
+    merged.pan_fast_slow = flex.size_t(pfs)
+    merged.npix_total = len(merged.all_data)
+    merged.u_id = set(merged.roi_id)
+    merged.set_slices('roi_id')
+
+    # Copy over other attributes from original that downstream code may need
+    merged.exper_name = original.exper_name
+    merged.refl_name = original.refl_name
+    merged.spec_name = original.spec_name
+    merged.exper_idx = original.exper_idx
+    merged.rank = original.rank
+
+    # Q per-pixel: original has it, predicted may not
+    orig_q = getattr(original, 'all_q_perpix', np.array([]))
+    pred_q = getattr(predicted, 'all_q_perpix', np.array([]))
+    if len(orig_q) > 0 or len(pred_q) > 0:
+        if len(pred_q) == 0:
+            pred_q = np.zeros(len(predicted.all_data))
+        if len(orig_q) == 0:
+            orig_q = np.zeros(len(original.all_data))
+        merged.all_q_perpix = np.concatenate([orig_q, pred_q])
+    else:
+        merged.all_q_perpix = np.array([])
+
+    # all_refls_idx per-pixel
+    orig_ri = getattr(original, 'all_refls_idx', None)
+    pred_ri = getattr(predicted, 'all_refls_idx', None)
+    if orig_ri is not None and pred_ri is not None:
+        merged.all_refls_idx = np.concatenate([orig_ri, pred_ri + len(original.refls)])
+
+    return merged
 
 
 def shifted_spearman_grid(data_roi, model_roi, grid_size=3, trust=None):

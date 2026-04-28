@@ -196,12 +196,27 @@ class Script:
                     best_models["exp_idx"]= 0
                 best = best_models.query("exp_name=='%s'" % os.path.abspath(exp)).query("exp_idx==%d" % exp_idx)
 
+                # Fallback: match via opt_exp_name (for expanded input where exp paths differ)
+                if len(best) != 1 and "opt_exp_name" in list(best_models):
+                    best = best_models.query("opt_exp_name=='%s'" % os.path.abspath(exp)).query("exp_idx==%d" % exp_idx)
+
                 if len(best) != 1:
+                    n_found = len(best)
                     best = None
-                    MAIN_LOGGER.info("Expected exactly 1 entry for exp %s in best pickle %s but found %d entries" % (exp, self.params.best_pickle, len(best)))
+                    MAIN_LOGGER.info("Expected exactly 1 entry for exp %s in best pickle %s but found %d entries" % (exp, self.params.best_pickle, n_found))
+            # Track original experiment name for cross-cycle shot matching.
+            # When warm-starting from a pickle where we matched via opt_exp_name,
+            # the pickle's exp_name is the original — use it as the canonical ID.
+            orig_exp_name = exp
+            if best is not None and "exp_name" in list(best):
+                _orig = best["exp_name"].values[0]
+                if _orig:
+                    orig_exp_name = _orig
+
             self.params.simulator.spectrum.filename = spec
             Modeler = hopper_utils.DataModeler(self.params)
             Modeler.exper_name = exp
+            Modeler.orig_exp_name = orig_exp_name
             Modeler.exper_idx = exp_idx
             Modeler.refl_name = ref
             Modeler.rank = COMM.rank
@@ -343,6 +358,27 @@ class Script:
                     hopper_utils.model(x0, Modeler, SIM, compute_grad=False, kernel_debug=_kd_label)
                 except Exception as _e:
                     print("KERNEL DEBUG hopper_init failed: %s" % _e, flush=True)
+
+            # Compute init sigZ split (original vs predicted) before refinement begins
+            _init_sigZ_orig = _init_sigZ_pred = None
+            try:
+                _tf_init = hopper_utils.target_func(
+                    x0, None, Modeler, SIM, compute_grad=False, return_all_zscores=True)
+                _init_sigZ_all = float(_tf_init[4])
+                _init_zs = _tf_init[6]
+                _has_pred_init = (hasattr(Modeler, 'is_predicted') and Modeler.is_predicted is not None
+                                  and Modeler.is_predicted.any())
+                if _has_pred_init:
+                    _pred_perpix_init = Modeler.is_predicted[Modeler.roi_id]
+                    _trusted_init = Modeler.all_trusted
+                    _orig_m = _trusted_init & ~_pred_perpix_init
+                    _pred_m = _trusted_init & _pred_perpix_init
+                    if _orig_m.any():
+                        _init_sigZ_orig = float(np.std(_init_zs[_orig_m]))
+                    if _pred_m.any():
+                        _init_sigZ_pred = float(np.std(_init_zs[_pred_m]))
+            except Exception:
+                pass
 
             try:
                 x = Modeler.Minimize(x0, SIM, i_shot=i_shot)
@@ -499,12 +535,28 @@ class Script:
             final_sigZ = None
 
             # Recompute final sigZ without perRoiScale for apples-to-apples comparison
+            sigZ_orig = sigZ_pred = None
             try:
                 _saved_roiScales = Modeler.roiScalesPerPix
                 Modeler.roiScalesPerPix = 1
-                _, _, _, _, _noRoi_sigZ, _ = hopper_utils.target_func(
-                    x, None, Modeler, SIM, compute_grad=False)
+                _tf_result = hopper_utils.target_func(
+                    x, None, Modeler, SIM, compute_grad=False, return_all_zscores=True)
+                _noRoi_sigZ = _tf_result[4]
+                _zscore_perpix = _tf_result[6]
                 final_sigZ = float(_noRoi_sigZ)
+
+                # Split sigZ by original vs predicted ROIs
+                _has_pred = (hasattr(Modeler, 'is_predicted') and Modeler.is_predicted is not None
+                             and Modeler.is_predicted.any())
+                if _has_pred:
+                    _pred_perpix = Modeler.is_predicted[Modeler.roi_id]
+                    _trusted = Modeler.all_trusted
+                    _orig_mask = _trusted & ~_pred_perpix
+                    _pred_mask = _trusted & _pred_perpix
+                    if _orig_mask.any():
+                        sigZ_orig = float(np.std(_zscore_perpix[_orig_mask]))
+                    if _pred_mask.any():
+                        sigZ_pred = float(np.std(_zscore_perpix[_pred_mask]))
 
                 # Kernel debug: log full C++ state at hopper final (inside model(), right before add_diffBragg_spots)
                 if should_snapshot(self.params, i_shot, COMM.rank):
@@ -555,11 +607,18 @@ class Script:
             shot_df["init_pred_offset"] = init_pred_offset
             shot_df["final_pred_offset"] = final_pred_offset
             _n_trusted = int(Modeler.all_trusted.sum()) if hasattr(Modeler, 'all_trusted') else None
+            _n_predicted = int(Modeler.is_predicted.sum()) if hasattr(Modeler, 'is_predicted') and Modeler.is_predicted is not None else 0
+            _shot_id = os.path.basename(orig_exp_name)
+            if exp_idx > 0:
+                _shot_id = "%s:%d" % (_shot_id, exp_idx)
             this_rank_hopper_stats.append({
-                "shot_id": os.path.basename(exp),
+                "shot_id": _shot_id,
                 "init_sigZ": init_sigZ, "final_sigZ": final_sigZ,
+                "init_sigZ_orig": _init_sigZ_orig, "init_sigZ_pred": _init_sigZ_pred,
+                "sigZ_orig": sigZ_orig, "sigZ_pred": sigZ_pred,
                 "init_pred_offset": init_pred_offset, "final_pred_offset": final_pred_offset,
                 "n_rois": len(Modeler.rois), "n_trusted": _n_trusted,
+                "n_predicted": _n_predicted,
             })
 
             # Dump post-refinement gathered refls for geometry refinement
@@ -903,7 +962,10 @@ class Script:
                     "per_shot": [
                         {"shot_id": s["shot_id"], "n_rois": s["n_rois"],
                          "n_trusted": s.get("n_trusted"),
+                         "n_predicted": s.get("n_predicted", 0),
                          "init_sigZ": s["init_sigZ"], "final_sigZ": s["final_sigZ"],
+                         "init_sigZ_orig": s.get("init_sigZ_orig"), "init_sigZ_pred": s.get("init_sigZ_pred"),
+                         "sigZ_orig": s.get("sigZ_orig"), "sigZ_pred": s.get("sigZ_pred"),
                          "init_pred_offset": s["init_pred_offset"],
                          "final_pred_offset": s["final_pred_offset"]}
                         for s in flat_stats

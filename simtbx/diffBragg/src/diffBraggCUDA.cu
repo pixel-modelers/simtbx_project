@@ -608,7 +608,8 @@ void diffBragg_sum_over_steps_cuda(
         cp.cu_Bfactor_aniso, db_flags.refine_Bfactor_aniso, cp.cu_d_Bfactor_aniso_images,
         db_cryst.spindle_theta, db_cryst.spindle_phi,
         db_flags.refine_gonio_theta, db_flags.refine_gonio_phi,
-        cp.cu_d_gonio_theta_images, cp.cu_d_gonio_phi_images
+        cp.cu_d_gonio_theta_images, cp.cu_d_gonio_phi_images,
+        db_flags.use_flat_Fhkl
         );
 
     error_msg(cudaGetLastError(), "after kernel call");
