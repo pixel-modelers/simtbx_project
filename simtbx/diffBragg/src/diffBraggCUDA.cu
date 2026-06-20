@@ -226,6 +226,11 @@ void diffBragg_sum_over_steps_cuda(
 
     bool ALLOC = !cp.device_is_allocated; // shortcut variable
 
+    // Late allocation for refinement flags enabled after initial allocation
+    if (db_flags.refine_Bfactor && cp.cu_d_Bfactor_images == NULL){
+        gpuErr(cudaMallocManaged(&cp.cu_d_Bfactor_images, cp.npix_allocated*1*sizeof(CUDAREAL)));
+    }
+
     gettimeofday(&t2, 0);
     time = (1000000.0*(t2.tv_sec-t1.tv_sec) + t2.tv_usec-t1.tv_usec)/1000.0;
     if (TIMERS.recording) TIMERS.cuda_alloc+= time;
