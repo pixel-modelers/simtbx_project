@@ -50,6 +50,7 @@ FHKL_ID = 11
 ETA_ID = 19
 DIFFUSE_ID = 23
 GONIO_ANGLE_ID = 24
+BFACTOR_ID = 25
 LAMBDA_IDS = 12, 13
 
 DEG = 180 / np.pi
@@ -996,6 +997,13 @@ class DataModeler:
                           beta=betas.gonio_angle)
         P.add(p)
 
+        p = ParameterType(init=init.B, sigma=sigma.B,
+                          minval=mins.B, maxval=maxs.B,
+                          fix=fix.B, name="Bfactor",
+                          center=centers.B,
+                          beta=betas.B)
+        P.add(p)
+
         if not self.params.fix.perRoiScale or self.params.use_perRoiScale:
             self.set_slices("roi_id")  # this creates roi_id_unique
             refls_have_scales = "scale_factor" in list(self.refls.keys())
@@ -1240,6 +1248,8 @@ class DataModeler:
                 SIM.D.refine(DETZ_ID)
             if self.P["gonio_angle"].refine:
                 SIM.D.refine(GONIO_ANGLE_ID)
+            if self.P["Bfactor"].refine:
+                SIM.D.refine(BFACTOR_ID)
             if SIM.D.use_diffuse:
                 SIM.D.refine(DIFFUSE_ID)
 
@@ -1810,6 +1820,11 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
         utils.update_SIM_with_gonio(SIM, delta_phi=gonio_angle, num_phi_steps=Mod.params.simulator.gonio.phi_steps,
                                     spindle_axis=gonio_ax)
 
+#   per-image B-factor
+    Bfac_param = Mod.P["Bfactor"]
+    Bfac_val = Bfac_param.get_val(x[Bfac_param.xpos])
+    SIM.D.Bfactor_image = Bfac_val
+
     if Mod.P["lambda_offset"].refine:
         p0 = Mod.P["lambda_offset"]
         p1 = Mod.P["lambda_scale"]
@@ -1985,6 +2000,11 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                 d = GonioAng.get_deriv(x[GonioAng.xpos], d)
                 J[GonioAng.xpos] += d
 
+            if Bfac_param.refine:
+                d = scale*SIM.D.get_Bfactor_derivative_pixels().as_numpy_array()[:npix]
+                d = Bfac_param.get_deriv(x[Bfac_param.xpos], d)
+                J[Bfac_param.xpos] += d
+
             if Mod.P["lambda_offset"].refine:
                 lambda_derivs = SIM.D.get_lambda_derivative_pixels()
                 lambda_param_names = "lambda_offset", "lambda_scale"
@@ -2056,9 +2076,12 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     GonioAng = Mod.P["gonio_angle"]
     gonio_angle = GonioAng.get_val(x[GonioAng.xpos])
 
+    Bfac_p = Mod.P["Bfactor"]
+    Bfactor = Bfac_p.get_val(x[Bfac_p.xpos])
+
     if as_dict:
-        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
-        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_bvals = f_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle'
+        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
+        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_b', 'diff_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle', 'Bfactor'
         param_dict = dict(zip(keys, vals))
         return param_dict
     else:
@@ -2166,6 +2189,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         SIM.D.fix(ETA_ID)
         SIM.D.fix(DIFFUSE_ID)
         SIM.D.fix(GONIO_ANGLE_ID)
+        SIM.D.fix(BFACTOR_ID)
     elif compute_grad:
         # actually compute the gradients
         _compute_grad = True
@@ -2186,6 +2210,8 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
             SIM.D.let_loose(DETZ_ID)
         if mod.P["gonio_angle"].refine:
             SIM.D.let_loose(GONIO_ANGLE_ID)
+        if mod.P["Bfactor"].refine:
+            SIM.D.let_loose(BFACTOR_ID)
         if mod.P["eta_abc0"].refine:
             SIM.D.let_loose(ETA_ID)
         if mod.P["lambda_offset"].refine:

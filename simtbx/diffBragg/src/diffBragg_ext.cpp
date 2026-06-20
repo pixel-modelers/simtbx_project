@@ -593,6 +593,8 @@ namespace boost_python { namespace {
 
       .def("get_gonio_angle_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_gonio_angle_derivative_pixels, "get derivatives of intensity w.r.t. goniometer angle")
 
+      .def("get_Bfactor_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_Bfactor_derivative_pixels, "get derivatives of intensity w.r.t. per-image B-factor")
+
       .def("get_fp_fdp_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_fp_fdp_derivative_pixels, "get derivatives of intensity w.r.t c,d that describe fprime and fdblprime (see diffBragg.utils)")
 
       .def("get_ncells_def_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_ncells_def_derivative_pixels, "get derivatives of intensity w.r.t (Nd, Ne, Nf)")
@@ -747,6 +749,11 @@ namespace boost_python { namespace {
                      make_getter(&simtbx::nanoBragg::diffBragg::no_Nabc_scale,rbv()),
                      make_setter(&simtbx::nanoBragg::diffBragg::no_Nabc_scale,dcp()),
                     "toggle off the Nabc scale factor in the forward model (such that it is replaced entirely by spot_scale)")
+
+      .add_property("Bfactor_image",
+                     make_getter(&simtbx::nanoBragg::diffBragg::Bfactor_image,rbv()),
+                     make_setter(&simtbx::nanoBragg::diffBragg::Bfactor_image,dcp()),
+                    "per-image isotropic B-factor in Angstrom^2, applied as exp(-B*stol^2)")
 
       .add_property("__number_of_pixels_modeled_using_diffBragg", // protect this by making it a long name
                      make_getter(&simtbx::nanoBragg::diffBragg::Npix_to_model,rbv()),

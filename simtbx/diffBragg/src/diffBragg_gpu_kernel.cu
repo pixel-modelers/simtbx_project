@@ -78,12 +78,15 @@ void gpu_sum_over_steps(
         const int* __restrict__ FhklLinear_ASUid,
         const CUDAREAL* __restrict__ Fhkl_channels,
         const CUDAREAL* __restrict__ Fhkl_scale, CUDAREAL* Fhkl_scale_deriv,
-        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle)
+        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle,
+        CUDAREAL Bfactor_image, bool refine_Bfactor, CUDAREAL* d_Bfactor_images)
 { // BEGIN GPU kernel
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int thread_stride = blockDim.x * gridDim.x;
     __shared__ bool s_refine_gonio_angle;
+    __shared__ bool s_refine_Bfactor;
+    __shared__ CUDAREAL s_Bfactor_image;
     __shared__ CUDAREAL s_phi0, s_phistep, gx,gy,gz;
     __shared__ int s_phisteps;
     __shared__ bool s_gaussian_star_shape;
@@ -150,6 +153,8 @@ void gpu_sum_over_steps(
 
     if (threadIdx.x==0){ // TODO can we get speed gains by dividing up the following definitions over more threads ?
         s_refine_gonio_angle = refine_gonio_angle;
+        s_refine_Bfactor = refine_Bfactor;
+        s_Bfactor_image = Bfactor_image;
         s_phisteps = phisteps;
         s_phi0 = phi0;
         s_phistep = phistep;
@@ -349,6 +354,7 @@ void gpu_sum_over_steps(
         double pan_rot_manager_dI[3]= {0,0,0};
         double pan_rot_manager_dI2[3]= {0,0,0};
         double dI_gonio_angle = 0;
+        double dI_Bfactor = 0;
         double fcell_manager_dI = 0;
         double fcell_manager_dI2 = 0;
         double eta_manager_dI[3] = {0,0,0};
@@ -675,6 +681,18 @@ void gpu_sum_over_steps(
 
             CUDAREAL _I_total = s_hkl*_I_cell *I0;
             CUDAREAL Iincrement = _I_total*texture_scale;
+
+            // per-image isotropic B-factor
+            CUDAREAL _stol = 0.5*sqrt(_scattering[0]*_scattering[0]+_scattering[1]*_scattering[1]+_scattering[2]*_scattering[2]);
+            CUDAREAL stol_sqr_Ang = _stol*_stol*1e-20;
+            if (s_Bfactor_image != 0){
+                CUDAREAL Bfac_term = exp(-s_Bfactor_image * stol_sqr_Ang);
+                Iincrement *= Bfac_term;
+            }
+            if (s_refine_Bfactor){
+                dI_Bfactor += Iincrement * (-stol_sqr_Ang);
+            }
+
             if (s_gradient_mode && s_calc_sourceI_gradients){
                 CUDAREAL sourceI_deriv_scale = s_overall_scale*polar_for_grad;
                 CUDAREAL dsourceI = Iincrement / sI_scale *sourceI_deriv_scale;
@@ -1113,6 +1131,9 @@ void gpu_sum_over_steps(
         if (s_refine_gonio_angle){
             CUDAREAL value = _scale_term * dI_gonio_angle;
             d_gonio_angle_images[i_pix] = value;
+        }
+        if (s_refine_Bfactor){
+            d_Bfactor_images[i_pix] = _scale_term * dI_Bfactor;
         }
 
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){

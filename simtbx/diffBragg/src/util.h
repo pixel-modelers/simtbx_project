@@ -82,6 +82,7 @@ struct images{
     image_type diffuse_gamma; // diffuse gamma gradients
     image_type diffuse_sigma; // diffuse sigma gradients
     image_type gonio_angle; // goniometer angle gradients
+    image_type Bfactor; // per-image B-factor gradients
 };
 
 
@@ -153,6 +154,7 @@ struct flags{
     int verbose = 0; // nanoBragg verbosity flag
     bool use_diffuse = false; // model  diffuse
     bool only_diffuse = false; // model  diffuse scattering (experimental)
+    bool refine_Bfactor = false; // per-image isotropic B-factor refinement
     bool refine_Icell = false; // option to refine the structure factor intensity directly (F_cell^2)
                                 // The miller array used by nanoBragg/diffBragg is double precision, and hence
                                 // allows for negative values. If refine_Icell=True, then the value stored in the data
@@ -201,6 +203,7 @@ struct crystal{
     std::vector<CUDAREAL> fpfdp_derivs; // fprime fdblprime deriv
     std::vector<CUDAREAL> atom_data; // heavy atom data
     std::vector<int> nominal_hkl; // h,k,l of the pixel (expected)
+    CUDAREAL Bfactor_image = 0; // per-image isotropic B-factor (Angstrom^2), applied as exp(-B*stol^2)
     CUDAREAL default_F; // place holder amplitude
     CUDAREAL r_e_sqr; // electron rad
 

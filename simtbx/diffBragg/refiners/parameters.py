@@ -140,7 +140,7 @@ class RangedParameter:
 class PositiveParameter(RangedParameter):
 
   def get_val(self, x_current):
-    return self.init*np.exp(self.sigma*(x_current-1))
+    return self.init*np.exp(np.clip(self.sigma*(x_current-1), -300., 300.))
 
   def get_deriv(self, x_current, deriv, x_is_theta=False):
     """

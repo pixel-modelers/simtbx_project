@@ -81,5 +81,6 @@ __global__ void gpu_sum_over_steps(
         const int* __restrict__ FhklLinear_ASUid,
         const CUDAREAL* __restrict__ Fhkl_channels,
         const CUDAREAL* __restrict__ Fhkl_scale, CUDAREAL* Fhkl_scale_deriv,
-        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle
+        bool gaussian_star_shape, bool square_shape, bool refine_gonio_angle,
+        CUDAREAL Bfactor_image, bool refine_Bfactor, CUDAREAL* d_Bfactor_images
         );

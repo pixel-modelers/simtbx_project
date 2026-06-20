@@ -401,6 +401,7 @@ void diffBragg_sum_over_steps(
         double fp_fdp_manager_dI[2] = {0,0};
         double dI_latt_diffuse[6] = {0,0,0,0,0,0};
         double dI_gonio_ang = 0;
+        double dI_Bfactor = 0;
 
         // compute unit cell volume
         // TODO: this should be computed using the P1 unit cell
@@ -784,6 +785,19 @@ void diffBragg_sum_over_steps(
             }
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
+
+            // per-image isotropic B-factor: exp(-B * stol^2)
+            // stol is sin(theta)/lambda in m^-1 in the kernel, convert to Ang^-1
+            double stol_sqr_Ang = stol*stol*1e-20;
+            if (db_cryst.Bfactor_image != 0){
+                double Bfac_term = exp(-db_cryst.Bfactor_image * stol_sqr_Ang);
+                Iincrement *= Bfac_term;
+            }
+            if (db_flags.refine_Bfactor){
+                // dI/dB = Iincrement * (-stol^2_Ang)  (Iincrement already includes Bfac_term)
+                dI_Bfactor += Iincrement * (-stol_sqr_Ang);
+            }
+
             if (db_flags.track_Fhkl){
                 std::string hkl_s ;
                 hkl_s = std::to_string(h0) + ","+ std::to_string(k0) + "," + std::to_string(l0);
@@ -1220,6 +1234,9 @@ void diffBragg_sum_over_steps(
         if (db_flags.refine_gonio_angle){
             double value = scale_term*dI_gonio_ang;
             d_image.gonio_angle[i_pix] = value;
+        }
+        if (db_flags.refine_Bfactor){
+            d_image.Bfactor[i_pix] = scale_term*dI_Bfactor;
         }
         /* udpate the rotation derivative images*/
         for (int i_rot =0 ; i_rot < 3 ; i_rot++){

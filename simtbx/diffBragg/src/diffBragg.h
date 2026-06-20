@@ -251,6 +251,7 @@ class diffBragg: public nanoBragg{
   boost::python::tuple get_aniso_eta_deriv_pixels();
   boost::python::tuple get_aniso_eta_second_deriv_pixels();
   boost::python::tuple get_lambda_derivative_pixels();
+  af::flex_double get_Bfactor_derivative_pixels();
 
   Eigen::Vector3d O_reference;
 
@@ -316,6 +317,8 @@ class diffBragg: public nanoBragg{
   bool no_Nabc_scale;  // if true, then absorb the Nabc scale into an overall scale factor
   double prev_shiftZ=0; // keep track of when detector Z was shifted  (helps determine when to set the update_detector flag for GPU devices
   Eigen::Matrix3d NABC;
+
+  double Bfactor_image; // per-image B-factor in Angstrom^2
 
   bool use_lambda_coefficients;
 
