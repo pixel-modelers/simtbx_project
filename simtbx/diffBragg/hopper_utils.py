@@ -27,6 +27,7 @@ from simtbx.diffBragg import utils
 from simtbx.diffBragg.refiners.parameters import RangedParameter, Parameters, PositiveParameter
 from simtbx.diffBragg.attr_list import NB_BEAM_ATTRS, NB_CRYST_ATTRS, DIFFBRAGG_ATTRS
 from simtbx.diffBragg import psf
+from itertools import groupby
 
 try:
     from line_profiler import LineProfiler
@@ -2085,7 +2086,7 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
         param_dict = dict(zip(keys, vals))
         return param_dict
     else:
-        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle
+        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
 
 
 class TargetFunc:
@@ -2245,13 +2246,14 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     # TODO:what if V is allowed to be negative? The logarithm/sqrt will explore below
     # TODO ignore overflow encountered here ? 
     resid_square = resid**2
-    fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+    with np.errstate(invalid='ignore'):
+        fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+        zscore_per = resid/np.sqrt(V)
     if params.roi.allow_overlapping_spots:
         fLogLike /= mod.all_freq
     fLogLike = fLogLike[trusted].sum()   # negative log Likelihood target
 
     # width of z-score should decrease as refinement proceeds
-    zscore_per = resid/np.sqrt(V)
     zscore_sigma = np.std(zscore_per[trusted])
 
     restraint_terms = {}
@@ -2471,7 +2473,7 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
 
 
 def update_detector_from_x(Mod, SIM, x):
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _, _ = get_param_from_x(x, Mod)
     detz_shift_mm = detz_shift*1e3
     det = SIM.detector
     det = utils.shift_panelZ(det, detz_shift_mm)
@@ -2512,7 +2514,7 @@ def update_crystal_from_x(Mod, SIM, x):
     :param x: parameters returned by hopper_utils (instance of simtbx.diffBragg.refiners.parameters.Parameters()
     :return: a new dxtbx.model.Crystal object with updated unit cell and orientation matrix
     """
-    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _ = get_param_from_x(x, Mod)
+    scale, rotX, rotY, rotZ, Na, Nb, Nc, _,_,_,_,_,_,_,_,_,a, b, c, al, be, ga, detz_shift, _, _ = get_param_from_x(x, Mod)
     ucparam = a, b, c, al, be, ga
     return new_cryst_from_rotXYZ_and_ucell((rotX,rotY,rotZ), ucparam, SIM.crystal.dxtbx_crystal)
 

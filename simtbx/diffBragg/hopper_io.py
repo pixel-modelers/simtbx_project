@@ -95,11 +95,14 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
 
     scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf,\
         diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, \
-        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle = \
+        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle, Bfactor = \
         hopper_utils.get_param_from_x(x, Mod)
 
     scale_p = Mod.P["G_xtal0"]
     scale_init = scale_p.init
+
+    Bfactor_p = Mod.P["Bfactor"]
+    Bfactor_init = Bfactor_p.init
 
     Nabc_init = []
     for i in [0,1,2]:
@@ -195,7 +198,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         ncells_init=Nabc_init, spot_scales_init=scale_init,
         other_Umats = other_Umats, other_spotscales = other_spotscales,
         num_mosaicity_samples=params.simulator.crystal.num_mosaicity_samples,
-                            gonio_angle=gonio_angle)
+        gonio_angle=gonio_angle, Bfactor_init=Bfactor_init, Bfactor=Bfactor)
 
     df["gonio_axis"] = [SIM.D.spindle_axis]
 
@@ -230,7 +233,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
                        spec_file, spec_stride,flux, beamsize_mm,
                        orig_exp_name, opt_exp_name, spec_from_imageset, oversample,
                        opt_det, stg1_refls, stg1_img_path, ncells_init=None, spot_scales_init = None,
-                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None):
+                       other_Umats=None, other_spotscales=None, num_mosaicity_samples=None, gonio_angle=None,
+                       Bfactor_init=None, Bfactor=None):
     """
 
     :param xtal_scale:
@@ -261,6 +265,7 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
     :param stg1_img_path:
     :param num_mosaicity_samples:
     :param gonio_angle:
+    :param Bfactor:
     :return:
     """
     if other_Umats is None:
@@ -271,6 +276,8 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         ncells_init = np.nan, np.nan, np.nan
     if spot_scales_init is None:
         spot_scales_init = np.nan
+    if Bfactor_init is None:
+        Bfactor_init = np.nan
     a,b,c,al,be,ga = ucell_p
     a_init, b_init, c_init, al_init, be_init, ga_init = ucell_p_init
     lam0,lam1 = lam0_lam1
@@ -293,9 +300,11 @@ def single_expt_pandas(xtal_scale, Amat, ncells_abc, ncells_def, eta_abc,
         "a": a, "b": b, "c": c, "al": al, "be": be, "ga": ga,
         "a_init": a_init, "b_init": b_init, "c_init": c_init, "al_init": al_init,
         "lam0": lam0, "lam1": lam1,
-        "be_init": be_init, "ga_init": ga_init})
+        "be_init": be_init, "ga_init": ga_init, "Bfactor_init": Bfactor_init})
     if gonio_angle is not None:
         df["gonio_angle"] = gonio_angle
+    if Bfactor is not None:
+        df["Bfactor"] = Bfactor
     if spec_file is not None:
         spec_file = os.path.abspath(spec_file)
     df["spectrum_filename"] = spec_file
