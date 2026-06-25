@@ -620,7 +620,7 @@ def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictio
         exper_name = exper_names[i_df]
         exper_id = int(exper_ids[i_df])
         MAIN_LOGGER.info("EVENT: BEGIN loading experiment list")
-        check_format = not (params.refiner.load_data_from_refl or param.load_data_from_refls)
+        check_format = not (params.refiner.load_data_from_refl or params.load_data_from_refls)
         expt = hopper_utils.DataModeler.exper_json_single_file(exper_name, exper_id, check_format)
         expt_list = ExperimentList()
         expt_list.append(expt)
