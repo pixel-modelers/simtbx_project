@@ -843,6 +843,8 @@ class DataModeler:
 
             if "gonio_angle" in list(best):
                 self.params.init.gonio_angle = best.gonio_angle.values[0]
+            if "Bfactor" in list(best):
+                self.params.init.B = best.Bfactor.values[0]
 
             # TODO: set best eta_abc params
             self.params.init.eta_abc = tuple(best.eta_abc.values[0])

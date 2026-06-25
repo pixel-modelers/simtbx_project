@@ -126,13 +126,14 @@ def target_func(x, modelers):
         # data contributions to target function
         V = model_pix + shot_modeler.all_sigma_rdout**2
         resid_square = resid**2
-        shot_fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+        with np.errstate(invalid='ignore'):
+            shot_fLogLike = (.5*(np.log(2*np.pi*V) + resid_square / V))
+            zscore_sig = np.std((resid / np.sqrt(V))[shot_modeler.all_trusted])
         if shot_modeler.params.roi.allow_overlapping_spots:
             shot_fLogLike /= shot_modeler.all_freq
         shot_fLogLike = shot_fLogLike[shot_modeler.all_trusted].sum()   # negative log Likelihood target
         f += shot_fLogLike
 
-        zscore_sig = np.std((resid / np.sqrt(V))[shot_modeler.all_trusted])
         zscore_sigs.append(zscore_sig)
 
         # get this shots contribution to the gradient
@@ -363,6 +364,8 @@ class DataModelers:
             self.SIM.D.refine(hopper_utils.ETA_ID)
         if P["detz_shift"].refine:
             self.SIM.D.refine(hopper_utils.DETZ_ID)
+        if P["Bfactor"].refine:
+            self.SIM.D.refine(hopper_utils.BFACTOR_ID)
         if self.SIM.D.use_diffuse:
             self.SIM.D.refine(hopper_utils.DIFFUSE_ID)
 
@@ -649,7 +652,8 @@ def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictio
         shot_modeler.exper_idx = exper_id
         shot_modeler.refl_name = refl_name
         shot_modeler.rank = COMM.rank
-        if params.refiner.load_data_from_refl:
+        # TODO fix redundant phils
+        if params.refiner.load_data_from_refl or params.load_data_from_refls:
             gathered = shot_modeler.GatherFromReflectionTable(expt, refls, sg_symbol=params.space_group)
             MAIN_LOGGER.debug("tried loading from reflection table")
         else:
