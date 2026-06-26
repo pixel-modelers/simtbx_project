@@ -304,6 +304,7 @@ class diffBragg: public nanoBragg{
   void show_heavy_atom_data();
   void show_fp_fdp();
   bool track_Fhkl;
+  bool merge_friedel = false;  // if true, F+ and F- share the same ASU index (non-anomalous mode)
   std::vector<int> nominal_hkl;
   void linearize_Fhkl(bool compute_dists);
   void sanity_check_linear_Fhkl();

@@ -730,6 +730,11 @@ namespace boost_python { namespace {
                      make_setter(&simtbx::nanoBragg::diffBragg::track_Fhkl,dcp()),
                     "whether to track Fhkl per pixel")
 
+      .add_property("merge_friedel",
+                     make_getter(&simtbx::nanoBragg::diffBragg::merge_friedel,rbv()),
+                     make_setter(&simtbx::nanoBragg::diffBragg::merge_friedel,dcp()),
+                    "if True, F+ and F- share the same ASU index (non-anomalous mode); set before assigning Fhkl")
+
       .add_property("fprime_fdblprime",
              make_function(&get_fpfdp,rbv()),
              make_function(&set_fpfdp,dcp()),

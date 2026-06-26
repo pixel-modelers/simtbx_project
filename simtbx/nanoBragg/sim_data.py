@@ -72,6 +72,7 @@ class SimData:
     self.backrground_scale = 1  # scale factor to apply to background raw pixels
     self.mosaic_seeds = 777, 777  # two random seeds governing the legacy Umats method
     self.D = None  # nanoBragg or diffBragg instance
+    self.merge_friedel = False  # if True, F+ and F- share the same ASU index (non-anomalous mode)
     self.panel_id = 0  # detector panel id
     self.umat_maker = None  # an instance of AnisoUmats for generating ensembles of mosaic rotations
     self.ucell_man = None   # place holder for a unit cell manager (used in hopper)
@@ -422,6 +423,7 @@ class SimData:
       shape = str(self.crystal.xtal_shape)
       if shape not in ["Gauss", "Gauss_star", "Square"]:
         raise ValueError("nanoBragg_crystal xtal_shape should be square, gauss or gauss_star")
+      self.D.merge_friedel = self.merge_friedel
       self.update_Fhkl_tuple()
       self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
       # init mosaic domain size:

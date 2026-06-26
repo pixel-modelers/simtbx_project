@@ -2519,7 +2519,7 @@ void diffBragg::linearize_Fhkl(bool compute_dists){
 
                                 cctbx::miller::index<int> hkl0(h0,k0,l0);
                                 cctbx::miller::asym_index ai(sg, asu, hkl0);
-                                cctbx::miller::index_table_layout_adaptor ila = ai.one_column(true);
+                                cctbx::miller::index_table_layout_adaptor ila = ai.one_column(!merge_friedel);
                                 cctbx::miller::index<int> hkl0_asu = ila.h();
 
                                 int h_asu = hkl0_asu[0];

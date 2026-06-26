@@ -400,7 +400,8 @@ class DataModelers:
         if COMM.rank == 0:
             # TODO: all_nominal_hkl is P1, asu_map_int is non-P1
             all_nominal_hkl = set(all_nominal_hkl[0]).union(*all_nominal_hkl[1:])
-            all_nominal_hkl_sym = utils.map_hkl_list(all_nominal_hkl, True, self.SIM.crystal.symbol)
+            is_anom = not self.params.merge_friedel
+            all_nominal_hkl_sym = utils.map_hkl_list(all_nominal_hkl, is_anom, self.SIM.crystal.symbol)
             asu_inds_to_vary = [self.SIM.asu_map_int[h] for h in all_nominal_hkl_sym]
         else:
             asu_inds_to_vary = None
@@ -547,7 +548,7 @@ class DataModelers:
                 channel_inds = self.flex_asu.select(flex.bool(sel))
 
                 assert not np.any(np.isnan(optimized_sigmas)), "should be no nans here"
-                mset = miller.set(sym, channel_inds, True)  # TODO optional anomalous flag
+                mset = miller.set(sym, channel_inds, not self.params.merge_friedel)
 
                 ma = miller.array(mset, flex.double(optimized_data), flex.double(optimized_sigmas))
                 ma = ma.set_observation_type_xray_intensity().as_amplitude_array()

@@ -889,6 +889,7 @@ def simulator_from_expt_and_params(expt, params=None):
         crystal.symbol = params.refiner.force_symbol
     else:
         crystal.symbol = miller_data.crystal_symmetry().space_group_info().type().lookup_symbol()
+    SIM.merge_friedel = params.merge_friedel
     SIM.crystal = crystal
 
     # create a nanoBragg beam
