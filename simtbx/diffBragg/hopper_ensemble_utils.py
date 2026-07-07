@@ -169,12 +169,17 @@ def target_func(x, modelers):
         if not hasattr(shot_modeler, '_roi_unique') or shot_modeler._roi_unique is None:
             roi_id_arr = np.array(shot_modeler.roi_id)
             shot_modeler._roi_unique = np.unique(roi_id_arr)
-            # first pixel index for each ROI → get its ASU HKL
-            shot_modeler._asu_idx_per_roi = np.array([
-                modelers.SIM.asu_map_int.get(
-                    shot_modeler.hi_asu_perpix[np.searchsorted(roi_id_arr, rid)], -1)
-                for rid in shot_modeler._roi_unique
-            ], dtype=int)
+            is_anom = not modelers.params.merge_friedel
+            # get ASU index for each ROI via its first pixel's HKL
+            asu_per_roi = []
+            for rid in shot_modeler._roi_unique:
+                first_pix = np.where(roi_id_arr == rid)[0][0]
+                hkl = shot_modeler.hi_asu_perpix[first_pix]
+                # map P1 HKL to ASU
+                mapped = utils.map_hkl_list([hkl], is_anom, modelers.SIM.crystal.symbol)
+                asu_idx_val = modelers.SIM.asu_map_int.get(mapped[0], -1)
+                asu_per_roi.append(asu_idx_val)
+            shot_modeler._asu_idx_per_roi = np.array(asu_per_roi, dtype=int)
             shot_modeler._roi_id_arr = roi_id_arr
         trusted_loglike = np.where(shot_modeler.all_trusted, shot_fLogLike, 0)
         roi_loglike = np.array([
