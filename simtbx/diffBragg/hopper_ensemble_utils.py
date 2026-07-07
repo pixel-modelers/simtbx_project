@@ -502,7 +502,6 @@ class DataModelers:
                        bounds=bounds,
                        options={
                            "ftol": 0,
-                           "factr": 1,
                            "gtol": 1e-15,
                            "maxfun": int(1e5),
                            "maxiter": int(self.params.lbfgs_maxiter),
