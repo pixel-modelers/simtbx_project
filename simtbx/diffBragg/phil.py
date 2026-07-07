@@ -754,6 +754,10 @@ refine_Fhkl_second_pass = False
   .type = bool
   .help = after initial minimization, freeze low-res Fhkl (d > median) and re-run L-BFGS-B on high-res half
   .expert_level = 0
+use_direct_minimize = False
+  .type = bool
+  .help = bypass basinhopping wrapper and call scipy.optimize.minimize directly with factr=1 (near machine-precision convergence)
+  .expert_level = 0
 use_restraints = False
   .type = bool
   .help = enable the parameter restraints

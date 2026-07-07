@@ -6,7 +6,7 @@ import socket
 import logging
 import os
 import numpy as np
-from scipy.optimize import basinhopping
+from scipy.optimize import basinhopping, minimize
 
 
 from libtbx.mpi4py import MPI
@@ -452,74 +452,75 @@ class DataModelers:
             }
         }
 
-        # just to be consistent with the hopper_utils.py API, we call basinhopping
-        # however we only expect to do a single round of descent mimimization here
-        out = basinhopping(target, x0_for_refinement,
-                     niter=self.params.niter,
-                     minimizer_kwargs=min_kwargs,
-                     T=self.params.temp,
-                     callback=None,
-                     disp=False,
-                     stepsize=self.params.stepsize)
+        out = minimize(target, x0_for_refinement,
+                       args=(self,),
+                       method="L-BFGS-B",
+                       jac=target.jac,
+                       bounds=bounds,
+                       options={
+                           "ftol": 0,
+                           "factr": 1,
+                           "gtol": 1e-15,
+                           "maxfun": int(1e5),
+                           "maxiter": int(self.params.lbfgs_maxiter),
+                       })
         target.x0[self._vary] = out.x
-        if COMM.rank==0:
+        if COMM.rank == 0:
             print("STOP CONDITION:", out.message)
-            print("  nit:", out.nit, " nfev:", out.nfev)
-            res = out.lowest_optimization_result
-            print("  L-BFGS-B:", res.message)
-            print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
+            print("  L-BFGS-B nit:", out.nit, " nfev:", out.nfev)
 
         # --- second pass: freeze low-res Fhkl, refine only high-res half ---
-        if self.params.refine_Fhkl_second_pass:
-            # compute d-spacing for each Fhkl parameter
-            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
-            ave_ucell = self.mpi_get_ave_cell()  # MPI collective, all ranks must call
-            from cctbx import uctbx
-            unit_cell = uctbx.unit_cell(tuple(ave_ucell))
-            d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
-            d_median = np.median(d_spacings)
+        # NOTE: we will revert this later, I dont want to edit further this chunk...
+        #if self.params.refine_Fhkl_second_pass:
+        #    # compute d-spacing for each Fhkl parameter
+        #    idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
+        #    ave_ucell = self.mpi_get_ave_cell()  # MPI collective, all ranks must call
+        #    from cctbx import uctbx
+        #    unit_cell = uctbx.unit_cell(tuple(ave_ucell))
+        #    d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
+        #    d_median = np.median(d_spacings)
 
-            # build mask: True for Fhkl params with d > d_median (low-res, to freeze)
-            num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
-            low_res_fhkl = np.zeros(len(target.vary), dtype=bool)
-            for i_chan in range(self.SIM.num_Fhkl_channels):
-                offset = len(target.vary) - num_fhkl_param + i_chan * self.SIM.Num_ASU
-                for i_asu in range(self.SIM.Num_ASU):
-                    if d_spacings[i_asu] > d_median:
-                        low_res_fhkl[offset + i_asu] = True
+        #    # build mask: True for Fhkl params with d > d_median (low-res, to freeze)
+        #    num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+        #    low_res_fhkl = np.zeros(len(target.vary), dtype=bool)
+        #    for i_chan in range(self.SIM.num_Fhkl_channels):
+        #        offset = len(target.vary) - num_fhkl_param + i_chan * self.SIM.Num_ASU
+        #        for i_asu in range(self.SIM.Num_ASU):
+        #            if d_spacings[i_asu] > d_median:
+        #                low_res_fhkl[offset + i_asu] = True
 
-            if COMM.rank == 0:
-                n_freeze = int(low_res_fhkl.sum())
-                n_remain = int(fhkl_is_varied.sum()) - n_freeze
-                print("Second pass: freezing %d low-res Fhkl (d > %.2f A), refining %d high-res"
-                      % (n_freeze, d_median, n_remain))
+        #    if COMM.rank == 0:
+        #        n_freeze = int(low_res_fhkl.sum())
+        #        n_remain = int(fhkl_is_varied.sum()) - n_freeze
+        #        print("Second pass: freezing %d low-res Fhkl (d > %.2f A), refining %d high-res"
+        #              % (n_freeze, d_median, n_remain))
 
-            vary2 = target.vary.copy()
-            vary2[low_res_fhkl] = False
-            target.vary = vary2
-            x0_for_refinement = target.x0[vary2]
-            bounds2 = [(None, None)] * len(x0_for_refinement)
-            n_fhkl_vary2 = int(vary2[-num_fhkl_param:].sum())
-            for i in np.arange(n_fhkl_vary2, 0, -1):
-                bounds2[-i] = (None, 8)
-            min_kwargs2 = dict(min_kwargs)
-            min_kwargs2["bounds"] = bounds2
+        #    vary2 = target.vary.copy()
+        #    vary2[low_res_fhkl] = False
+        #    target.vary = vary2
+        #    x0_for_refinement = target.x0[vary2]
+        #    bounds2 = [(None, None)] * len(x0_for_refinement)
+        #    n_fhkl_vary2 = int(vary2[-num_fhkl_param:].sum())
+        #    for i in np.arange(n_fhkl_vary2, 0, -1):
+        #        bounds2[-i] = (None, 8)
+        #    min_kwargs2 = dict(min_kwargs)
+        #    min_kwargs2["bounds"] = bounds2
 
-            out = basinhopping(target, x0_for_refinement,
-                               niter=self.params.niter,
-                               minimizer_kwargs=min_kwargs2,
-                               T=self.params.temp,
-                               callback=None,
-                               disp=False,
-                               stepsize=self.params.stepsize)
+        #    out = basinhopping(target, x0_for_refinement,
+        #                       niter=self.params.niter,
+        #                       minimizer_kwargs=min_kwargs2,
+        #                       T=self.params.temp,
+        #                       callback=None,
+        #                       disp=False,
+        #                       stepsize=self.params.stepsize)
 
-            target.x0[vary2] = out.x
-            if COMM.rank == 0:
-                print("STOP CONDITION (pass 2):", out.message)
-                print("  nit:", out.nit, " nfev:", out.nfev)
-                res = out.lowest_optimization_result
-                print("  L-BFGS-B:", res.message)
-                print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
+        #    target.x0[vary2] = out.x
+        #    if COMM.rank == 0:
+        #        print("STOP CONDITION (pass 2):", out.message)
+        #        print("  nit:", out.nit, " nfev:", out.nfev)
+        #        res = out.lowest_optimization_result
+        #        print("  L-BFGS-B:", res.message)
+        #        print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
 
         if save:
             self.save_up(target.x0)
