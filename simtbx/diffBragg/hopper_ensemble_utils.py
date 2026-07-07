@@ -475,7 +475,7 @@ class DataModelers:
             idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
             ave_ucell = self.mpi_get_ave_cell()  # MPI collective, all ranks must call
             from cctbx import uctbx
-            unit_cell = uctbx.unit_cell(ave_ucell)
+            unit_cell = uctbx.unit_cell(tuple(ave_ucell))
             d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
             d_median = np.median(d_spacings)
 
