@@ -181,7 +181,9 @@ def target_func(x, modelers):
             trusted_loglike[shot_modeler._roi_id_arr == rid].sum()
             for rid in shot_modeler._roi_unique
         ])
-        unmerged_rows.append((i_shot, shot_modeler._asu_idx_per_roi.copy(), roi_loglike))
+        # use x_slice start as globally unique shot identifier
+        global_shot_id = shot_x_slice.start
+        unmerged_rows.append((global_shot_id, shot_modeler._asu_idx_per_roi.copy(), roi_loglike))
 
         shot_fLogLike = shot_fLogLike[shot_modeler.all_trusted].sum()   # negative log Likelihood target
         f += shot_fLogLike
