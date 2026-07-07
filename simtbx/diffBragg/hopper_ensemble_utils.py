@@ -462,6 +462,10 @@ class DataModelers:
                      disp=False,
                      stepsize=self.params.stepsize)
         target.x0[self._vary] = out.x
+        if COMM.rank==0:
+            print("STOP CONDITION:", out.message)
+            print("  nit:", out.nit, " nfev:", out.nfev)
+
         if save:
             self.save_up(target.x0)
         return target.x0
