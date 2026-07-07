@@ -33,6 +33,7 @@ class TargetFuncEnsemble:
             self.x0 = xinit
         self.niter = 0
         self.t_per_iter = np.array([])
+        self._fhkl_res_bins = None  # cached resolution bin indices (lo/mid/hi)
 
     def jac(self, x, *args):
         if self.g is not None:
@@ -76,8 +77,38 @@ class TargetFuncEnsemble:
 
         self.niter += 1
 
-        min_info = "it=%d | t/it=%.4fs | F=%10.7g | sigZ=%10.7g" \
-                  % (self.niter,self.ave_t_per_iter, f, ave_zscore_sig)
+        # gradient tracking by component
+        num_fhkl_param = modelers.SIM.Num_ASU * modelers.SIM.num_Fhkl_channels
+        g_shot = self.g[:-num_fhkl_param] if num_fhkl_param else self.g
+        g_fhkl_all = self.g[-num_fhkl_param:] if num_fhkl_param else np.array([])
+        g_fhkl = g_fhkl_all[:modelers.SIM.Num_ASU]  # channel 0
+        gnorm_shot = np.linalg.norm(g_shot)
+        gnorm_fhkl = np.linalg.norm(g_fhkl_all)
+        gnorm_all = np.linalg.norm(self.g[self.vary])
+
+        # cache resolution bins on first call (reuse d-spacings from DataModelers)
+        if self._fhkl_res_bins is None and len(g_fhkl) > 0:
+            d = modelers.get_fhkl_d_spacings()
+            thirds = np.percentile(d, [33.3, 66.7])
+            self._fhkl_res_bins = {
+                "hi": d < thirds[0],
+                "mid": (d >= thirds[0]) & (d < thirds[1]),
+                "lo": d >= thirds[1],
+            }
+            if COMM.rank == 0:
+                MAIN_LOGGER.info("Gradient res bins: hi=%.1f-%.1f mid=%.1f-%.1f lo=%.1f-%.1f A" % (
+                    d.min(), thirds[0], thirds[0], thirds[1], thirds[1], d.max()))
+
+        res_str = ""
+        if self._fhkl_res_bins is not None:
+            ghi = np.linalg.norm(g_fhkl[self._fhkl_res_bins["hi"]])
+            gmid = np.linalg.norm(g_fhkl[self._fhkl_res_bins["mid"]])
+            glo = np.linalg.norm(g_fhkl[self._fhkl_res_bins["lo"]])
+            res_str = " | fhkl_g(lo=%.2e mid=%.2e hi=%.2e)" % (glo, gmid, ghi)
+
+        min_info = "it=%d | t/it=%.4fs | F=%10.7g | sigZ=%10.7g | |g|=%.2e (shot=%.2e fhkl=%.2e)%s" \
+                  % (self.niter, self.ave_t_per_iter, f, ave_zscore_sig,
+                     gnorm_all, gnorm_shot, gnorm_fhkl, res_str)
         if COMM.rank==0:
             #print(min_info, flush=True)
             MAIN_LOGGER.info(min_info)
@@ -211,6 +242,18 @@ class DataModelers:
         self.save_freq = None  # optional integer, if provided, save mtz files each 'save_freq' iterations
         self.npix_to_alloc = 0
         self.save_modeler_params = False  # if True, save modelers to pandas files at each iteration
+
+    def get_fhkl_d_spacings(self):
+        """Return array of d-spacings for each ASU index, cached after first call."""
+        if not hasattr(self, '_fhkl_d_spacings') or self._fhkl_d_spacings is None:
+            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
+            uc_params = self.cell_for_mtz
+            if uc_params is None:
+                uc_params = self.data_modelers[list(self.data_modelers.keys())[0]].ucell_man.unit_cell_parameters
+            from cctbx import uctbx
+            uc = uctbx.unit_cell(tuple(uc_params))
+            self._fhkl_d_spacings = np.array([uc.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
+        return self._fhkl_d_spacings
 
     def set_Fhkl_channels(self):
         if self.SIM is None:
@@ -407,7 +450,7 @@ class DataModelers:
             asu_inds_to_vary = None
         asu_inds_to_vary = set(COMM.bcast(asu_inds_to_vary))
         for i_chan in range(self.SIM.num_Fhkl_channels):
-            for i_asu in asu_inds_to_vary:
+            for i_asu in range(self.SIM.Num_ASU):
                 if i_asu not in asu_inds_to_vary:
                     fhkl_vary[i_asu + self.SIM.Num_ASU*i_chan] = 0
 
@@ -473,14 +516,7 @@ class DataModelers:
             # diagnostic: Fhkl gradient stats by resolution
             num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
             g_fhkl = target.g[-num_fhkl_param:]
-            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
-            # use cell_for_mtz if available, else first modeler's cell
-            uc_params = self.cell_for_mtz
-            if uc_params is None:
-                uc_params = self.data_modelers[list(self.data_modelers.keys())[0]].ucell_man.unit_cell_parameters
-            from cctbx import uctbx
-            unit_cell = uctbx.unit_cell(tuple(uc_params))
-            d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
+            d_spacings = self.get_fhkl_d_spacings()
             abs_g = np.abs(g_fhkl[:self.SIM.Num_ASU])
             print("\n  Fhkl gradient at convergence:")
             print("  %8s  %8s  %8s  %8s  %5s" % ("d_lo", "d_hi", "mean|g|", "max|g|", "n"))
