@@ -220,7 +220,8 @@ def target_func(x, modelers):
     g_fhkl = COMM.bcast(g_fhkl)
 
     if modelers.params.sigmas.Fhkl < 0:
-        # resolution-dependent preconditioning: sigma ~ 1/d
+        # empirical preconditioning: accumulate raw gradients, then use 1/mean(|g|)
+        modelers._accumulate_fhkl_grad(g_fhkl)
         fhkl_sigma = modelers.get_fhkl_sigmas()
     else:
         fhkl_sigma = modelers.params.sigmas.Fhkl
@@ -261,21 +262,41 @@ class DataModelers:
         return self._fhkl_d_spacings
 
     def get_fhkl_sigmas(self):
-        """Return per-reflection sigma array that scales with 1/d (high-res gets larger sigma).
-        This preconditions the Fhkl gradients so low-res doesn't dominate.
+        """Return per-reflection sigma array based on empirical gradient magnitudes.
+        Accumulates |grad| over iterations, then sets sigma ~ 1/mean(|grad|) so all
+        reflections get similar effective step sizes.
         Cached after first call. Only used when params.sigmas.Fhkl < 0 (flag to enable)."""
         if not hasattr(self, '_fhkl_sigmas') or self._fhkl_sigmas is None:
-            d = self.get_fhkl_d_spacings()
-            d_pos = np.clip(d, 0.1, None)  # avoid d<=0 for unobserved reflections
-            # sigma ~ 1/sqrt(d), normalized so median sigma = 1 (gentle preconditioning)
-            raw = 1.0 / np.sqrt(d_pos)
-            self._fhkl_sigmas = raw / np.median(raw[d > 0.1])
-            # tile for all channels
-            self._fhkl_sigmas = np.tile(self._fhkl_sigmas, self.SIM.num_Fhkl_channels)
-            if COMM.rank == 0:
-                MAIN_LOGGER.info("Fhkl sigmas (1/d): min=%.3f median=%.3f max=%.3f"
-                                 % (self._fhkl_sigmas.min(), np.median(self._fhkl_sigmas), self._fhkl_sigmas.max()))
+            # not yet computed — return 1.0 (will be set after warmup)
+            num_fhkl = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+            return np.ones(num_fhkl)
         return self._fhkl_sigmas
+
+    def _accumulate_fhkl_grad(self, g_fhkl):
+        """Accumulate |gradient| for empirical preconditioning."""
+        if not hasattr(self, '_fhkl_grad_accum'):
+            self._fhkl_grad_accum = np.zeros_like(g_fhkl)
+            self._fhkl_grad_count = 0
+        self._fhkl_grad_accum += np.abs(g_fhkl)
+        self._fhkl_grad_count += 1
+
+    def _compute_empirical_sigmas(self):
+        """Compute sigmas from accumulated gradient magnitudes. sigma ~ 1/mean(|g|)."""
+        if not hasattr(self, '_fhkl_grad_accum') or self._fhkl_grad_count == 0:
+            return
+        mean_abs_g = self._fhkl_grad_accum / self._fhkl_grad_count
+        # avoid division by zero for unobserved reflections
+        mean_abs_g = np.clip(mean_abs_g, 1e-10, None)
+        raw = 1.0 / mean_abs_g
+        # normalize so median of observed reflections = 1
+        observed = mean_abs_g > 1e-9
+        if observed.any():
+            raw /= np.median(raw[observed])
+        self._fhkl_sigmas = raw
+        if COMM.rank == 0:
+            MAIN_LOGGER.info("Empirical Fhkl sigmas: min=%.3e median=%.3f max=%.3e (from %d iters)"
+                             % (self._fhkl_sigmas.min(), np.median(self._fhkl_sigmas[observed]),
+                                self._fhkl_sigmas.max(), self._fhkl_grad_count))
 
     def set_Fhkl_channels(self):
         if self.SIM is None:
@@ -517,18 +538,44 @@ class DataModelers:
             }
         }
 
+        lbfgs_opts = {
+            "ftol": 0,
+            "gtol": 1e-15,
+            "maxfun": int(1e5),
+            "maxiter": int(self.params.lbfgs_maxiter),
+            "maxcor": 50,
+        }
+
+        # empirical preconditioning: warmup pass to collect gradient magnitudes
+        if self.params.sigmas.Fhkl < 0 and not hasattr(self, '_fhkl_sigmas'):
+            warmup_opts = dict(lbfgs_opts)
+            warmup_opts["maxiter"] = 50
+            warmup_opts["maxfun"] = 100
+            if COMM.rank == 0:
+                print("=== Warmup pass (50 iters) to collect gradient statistics ===")
+            out_warmup = minimize(target, x0_for_refinement,
+                                  args=(self,),
+                                  method="L-BFGS-B",
+                                  jac=target.jac,
+                                  bounds=bounds,
+                                  options=warmup_opts)
+            target.x0[self._vary] = out_warmup.x
+            if COMM.rank == 0:
+                print("Warmup done: nit=%d nfev=%d" % (out_warmup.nit, out_warmup.nfev))
+            # compute empirical sigmas from accumulated gradients
+            self._compute_empirical_sigmas()
+            # reset target for fresh L-BFGS-B with new sigmas
+            x0_for_refinement = target.x0[self._vary]
+            target.niter = 0
+            if COMM.rank == 0:
+                print("=== Main pass with empirical Fhkl sigmas ===")
+
         out = minimize(target, x0_for_refinement,
                        args=(self,),
                        method="L-BFGS-B",
                        jac=target.jac,
                        bounds=bounds,
-                       options={
-                           "ftol": 0,
-                           "gtol": 1e-15,
-                           "maxfun": int(1e5),
-                           "maxiter": int(self.params.lbfgs_maxiter),
-                           "maxcor": 50,
-                       })
+                       options=lbfgs_opts)
         target.x0[self._vary] = out.x
         if COMM.rank == 0:
             print("STOP CONDITION:", out.message)
