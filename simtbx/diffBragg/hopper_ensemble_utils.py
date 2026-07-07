@@ -219,13 +219,7 @@ def target_func(x, modelers):
     f = COMM.bcast(f)
     g_fhkl = COMM.bcast(g_fhkl)
 
-    if modelers.params.sigmas.Fhkl < 0:
-        # empirical preconditioning: accumulate raw gradients, then use 1/mean(|g|)
-        modelers._accumulate_fhkl_grad(g_fhkl)
-        fhkl_sigma = modelers.get_fhkl_sigmas()
-    else:
-        fhkl_sigma = modelers.params.sigmas.Fhkl
-    g_fhkl *= modelers.SIM.Fhkl_scales * fhkl_sigma  # rescale Fhkl gradient
+    g_fhkl *= modelers.SIM.Fhkl_scales * modelers.params.sigmas.Fhkl  # rescale Fhkl gradient
 
     g = np.append(g, g_fhkl)
 
@@ -545,30 +539,6 @@ class DataModelers:
             "maxiter": int(self.params.lbfgs_maxiter),
             "maxcor": 50,
         }
-
-        # empirical preconditioning: warmup pass to collect gradient magnitudes
-        if self.params.sigmas.Fhkl < 0 and not hasattr(self, '_fhkl_sigmas'):
-            warmup_opts = dict(lbfgs_opts)
-            warmup_opts["maxiter"] = 50
-            warmup_opts["maxfun"] = 100
-            if COMM.rank == 0:
-                print("=== Warmup pass (50 iters) to collect gradient statistics ===")
-            out_warmup = minimize(target, x0_for_refinement,
-                                  args=(self,),
-                                  method="L-BFGS-B",
-                                  jac=target.jac,
-                                  bounds=bounds,
-                                  options=warmup_opts)
-            target.x0[self._vary] = out_warmup.x
-            if COMM.rank == 0:
-                print("Warmup done: nit=%d nfev=%d" % (out_warmup.nit, out_warmup.nfev))
-            # compute empirical sigmas from accumulated gradients
-            self._compute_empirical_sigmas()
-            # reset target for fresh L-BFGS-B with new sigmas
-            x0_for_refinement = target.x0[self._vary]
-            target.niter = 0
-            if COMM.rank == 0:
-                print("=== Main pass with empirical Fhkl sigmas ===")
 
         out = minimize(target, x0_for_refinement,
                        args=(self,),
