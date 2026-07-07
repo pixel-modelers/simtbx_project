@@ -463,11 +463,37 @@ class DataModelers:
                            "gtol": 1e-15,
                            "maxfun": int(1e5),
                            "maxiter": int(self.params.lbfgs_maxiter),
+                           "maxcor": 50,
                        })
         target.x0[self._vary] = out.x
         if COMM.rank == 0:
             print("STOP CONDITION:", out.message)
             print("  L-BFGS-B nit:", out.nit, " nfev:", out.nfev)
+
+            # diagnostic: Fhkl gradient stats by resolution
+            num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+            g_fhkl = target.g[-num_fhkl_param:]
+            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
+            # use cell_for_mtz if available, else first modeler's cell
+            uc_params = self.cell_for_mtz
+            if uc_params is None:
+                uc_params = self.data_modelers[list(self.data_modelers.keys())[0]].ucell_man.unit_cell_parameters
+            from cctbx import uctbx
+            unit_cell = uctbx.unit_cell(tuple(uc_params))
+            d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
+            abs_g = np.abs(g_fhkl[:self.SIM.Num_ASU])
+            print("\n  Fhkl gradient at convergence:")
+            print("  %8s  %8s  %8s  %8s  %5s" % ("d_lo", "d_hi", "mean|g|", "max|g|", "n"))
+            print("  " + "-" * 45)
+            edges = np.percentile(d_spacings, np.linspace(0, 100, 6))
+            for lo, hi in zip(edges[:-1], edges[1:]):
+                mask = (d_spacings >= lo) & (d_spacings < hi + 1e-6)
+                if mask.sum() == 0:
+                    continue
+                print("  %8.2f  %8.2f  %8.2e  %8.2e  %5d" % (
+                    lo, hi, abs_g[mask].mean(), abs_g[mask].max(), mask.sum()))
+            print("  Overall: mean|g|=%.2e  max|g|=%.2e" % (abs_g.mean(), abs_g.max()))
+            print()
 
         # --- second pass: freeze low-res Fhkl, refine only high-res half ---
         # NOTE: we will revert this later, I dont want to edit further this chunk...
