@@ -473,9 +473,9 @@ class DataModelers:
         if self.params.refine_Fhkl_second_pass:
             # compute d-spacing for each Fhkl parameter
             idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
-            uc = self.data_modelers[0].ucell_man.unit_cell_parameters
+            ave_ucell = self.mpi_get_ave_cell()  # MPI collective, all ranks must call
             from cctbx import uctbx
-            unit_cell = uctbx.unit_cell(uc)
+            unit_cell = uctbx.unit_cell(ave_ucell)
             d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
             d_median = np.median(d_spacings)
 
