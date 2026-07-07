@@ -480,7 +480,7 @@ class DataModelers:
         num_fhkl_refined = int(np.sum(fhkl_is_varied))
         bounds = [(None, None)] * len(x0_for_refinement)
         for i in np.arange(num_fhkl_refined, 0, -1):
-            bounds[-i] = (None, 8)
+            bounds[-i] = (None, None)
         min_kwargs = {
             "args": (self,),
             "method": "L-BFGS-B",
@@ -512,8 +512,15 @@ class DataModelers:
             print("STOP CONDITION:", out.message)
             print("  L-BFGS-B nit:", out.nit, " nfev:", out.nfev)
 
-            # diagnostic: Fhkl gradient stats by resolution
+            # diagnostic: Fhkl parameter values at bounds
             num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+            x_fhkl = target.x0[-num_fhkl_param:]
+            n_at_upper = int(np.sum(x_fhkl >= 7.99))
+            n_at_lower = int(np.sum(x_fhkl <= -7.99))  # no lower bound, but check anyway
+            print("  Fhkl params: min=%.3f  median=%.3f  max=%.3f  at_upper_bound(>=7.99)=%d/%d"
+                  % (x_fhkl.min(), np.median(x_fhkl), x_fhkl.max(), n_at_upper, len(x_fhkl)))
+
+            # diagnostic: Fhkl gradient stats by resolution
             g_fhkl = target.g[-num_fhkl_param:]
             d_spacings = self.get_fhkl_d_spacings()
             abs_g = np.abs(g_fhkl[:self.SIM.Num_ASU])
