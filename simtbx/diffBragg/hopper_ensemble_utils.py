@@ -181,8 +181,7 @@ def target_func(x, modelers):
             trusted_loglike[shot_modeler._roi_id_arr == rid].sum()
             for rid in shot_modeler._roi_unique
         ])
-        # use x_slice start as globally unique shot identifier
-        global_shot_id = shot_x_slice.start
+        global_shot_id = getattr(shot_modeler, 'pandas_table_idx', shot_x_slice.start)
         unmerged_rows.append((global_shot_id, shot_modeler._asu_idx_per_roi.copy(), roi_loglike))
 
         shot_fLogLike = shot_fLogLike[shot_modeler.all_trusted].sum()   # negative log Likelihood target
@@ -935,6 +934,7 @@ def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictio
         if COMM.rank==0:
             print("Finished loading image %d / %d" % (ii + 1, len(worklist)), flush=True)
 
+        shot_modeler.pandas_table_idx = i_df  # global index into pandas table
         shot_modelers.add_modeler(shot_modeler)
 
     if gather_dir is not None:
