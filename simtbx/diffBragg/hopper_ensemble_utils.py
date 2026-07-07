@@ -469,6 +469,58 @@ class DataModelers:
             print("  L-BFGS-B:", res.message)
             print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
 
+        # --- second pass: freeze low-res Fhkl, refine only high-res half ---
+        if self.params.refine_Fhkl_second_pass:
+            # compute d-spacing for each Fhkl parameter
+            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
+            uc = self.data_modelers[0].ucell_man.unit_cell_parameters
+            from cctbx import uctbx
+            unit_cell = uctbx.unit_cell(uc)
+            d_spacings = np.array([unit_cell.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
+            d_median = np.median(d_spacings)
+
+            # build mask: True for Fhkl params with d > d_median (low-res, to freeze)
+            num_fhkl_param = self.SIM.Num_ASU * self.SIM.num_Fhkl_channels
+            low_res_fhkl = np.zeros(len(target.vary), dtype=bool)
+            for i_chan in range(self.SIM.num_Fhkl_channels):
+                offset = len(target.vary) - num_fhkl_param + i_chan * self.SIM.Num_ASU
+                for i_asu in range(self.SIM.Num_ASU):
+                    if d_spacings[i_asu] > d_median:
+                        low_res_fhkl[offset + i_asu] = True
+
+            if COMM.rank == 0:
+                n_freeze = int(low_res_fhkl.sum())
+                n_remain = int(fhkl_is_varied.sum()) - n_freeze
+                print("Second pass: freezing %d low-res Fhkl (d > %.2f A), refining %d high-res"
+                      % (n_freeze, d_median, n_remain))
+
+            vary2 = target.vary.copy()
+            vary2[low_res_fhkl] = False
+            target.vary = vary2
+            x0_for_refinement = target.x0[vary2]
+            bounds2 = [(None, None)] * len(x0_for_refinement)
+            n_fhkl_vary2 = int(vary2[-num_fhkl_param:].sum())
+            for i in np.arange(n_fhkl_vary2, 0, -1):
+                bounds2[-i] = (None, 8)
+            min_kwargs2 = dict(min_kwargs)
+            min_kwargs2["bounds"] = bounds2
+
+            out = basinhopping(target, x0_for_refinement,
+                               niter=self.params.niter,
+                               minimizer_kwargs=min_kwargs2,
+                               T=self.params.temp,
+                               callback=None,
+                               disp=False,
+                               stepsize=self.params.stepsize)
+
+            target.x0[vary2] = out.x
+            if COMM.rank == 0:
+                print("STOP CONDITION (pass 2):", out.message)
+                print("  nit:", out.nit, " nfev:", out.nfev)
+                res = out.lowest_optimization_result
+                print("  L-BFGS-B:", res.message)
+                print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
+
         if save:
             self.save_up(target.x0)
         return target.x0
