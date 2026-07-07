@@ -211,16 +211,10 @@ def target_func(x, modelers):
     # add up target and gradients across all ranks
     f = COMM.bcast(COMM.reduce(f))
 
-    # gather unmerged per-reflection diagnostics from all ranks
-    all_unmerged = COMM.gather(unmerged_rows)
-    if COMM.rank == 0:
-        # flatten: list of (shot_idx, asu_indices, roi_loglikes) across all ranks
-        iter_unmerged = []
-        for rank_rows in all_unmerged:
-            iter_unmerged.extend(rank_rows)
-        if not hasattr(modelers, '_diag_unmerged'):
-            modelers._diag_unmerged = []
-        modelers._diag_unmerged.append(iter_unmerged)
+    # store unmerged per-reflection diagnostics locally (no MPI gather)
+    if not hasattr(modelers, '_diag_unmerged'):
+        modelers._diag_unmerged = []
+    modelers._diag_unmerged.append(unmerged_rows)
 
     # average z-score sigma for reporting
     zscore_sigs = COMM.reduce(zscore_sigs)
@@ -662,17 +656,14 @@ class DataModelers:
         #        print("  L-BFGS-B:", res.message)
         #        print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
 
-        # save unmerged per-reflection diagnostics
-        if COMM.rank == 0 and hasattr(self, '_diag_unmerged'):
+        # save unmerged per-reflection diagnostics (one file per rank)
+        if hasattr(self, '_diag_unmerged'):
             import os, pickle
             diag_dir = self.outdir or "."
             idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
             asu_hkls = [idx_to_asu[i] for i in range(self.SIM.Num_ASU)]
             d_spacings = self.get_fhkl_d_spacings()
             n_iter = len(self._diag_unmerged)
-            # build arrays: for each iteration, expand (shot, asu_idx, loglike) rows
-            # structure is consistent across iterations (same shots, same ROIs)
-            # so we can build a stable table from iteration 0 and stack loglikes
             shot_ids = []
             asu_idxs = []
             for shot_idx, asu_idx_arr, _ in self._diag_unmerged[0]:
@@ -691,17 +682,18 @@ class DataModelers:
                     offset += n
 
             diag = {
-                "shot_id": shot_ids,          # (n_rows,) shot index
-                "asu_idx": asu_idxs,           # (n_rows,) ASU integer index
-                "loglike": loglikes,           # (n_iter, n_rows) per-refl log-likelihood
-                "asu_hkls": asu_hkls,          # list of HKL tuples (Num_ASU,)
-                "d_spacings": d_spacings,      # (Num_ASU,)
+                "shot_id": shot_ids,
+                "asu_idx": asu_idxs,
+                "loglike": loglikes,
+                "asu_hkls": asu_hkls,
+                "d_spacings": d_spacings,
             }
-            diag_path = os.path.join(diag_dir, "stage2_diag.pkl")
+            diag_path = os.path.join(diag_dir, "stage2_diag_rank%d.pkl" % COMM.rank)
             with open(diag_path, "wb") as fh:
                 pickle.dump(diag, fh)
-            print("Saved unmerged diagnostics → %s" % diag_path)
-            print("  %d observations (shot×refl) × %d iterations" % (n_rows, n_iter))
+            if COMM.rank == 0:
+                print("Saved unmerged diagnostics (per-rank) → %s/stage2_diag_rank*.pkl" % diag_dir)
+                print("  %d ranks, %d observations on rank 0 × %d iterations" % (COMM.size, n_rows, n_iter))
 
         if save:
             self.save_up(target.x0)
