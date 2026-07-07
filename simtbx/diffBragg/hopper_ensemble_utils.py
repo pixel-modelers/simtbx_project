@@ -219,7 +219,12 @@ def target_func(x, modelers):
     f = COMM.bcast(f)
     g_fhkl = COMM.bcast(g_fhkl)
 
-    g_fhkl *= modelers.SIM.Fhkl_scales*modelers.params.sigmas.Fhkl  # need to rescale the Fhkl gradient according to the reparameterization on Fhkl scale factord
+    if modelers.params.sigmas.Fhkl < 0:
+        # resolution-dependent preconditioning: sigma ~ 1/d
+        fhkl_sigma = modelers.get_fhkl_sigmas()
+    else:
+        fhkl_sigma = modelers.params.sigmas.Fhkl
+    g_fhkl *= modelers.SIM.Fhkl_scales * fhkl_sigma  # rescale Fhkl gradient
 
     g = np.append(g, g_fhkl)
 
@@ -254,6 +259,23 @@ class DataModelers:
             uc = uctbx.unit_cell(tuple(uc_params))
             self._fhkl_d_spacings = np.array([uc.d(idx_to_asu[i]) for i in range(self.SIM.Num_ASU)])
         return self._fhkl_d_spacings
+
+    def get_fhkl_sigmas(self):
+        """Return per-reflection sigma array that scales with 1/d (high-res gets larger sigma).
+        This preconditions the Fhkl gradients so low-res doesn't dominate.
+        Cached after first call. Only used when params.sigmas.Fhkl < 0 (flag to enable)."""
+        if not hasattr(self, '_fhkl_sigmas') or self._fhkl_sigmas is None:
+            d = self.get_fhkl_d_spacings()
+            d_pos = np.clip(d, 0.1, None)  # avoid d<=0 for unobserved reflections
+            # sigma ~ 1/d, normalized so median sigma = 1
+            raw = 1.0 / d_pos
+            self._fhkl_sigmas = raw / np.median(raw[d > 0.1])
+            # tile for all channels
+            self._fhkl_sigmas = np.tile(self._fhkl_sigmas, self.SIM.num_Fhkl_channels)
+            if COMM.rank == 0:
+                MAIN_LOGGER.info("Fhkl sigmas (1/d): min=%.3f median=%.3f max=%.3f"
+                                 % (self._fhkl_sigmas.min(), np.median(self._fhkl_sigmas), self._fhkl_sigmas.max()))
+        return self._fhkl_sigmas
 
     def set_Fhkl_channels(self):
         if self.SIM is None:
