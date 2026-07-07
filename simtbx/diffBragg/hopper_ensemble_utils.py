@@ -166,17 +166,20 @@ def target_func(x, modelers):
             shot_fLogLike /= shot_modeler.all_freq
 
         # per-reflection (per-ROI) log-likelihood within this shot
-        if not hasattr(shot_modeler, '_asu_idx_per_roi'):
+        if not hasattr(shot_modeler, '_roi_unique') or shot_modeler._roi_unique is None:
+            roi_id_arr = np.array(shot_modeler.roi_id)
+            shot_modeler._roi_unique = np.unique(roi_id_arr)
+            # first pixel index for each ROI → get its ASU HKL
             shot_modeler._asu_idx_per_roi = np.array([
-                modelers.SIM.asu_map_int.get(shot_modeler.hi_asu_perpix[
-                    shot_modeler.roi_id_slices[rid][0].start], -1)
-                for rid in shot_modeler.roi_id_unique
+                modelers.SIM.asu_map_int.get(
+                    shot_modeler.hi_asu_perpix[np.searchsorted(roi_id_arr, rid)], -1)
+                for rid in shot_modeler._roi_unique
             ], dtype=int)
+            shot_modeler._roi_id_arr = roi_id_arr
         trusted_loglike = np.where(shot_modeler.all_trusted, shot_fLogLike, 0)
         roi_loglike = np.array([
-            trusted_loglike[slc].sum()
-            for rid in shot_modeler.roi_id_unique
-            for slc in shot_modeler.roi_id_slices[rid]
+            trusted_loglike[shot_modeler._roi_id_arr == rid].sum()
+            for rid in shot_modeler._roi_unique
         ])
         unmerged_rows.append((i_shot, shot_modeler._asu_idx_per_roi.copy(), roi_loglike))
 
