@@ -465,6 +465,9 @@ class DataModelers:
         if COMM.rank==0:
             print("STOP CONDITION:", out.message)
             print("  nit:", out.nit, " nfev:", out.nfev)
+            res = out.lowest_optimization_result
+            print("  L-BFGS-B:", res.message)
+            print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
 
         if save:
             self.save_up(target.x0)
