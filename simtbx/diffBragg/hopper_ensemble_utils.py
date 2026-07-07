@@ -267,8 +267,8 @@ class DataModelers:
         if not hasattr(self, '_fhkl_sigmas') or self._fhkl_sigmas is None:
             d = self.get_fhkl_d_spacings()
             d_pos = np.clip(d, 0.1, None)  # avoid d<=0 for unobserved reflections
-            # sigma ~ 1/d, normalized so median sigma = 1
-            raw = 1.0 / d_pos
+            # sigma ~ 1/sqrt(d), normalized so median sigma = 1 (gentle preconditioning)
+            raw = 1.0 / np.sqrt(d_pos)
             self._fhkl_sigmas = raw / np.median(raw[d > 0.1])
             # tile for all channels
             self._fhkl_sigmas = np.tile(self._fhkl_sigmas, self.SIM.num_Fhkl_channels)
