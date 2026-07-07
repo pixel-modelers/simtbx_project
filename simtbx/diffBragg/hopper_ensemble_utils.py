@@ -138,6 +138,8 @@ def target_func(x, modelers):
     g = np.zeros(modelers.num_total_modelers * num_shot_params)
     g_fhkl = np.zeros(num_fhkl_params)
     zscore_sigs = []
+    per_shot_f = []  # per-shot total log-likelihood
+    unmerged_rows = []  # list of (shot_idx, asu_indices, roi_loglikes)
     fcell_params = x[-num_fhkl_params:]
     for ii, i_shot in enumerate(modelers):
         shot_modeler = modelers[i_shot]
@@ -162,8 +164,25 @@ def target_func(x, modelers):
             zscore_sig = np.std((resid / np.sqrt(V))[shot_modeler.all_trusted])
         if shot_modeler.params.roi.allow_overlapping_spots:
             shot_fLogLike /= shot_modeler.all_freq
+
+        # per-reflection (per-ROI) log-likelihood within this shot
+        if not hasattr(shot_modeler, '_asu_idx_per_roi'):
+            shot_modeler._asu_idx_per_roi = np.array([
+                modelers.SIM.asu_map_int.get(shot_modeler.hi_asu_perpix[
+                    shot_modeler.roi_id_slices[rid][0].start], -1)
+                for rid in shot_modeler.roi_id_unique
+            ], dtype=int)
+        trusted_loglike = np.where(shot_modeler.all_trusted, shot_fLogLike, 0)
+        roi_loglike = np.array([
+            trusted_loglike[slc].sum()
+            for rid in shot_modeler.roi_id_unique
+            for slc in shot_modeler.roi_id_slices[rid]
+        ])
+        unmerged_rows.append((i_shot, shot_modeler._asu_idx_per_roi.copy(), roi_loglike))
+
         shot_fLogLike = shot_fLogLike[shot_modeler.all_trusted].sum()   # negative log Likelihood target
         f += shot_fLogLike
+        per_shot_f.append(shot_fLogLike)
 
         zscore_sigs.append(zscore_sig)
 
@@ -188,6 +207,17 @@ def target_func(x, modelers):
 
     # add up target and gradients across all ranks
     f = COMM.bcast(COMM.reduce(f))
+
+    # gather unmerged per-reflection diagnostics from all ranks
+    all_unmerged = COMM.gather(unmerged_rows)
+    if COMM.rank == 0:
+        # flatten: list of (shot_idx, asu_indices, roi_loglikes) across all ranks
+        iter_unmerged = []
+        for rank_rows in all_unmerged:
+            iter_unmerged.extend(rank_rows)
+        if not hasattr(modelers, '_diag_unmerged'):
+            modelers._diag_unmerged = []
+        modelers._diag_unmerged.append(iter_unmerged)
 
     # average z-score sigma for reporting
     zscore_sigs = COMM.reduce(zscore_sigs)
@@ -628,6 +658,47 @@ class DataModelers:
         #        res = out.lowest_optimization_result
         #        print("  L-BFGS-B:", res.message)
         #        print("  L-BFGS-B nit:", res.nit, " nfev:", res.nfev)
+
+        # save unmerged per-reflection diagnostics
+        if COMM.rank == 0 and hasattr(self, '_diag_unmerged'):
+            import os, pickle
+            diag_dir = self.outdir or "."
+            idx_to_asu = {idx: asu for asu, idx in self.SIM.asu_map_int.items()}
+            asu_hkls = [idx_to_asu[i] for i in range(self.SIM.Num_ASU)]
+            d_spacings = self.get_fhkl_d_spacings()
+            n_iter = len(self._diag_unmerged)
+            # build arrays: for each iteration, expand (shot, asu_idx, loglike) rows
+            # structure is consistent across iterations (same shots, same ROIs)
+            # so we can build a stable table from iteration 0 and stack loglikes
+            shot_ids = []
+            asu_idxs = []
+            for shot_idx, asu_idx_arr, _ in self._diag_unmerged[0]:
+                for asu_idx in asu_idx_arr:
+                    shot_ids.append(shot_idx)
+                    asu_idxs.append(asu_idx)
+            shot_ids = np.array(shot_ids, dtype=int)
+            asu_idxs = np.array(asu_idxs, dtype=int)
+            n_rows = len(shot_ids)
+            loglikes = np.zeros((n_iter, n_rows))
+            for it, iter_data in enumerate(self._diag_unmerged):
+                offset = 0
+                for shot_idx, asu_idx_arr, roi_ll in iter_data:
+                    n = len(roi_ll)
+                    loglikes[it, offset:offset+n] = roi_ll
+                    offset += n
+
+            diag = {
+                "shot_id": shot_ids,          # (n_rows,) shot index
+                "asu_idx": asu_idxs,           # (n_rows,) ASU integer index
+                "loglike": loglikes,           # (n_iter, n_rows) per-refl log-likelihood
+                "asu_hkls": asu_hkls,          # list of HKL tuples (Num_ASU,)
+                "d_spacings": d_spacings,      # (Num_ASU,)
+            }
+            diag_path = os.path.join(diag_dir, "stage2_diag.pkl")
+            with open(diag_path, "wb") as fh:
+                pickle.dump(diag, fh)
+            print("Saved unmerged diagnostics → %s" % diag_path)
+            print("  %d observations (shot×refl) × %d iterations" % (n_rows, n_iter))
 
         if save:
             self.save_up(target.x0)
