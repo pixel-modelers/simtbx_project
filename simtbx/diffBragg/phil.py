@@ -743,9 +743,16 @@ ftol = 1e-10
   .type = float
   .help = ftol convergence threshold for scipys L-BFGS-B
   .expert_level = 10
+gtol = 1e-10
+  .type = float
+  .help = gtol gradient norm convergence threshold for scipys L-BFGS-B
+  .expert_level = 10
 lbfgs_maxiter = 1e5
   .type = int
   .help = maximum number of L-BFGS-B iterations
+lbfgs_maxfun = 1e5
+  .type = int
+  .help = maximum number of L-BFGS-B function evaluations
 disp = False
   .type = bool
   .help = scipy minimize convergence printouts
@@ -1289,6 +1296,9 @@ geometry {
   optimized_detector_name = "diffBragg_detector.expt"
     .type = str
     .help = basename of the experiment which will be written, and will contain the optimized detector. Note, this should be a basename only (not to be prefixed with a directory path). If a directory path is include, it will be stripped. The file will be stored in the output folder (pandas_dir)
+  min_panel_reflections = 0
+    .type = int
+    .help = minimum number of reflections across all shots for a panel group to be refined. Groups with fewer reflections are frozen.
   min {
     panel_rotations = -1,-1,-1
       .type = floats(size=3)
@@ -1312,6 +1322,14 @@ geometry {
     panel_translations = 0,0,0
       .type = floats(size=3)
       .help = restraint target in mm for detector panel translations in X,Y,Z
+  }
+  sigmas {
+    panel_rot = 1,1,1
+      .type = floats(size=3)
+      .help = refinement sensitivity for panel rotations (higher values lead to larger parameter steps)
+    panel_xyz = 1,1,1
+      .type = floats(size=3)
+      .help = refinement sensitivity for detector panel translations in X,Y,Z (higher values lead to larger parameter steps)
   }
   betas {
     panel_rot = 1e6,1e6,1e6

@@ -145,23 +145,24 @@ class DetectorParameters:
 
         self.parameters = []
         GEO = phil_params.geometry
+        sigma_rot = GEO.sigmas.panel_rot
+        sigma_xyz = GEO.sigmas.panel_xyz
         for i_group in range(num_panel_groups):
             group_has_data = i_group in panel_groups_refined
             if not group_has_data:
                 continue
             vary_rots = [not fixed_flag and group_has_data for fixed_flag in GEO.fix.panel_rotations]
-            #vary_rots = [True]*3
 
             o = RangedParameter(name="group%d_RotOrth" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=sigma_rot[0],
                                 minval=GEO.min.panel_rotations[0]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[0]*DEG_TO_PI,
                                 fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
 
             f = RangedParameter(name="group%d_RotFast" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=sigma_rot[1],
                                 minval=GEO.min.panel_rotations[1]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[1]*DEG_TO_PI,
                                 fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
@@ -169,26 +170,25 @@ class DetectorParameters:
 
             s = RangedParameter(name="group%d_RotSlow" % i_group,
                                 init=0,
-                                sigma=100,  # TODO
+                                sigma=sigma_rot[2],
                                 minval=GEO.min.panel_rotations[2]*DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[2]*DEG_TO_PI,
                                 fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
                                 is_global=True)
 
             vary_shifts = [not fixed_flag and group_has_data for fixed_flag in GEO.fix.panel_translations]
-            #vary_shifts = [True]*3
             x = RangedParameter(name="group%d_ShiftX" % i_group, init=0,
-                                sigma=100,
+                                sigma=sigma_xyz[0],
                                 minval=GEO.min.panel_translations[0]*1e-3, maxval=GEO.max.panel_translations[0]*1e-3,
                                 fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
                                 is_global=True)
             y = RangedParameter(name="group%d_ShiftY" % i_group, init=0,
-                                sigma=100,
+                                sigma=sigma_xyz[1],
                                 minval=GEO.min.panel_translations[1]*1e-3, maxval=GEO.max.panel_translations[1]*1e-3,
                                 fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
                                 is_global=True)
             z = RangedParameter(name="group%d_ShiftZ" % i_group, init=0,
-                                sigma=100,
+                                sigma=sigma_xyz[2],
                                 minval=GEO.min.panel_translations[2]*1e-3, maxval=GEO.max.panel_translations[2]*1e-3,
                                 fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
                                 is_global=True)
@@ -228,41 +228,41 @@ class CrystalParameters:
                 p = Mod.PAR.Nabc[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Nabc%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.fix.Nabc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_N in range(3):
                 p = Mod.PAR.Ndef[i_N]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ndef%d" % (COMM.rank, i_shot, i_N),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.fix.Ndef, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_eta in range(3):
                 p = Mod.PAR.eta[i_eta]
                 ref_p = RangedParameter(name="rank%d_shot%d_eta%d" % (COMM.rank, i_shot, i_eta),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.fix.eta_abc, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             for i_rot in range(3):
                 p = Mod.PAR.RotXYZ_params[i_rot]
                 ref_p = RangedParameter(name="rank%d_shot%d_RotXYZ%d" % (COMM.rank, i_shot, i_rot),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.fix.RotXYZ, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
             p = Mod.PAR.Scale
             ref_p = RangedParameter(name="rank%d_shot%d_Scale" % (COMM.rank, i_shot),
                                     minval=p.minval, maxval=p.maxval, fix=self.phil.fix.G, init=p.init,
-                                    center=p.center, beta=p.beta)
+                                    sigma=p.sigma, center=p.center, beta=p.beta)
             self.parameters.append(ref_p)
 
             for i_uc in range(len(Mod.PAR.ucell)):
                 p = Mod.PAR.ucell[i_uc]
                 ref_p = RangedParameter(name="rank%d_shot%d_Ucell%d" % (COMM.rank, i_shot, i_uc),
                                         minval=p.minval, maxval=p.maxval, fix=self.phil.fix.ucell, init=p.init,
-                                        center=p.center, beta=p.beta)
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
 
@@ -337,8 +337,10 @@ class Target:
                 params = args[-1]  # phil params
                 temp_pandas_dir = params.outdir
                 params.outdir=params.outdir + "-iter%d" % self.iternum
-            med_offset = write_output_files(self.x0, self.ref_params, iternum=self.iternum, *args, **kwargs)
+            med_offset, rank_df = write_output_files(self.x0, self.ref_params, iternum=self.iternum, *args, **kwargs)
             self.med_offsets.append(med_offset)
+            # save combined optimized pkl across all ranks
+            _save_combined_opt_pkl(rank_df, args[-1], iternum=self.iternum)  # args[-1] = params
             self.med_iternums.append(self.iternum)
             if self.plot:
                 self.ax.clear()
@@ -563,7 +565,7 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
 
     if not Nd.fix:
         Ndef_grad = SIM.D.get_ncells_def_derivative_pixels()
-        for i_N, N in enumerate([Nf, Ne, Nf]):
+        for i_N, N in enumerate([Nd, Ne, Nf]):
             N_grad = scale*(Ndef_grad[i_N][:npix].as_numpy_array())
             N_grad = N.get_deriv(x[N.xpos], N_grad)
             N_grad = convolve_model_with_psf(N_grad, **conv_args)
@@ -791,6 +793,20 @@ def target_and_grad(x, ref_params, data_modelers, SIM, params, iternum):
     return target_functional, grad, all_shot_sigZ
 
 
+def _save_combined_opt_pkl(rank_df, params, iternum=None):
+    """Gather per-rank DataFrames and save a single combined optimized pkl."""
+    all_rank_dfs = COMM.gather(rank_df, root=0)
+    if COMM.rank == 0:
+        combined_df = pandas.concat(all_rank_dfs, ignore_index=True)
+        if iternum is not None:
+            opt_pkl_path = os.path.join(params.outdir, "geom_optimized_iter%d.pkl" % iternum)
+        else:
+            opt_pkl_path = os.path.join(params.outdir, "geom_optimized.pkl")
+        combined_df.to_pickle(opt_pkl_path)
+        MAIN_LOGGER.info("Saved combined optimized pkl: %s (%d shots)" % (opt_pkl_path, len(combined_df)))
+    COMM.barrier()
+
+
 def geom_min(params):
     """
     :param params: phil parameters (simtbx/diffBragg/phil.py)
@@ -819,7 +835,7 @@ def geom_min(params):
 
     if params.skip is not None:
         df = df.iloc[params.skip:]
-    if params.max_process is not None:
+    if params.max_process is not None and params.max_process > 0:
         df = df.iloc[:params.max_process]
 
     pdir = params.outdir
@@ -855,6 +871,37 @@ def geom_min(params):
         set_group_id_slices(Modeler, launcher.panel_group_from_id)
         if launcher.SIM.refining_Fhkl:
             Modeler.set_Fhkl_channels(launcher.SIM, set_in_diffBragg=False)
+
+    # count reflections per panel group across all shots on this rank
+    min_panel_refls = getattr(params.geometry, 'min_panel_reflections', 0)
+    rank_group_refl_counts = {}
+    for i_shot in launcher.Modelers:
+        Modeler = launcher.Modelers[i_shot]
+        for gid in Modeler.unique_panel_group_ids:
+            rank_group_refl_counts[gid] = rank_group_refl_counts.get(gid, 0) + len(Modeler.group_id_slices.get(gid, []))
+    all_counts = COMM.gather(rank_group_refl_counts, root=0)
+    if COMM.rank == 0:
+        total_group_refl_counts = {}
+        for d in all_counts:
+            for gid, cnt in d.items():
+                total_group_refl_counts[gid] = total_group_refl_counts.get(gid, 0) + cnt
+        frozen_groups = [gid for gid, cnt in total_group_refl_counts.items() if cnt < min_panel_refls]
+        active_groups = [gid for gid in launcher.panel_groups_refined if gid not in frozen_groups]
+        if frozen_groups:
+            print("Freezing %d panel groups with < %d reflections: %s"
+                  % (len(frozen_groups), min_panel_refls, sorted(frozen_groups)))
+        for gid in sorted(total_group_refl_counts):
+            status = "FROZEN" if gid in frozen_groups else "active"
+            print("  group %d: %d refls (%s)" % (gid, total_group_refl_counts[gid], status))
+        # save counts file for post-refinement summary
+        counts_path = os.path.join(params.outdir, "panel_refl_counts.txt")
+        with open(counts_path, "w") as fh:
+            for gid in sorted(total_group_refl_counts):
+                refined = 1 if gid in active_groups else 0
+                fh.write("%d %d %d\n" % (gid, total_group_refl_counts[gid], refined))
+    else:
+        active_groups = None
+    launcher.panel_groups_refined = COMM.bcast(active_groups)
 
     # same on every rank:
     det_params = DetectorParameters(params, launcher.panel_groups_refined, launcher.n_panel_groups)
@@ -928,7 +975,10 @@ def geom_min(params):
     lbfgs_kws = {"jac": target.jac,
                  "method": "L-BFGS-B",
                  "args": fcn_args,
-                 "options":  {"ftol": params.ftol, "gtol": 1e-10, "maxfun":1e5, "maxiter":params.lbfgs_maxiter}}
+                 "options":  {"ftol": params.ftol,
+                              "gtol": params.gtol,
+                              "maxfun": params.lbfgs_maxfun,
+                              "maxiter": params.lbfgs_maxiter}}
 
 
     result = basinhopping(target, target.x0[target.vary],
@@ -940,11 +990,22 @@ def geom_min(params):
                           disp=False,
                           stepsize=params.stepsize)
 
+    if COMM.rank == 0:
+        print("Basinhopping termination: %s (nit=%d, nfev=%d)"
+              % (result.message, target.iternum,
+                 getattr(result, 'nfev', -1)), flush=True)
+        lor = getattr(result, 'lowest_optimization_result', None)
+        if lor is not None:
+            print("L-BFGS-B result: %s (nit=%s, nfev=%s, fun=%.6f)"
+                  % (lor.message, lor.get('nit', '?'), lor.get('nfev', '?'),
+                     lor.fun), flush=True)
+
     target.x0[target.vary] = result.x
     Xopt = target.x0  # optimized, rescaled parameters
 
     if params.geometry.optimized_results_tag is not None:
-        write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)
+        _, rank_df = write_output_files(Xopt, LMP, launcher.Modelers, launcher.SIM, params)
+        _save_combined_opt_pkl(rank_df, params)
 
     if COMM.rank == 0:
         save_opt_det(params, target.x0, target.ref_params, launcher.SIM)
@@ -1139,29 +1200,35 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
             scale_p = LMP["rank%d_shot%d_Scale" %(COMM.rank, i_shot)]
             scale = scale_p.get_val(Xopt[scale_p.xpos])
 
-            _,fluxes = zip(*SIM.beam.spectrum)
-            # TODO OUTPUTDEF and LAM0, LAM1
-            df= single_expt_pandas(xtal_scale=scale, Amat=new_crystal.get_A(),
-                                   ncells_abc=(Na, Nb, Nc), ncells_def=(Nd, Ne, Nf),
-                                   eta_abc=eta_abc,
-                                   diff_gamma=(np.nan, np.nan, np.nan),
-                                   diff_sigma=(np.nan, np.nan, np.nan),
-                                   detz_shift=0,
-                                   use_diffuse=params.use_diffuse_models,
-                                   gamma_miller_units=params.gamma_miller_units,
-                                   eta=np.nan,
-                                   rotXYZ=tuple(rotXYZ),
-                                   ucell_p = (a,b,c,al,be,ga),
-                                   ucell_p_init=(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan),
-                                   lam0_lam1 = lam0_lam1,
-                                   spec_file=Modeler.spec_name,
-                                   spec_stride=params.simulator.spectrum.stride,
-                                   flux=sum(fluxes), beamsize_mm=SIM.beam.size_mm,
-                                   orig_exp_name=Modeler.exper_name,
-                                   opt_exp_name=os.path.abspath(new_expt_fname),
-                                   spec_from_imageset=params.spectrum_from_imageset,
-                                   oversample=SIM.D.oversample,
-                                   opt_det=params.opt_det, stg1_refls=Modeler.refl_name, stg1_img_path=None)
+            # copy input DataFrame row, shift current vals to _init, update with optimized params
+            df_row = Modeler.pandas_table_row.copy()
+            df_row["ncells_init"] = df_row["ncells"]
+            df_row["spot_scales_init"] = df_row["spot_scales"]
+            df_row["a_init"] = df_row["a"]
+            df_row["b_init"] = df_row["b"]
+            df_row["c_init"] = df_row["c"]
+            df_row["al_init"] = df_row["al"]
+            df_row["be_init"] = df_row["be"]
+            df_row["ga_init"] = df_row["ga"]
+
+            df_row["spot_scales"] = scale
+            df_row["Amats"] = new_crystal.get_A()
+            df_row["ncells"] = (Na, Nb, Nc)
+            df_row["ncells_def"] = (Nd, Ne, Nf)
+            df_row["eta_abc"] = eta_abc
+            df_row["rotX"] = rotXYZ[0]
+            df_row["rotY"] = rotXYZ[1]
+            df_row["rotZ"] = rotXYZ[2]
+            df_row["a"] = a
+            df_row["b"] = b
+            df_row["c"] = c
+            df_row["al"] = al
+            df_row["be"] = be
+            df_row["ga"] = ga
+            df_row["lam0"] = lam0_lam1[0]
+            df_row["lam1"] = lam0_lam1[1]
+            df_row["opt_exp_name"] = os.path.abspath(new_expt_fname)
+            df = pandas.DataFrame([df_row])
             all_dfs.append(df)
 
             # optionally save the modeler file
@@ -1181,7 +1248,7 @@ def write_output_files(Xopt, LMP, Modelers, SIM, params, iternum=None):
         median_pred_offset = None
     median_pred_offset = COMM.bcast(median_pred_offset)
 
-    return median_pred_offset
+    return median_pred_offset, rank_df
 
 
 def save_opt_det(phil_params, x, ref_params, SIM):

@@ -449,6 +449,7 @@ class RefineLauncher:
                   % (i_df+1, len(exper_names), i_work+1, len(worklist))) #, flush=True)
 
             shot_modeler.PAR = PAR_from_params(self.params, expt, best=exper_dataframe)
+            shot_modeler.pandas_table_row = exper_dataframe.iloc[0].copy()
             self.Modelers[i_df] = shot_modeler  # TODO: verify that i_df as a key is ok everywhere
 
         assert self.Modelers
