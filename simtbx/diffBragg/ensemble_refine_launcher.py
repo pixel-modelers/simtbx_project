@@ -282,7 +282,8 @@ class RefineLauncher:
             exper_id = int(exper_ids[i_df])
             LOGGER.info("EVENT: BEGIN loading experiment list")
             # TODO: test that the diffBragg_benchmarks is not broken
-            expt = hopper_utils.DataModeler.exper_json_single_file(exper_name, exper_id)
+            check_format = not (self.params.refiner.load_data_from_refl or self.params.load_data_from_refls)
+            expt = hopper_utils.DataModeler.exper_json_single_file(exper_name, exper_id, check_format)
             expt_list = ExperimentList()
             expt_list.append(expt)
             LOGGER.info("EVENT: DONE loading experiment list")
@@ -335,7 +336,7 @@ class RefineLauncher:
             shot_modeler.exper_idx = exper_id
             shot_modeler.refl_name = refl_name
             shot_modeler.rank = COMM.rank
-            if self.params.refiner.load_data_from_refl:
+            if self.params.refiner.load_data_from_refl or self.params.load_data_from_refls:
                 gathered = shot_modeler.GatherFromReflectionTable(expt, refls, sg_symbol=self.symbol)
             else:
                 # Note: no need to pass exper_id here because expt and refls have already been sliced out
