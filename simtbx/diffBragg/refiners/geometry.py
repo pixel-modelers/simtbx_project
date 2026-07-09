@@ -265,6 +265,12 @@ class CrystalParameters:
                                         sigma=p.sigma, center=p.center, beta=p.beta)
                 self.parameters.append(ref_p)
 
+            p = Mod.PAR.B
+            ref_p = RangedParameter(name="rank%d_shot%d_Bfactor" % (COMM.rank, i_shot),
+                                    minval=p.minval, maxval=p.maxval, fix=self.phil.fix.B, init=p.init,
+                                    sigma=p.sigma, center=p.center, beta=p.beta)
+            self.parameters.append(ref_p)
+
 
 def hkl_vary_flags(SIM):
     num_fhkl_param = SIM.Num_ASU*SIM.num_Fhkl_channels
@@ -468,6 +474,12 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
                         Ne.get_val(x[Ne.xpos]),
                         Nf.get_val(x[Nf.xpos]))
 
+    # per-image B-factor
+    Bfac_key = "rank%d_shot%d_Bfactor" % (COMM.rank, i_shot)
+    if Bfac_key in ref_params:
+        Bfac_param = ref_params[Bfac_key]
+        SIM.D.Bfactor_image = Bfac_param.get_val(x[Bfac_param.xpos])
+
     npix = int(len(Modeler.pan_fast_slow)/3.)
 
     # calculate the forward Bragg scattering and gradients
@@ -591,6 +603,15 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
             d = uc_p.get_deriv(x[uc_p.xpos], d)
             d = convolve_model_with_psf(d, **conv_args)
             J[ucell_pars[i_ucell].name] = (common_grad_term*d)[Modeler.all_trusted].sum()
+
+    # B-factor gradient
+    Bfac_key = "rank%d_shot%d_Bfactor" % (COMM.rank, i_shot)
+    if Bfac_key in ref_params and not ref_params[Bfac_key].fix:
+        Bfac_param = ref_params[Bfac_key]
+        d = scale * SIM.D.get_Bfactor_derivative_pixels().as_numpy_array()[:npix]
+        d = Bfac_param.get_deriv(x[Bfac_param.xpos], d)
+        d = convolve_model_with_psf(d, **conv_args)
+        J[Bfac_param.name] = (common_grad_term * d)[Modeler.all_trusted].sum()
 
     if not lam0.fix:
         lambda_derivs = SIM.D.get_lambda_derivative_pixels()
@@ -960,6 +981,8 @@ def geom_min(params):
     if not params.fix.ucell:
         for i_ucell in range(launcher.SIM.num_ucell_param):
             launcher.SIM.D.refine(hopper_utils.UCELL_ID_OFFSET + i_ucell)
+    if not params.fix.B:
+        launcher.SIM.D.refine(hopper_utils.BFACTOR_ID)
     for i, diffbragg_id in enumerate(PAN_OFS_IDS):
         if not params.geometry.fix.panel_rotations[i]:
             launcher.SIM.D.refine(diffbragg_id)

@@ -2298,7 +2298,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     for name, val in restraint_terms.items():
         if val > 0:
             frac_total = val / f *100.
-            restraint_debug_s += "%s: %.2f%%; " % (name, frac_total)
+            restraint_debug_s += "%s: %.4f%%; " % (name, frac_total)
 
     # fractions of the target function
     g = None  # gradient vector
