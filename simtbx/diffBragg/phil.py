@@ -6,6 +6,12 @@ from iotbx.phil import parse
 #'''
 
 hopper_phil = """
+exp_key = exp_name
+  .type = str
+  .help = name of experiment name col in input pandas pkl
+exp_idx_key = exp_idx
+  .type = str
+  .help = name of experiment index col in input pandas pkl
 save_perRoiScale = True
   .type = bool
   .help = "Save the scale factors refined for each reflection"

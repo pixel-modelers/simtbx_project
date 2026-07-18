@@ -490,7 +490,7 @@ if __name__=="__main__":
                 Rindexed['miller_index'] = updated_hkl
                 Rindexed = Rindexed.select(wave_sel)
             else:
-                _, SIM = model_out
+                (_, SIM),_ = model_out
                 utils.refls_to_hkl(Rindexed, data_expt.detector, data_expt.beam, data_expt.crystal, update_table=True)
             hopper_utils.free_SIM_mem(SIM)
 
