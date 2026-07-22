@@ -737,7 +737,10 @@ class HiAsu(object):
         hi_asu_possible_counts_ = [hi_asu_counter_[k] for k in self.possible]
         hi_asu_possible_counts_ = np.array(hi_asu_possible_counts_, dtype=np.uint16)
         hi_asu_possible_counts = np.zeros_like(hi_asu_possible_counts_, dtype=np.uint16)
-        COMM.Allreduce(hi_asu_possible_counts_, hi_asu_possible_counts, op=MPI.SUM)
+        if not hasattr(COMM, "Allreduce"):
+            hiasu_possible_counts = hi_asu_possible_counts_ 
+        else:
+            COMM.Allreduce(hi_asu_possible_counts_, hi_asu_possible_counts, op=MPI.SUM)
         return hi_asu_possible_counts
 
     @property

@@ -1584,9 +1584,14 @@ class DataModeler:
                             per_refl_variance_s[ref_idx] = scale_var
                             if "miller_index" in new_refls:
                                 h,k,l = new_refls["miller_index"][ref_idx]
-                                Famp = Fp1_map[(h,k,l)]
-                                I_hkl = (Famp**2) *scale
-                                Ivar_hkl = (I_hkl/scale)**2 * scale_var
+                                if (h,k,l) not in Fp1_map:
+                                  #from IPython import embed;embed()
+                                  I_hkl = -1
+                                  Ivar_hkl = -1
+                                else:
+                                  Famp = Fp1_map[(h,k,l)]
+                                  I_hkl = (Famp**2) *scale
+                                  Ivar_hkl = (I_hkl/scale)**2 * scale_var
                                 per_refl_dbI[ref_idx] = I_hkl
                                 per_refl_dbIvar[ref_idx] = Ivar_hkl
 

@@ -15,7 +15,10 @@ HOST_MAP = None
 if COMM.rank==0:
     HOST_MAP = {HOST:i for i,HOST in enumerate(set(unique_hosts))}
 HOST_MAP = COMM.bcast(HOST_MAP)
-HOST_COMM = COMM.Split(color=HOST_MAP[HOST])
+if not hasattr(COMM, "Split"):
+  HOST_COMM = HOST
+else:
+  HOST_COMM = COMM.Split(color=HOST_MAP[HOST])
 
 
 LEVELS = {"low": logging.WARNING, "normal": logging.INFO, "high": logging.DEBUG}
@@ -42,7 +45,11 @@ def _make_logger(loggername, filename=None, formatter=None, level=None, overwrit
         if COMM.rank == 0 and overwrite and os.path.exists(filename):
             os.remove(filename)
         COMM.barrier()
-        handler = MPIFileHandler(filename, comm=HOST_COMM)
+        if not hasattr(COMM,"Split"):
+          handler = logging.FileHandler(filename)
+        else:
+          exit()
+          handler = MPIFileHandler(filename, comm=HOST_COMM)
     else:
         handler = logging.StreamHandler()
     if formatter is not None:
@@ -122,7 +129,14 @@ class MPIFileHandler(logging.StreamHandler):
     # The class is from https://gist.github.com/sixy6e/ed35ea88ba0627e0f7dfdf115a3bf4d1
 
     def __init__(self, filename,
-                 mode=MPI.MODE_WRONLY|MPI.MODE_CREATE, comm=MPI.COMM_WORLD):
+                 mode=None, comm=MPI.COMM_WORLD):
+        if mode is None:
+          try:
+            mode=MPI.MODE_WRONLY|MPI.MODE_CREATE
+          except:
+            mode=None
+        else:
+          mode=mode
         self.filename = filename
         self.mode = mode
         self.comm = comm

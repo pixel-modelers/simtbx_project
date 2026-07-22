@@ -871,16 +871,16 @@ def geom_min(params):
     from simtbx.diffBragg import mpi_logger
     mpi_logger.setup_logging_from_params(params)
     df.reset_index(drop=True, inplace=True)
-    #if "geom_exp" not in df:
-    #    exps,refs, exp_idxs = [],[],[]
-    #    for line in df.hopper_line:
-    #        exp, ref, exp_idx, spec = hopper_utils.split_line(line)
-    #        exps.append(exp)
-    #        refs.append(ref)
-    #        exp_idxs.append(exp_idx)
-    #    df["geom_exp"] = exps
-    #    df["geom_exp_idx"] = exp_idxs
-    #    df["geom_ref"] = refs
+    if "geom_exp" not in df:
+        exps,refs, exp_idxs = [],[],[]
+        for line in df.hopper_line:
+            exp, ref, exp_idx, spec = hopper_utils.split_line(line)
+            exps.append(exp)
+            refs.append(ref)
+            exp_idxs.append(exp_idx)
+        df["geom_exp"] = exps
+        df["geom_exp_idx"] = exp_idxs
+        df["geom_ref"] = refs
     df, work_distribution = prep_dataframe(df, res_ranges_string=params.refiner.res_ranges, refls_key="geom_ref",
                                            exp_idx_key="geom_exp_idx", exp_key="geom_exp")
     launcher.load_inputs(df, refls_key="geom_ref", exp_key="geom_exp",

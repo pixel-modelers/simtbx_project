@@ -46,7 +46,7 @@ init {{
   eta_abc = [{ea},{eb},{ec}]
 }}
 centers {{
-  Nvol = {nvol}
+  #Nvol = {nvol}
   ucell_a = {a}
   ucell_b = {b}
   ucell_c = {c}
@@ -55,7 +55,7 @@ centers {{
   ucell_gamma = {ga}
 }}
 betas {{
-  Nvol = 1e-2
+  #Nvol = 1e-2
   ucell_a = 1e-7
   ucell_b = 1e-7
   ucell_c = 1e-7

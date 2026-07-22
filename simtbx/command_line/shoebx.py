@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 from __future__ import division
 
+
 # LIBTBX_SET_DISPATCHER_NAME diffBragg.shoebx
 
 from pylab import *
-
+mpl.style.use("ggplot")
 from argparse import ArgumentParser
 parser = ArgumentParser()
 parser.add_argument("modeler_file", type=str, help="path to a diffBragg modeler file (output from hopper, see the imgs folder in the outdir)")
 parser.add_argument("--scroll", action="store_true", help="if provided, scroll through shoeboxes one-by-one using arrow keys")
 parser.add_argument("--stateFile", type=str, help="Optional path to the roi checker file (requires pytorch). Will be used to label rois as good/bad fits", default=None)
+parser.add_argument("--scoreOnlyFile", type=str, default=None, help="if passed, only score data/model pairs and write to a text file")
 args = parser.parse_args()
 
 
@@ -89,11 +91,30 @@ if not args.scroll:
         for d,m in zip(data_subimg, model_subimg):
             score = checker.score(d,m)
             scores.append(score)
+        print(scores)
         #scores = checker.score(data_subimg, model_subimg)
 
     except Exception as err:
         print(str(err))
         pass
+    if args.scoreOnlyFile is not None:
+        if scores is None:
+            raise RuntimeError("scores were not found, import must have failed is score_trainer installed? See https://github.com/pixel-modelers/score_trainer.git ")
+        p,x,y=stats["spot_pid_and_cent"].T
+        h,k,l = zip(*stats["spot_hkl"])
+        sigZ_vals = []
+        for mod_idx in range(len(model_subimg)):
+            im = model_subimg[mod_idx].copy()
+            dat_im = data_subimg[mod_idx].copy()
+            trust_im = trusted_subimg[mod_idx].copy()
+            bragg_im = bragg_subimg[mod_idx].copy()
+            Z = (im - dat_im) / np.sqrt(im + sigma_rdout ** 2)
+            sigmaZ = Z[trust_im].std()
+            sigZ_vals.append(sigmaZ)
+        data = np.array(list(zip(scores, sigZ_vals,stats["spot_d"],h,k,l,p,x,y)))
+        np.savetxt(args.scoreOnlyFile, data, fmt=("%.4f", "%.2f", "%2.3f", "%3.0f", "%3.0f", "%3.0f", "%2.0f", "%4.0f", "%4.0f"), header="score,sigZ,reso_Ang,h,k,l,p,x,y", delimiter=',')
+        
+        exit()
 
     sub_sh = tuple(np.max([im.shape for im in model_subimg], axis=0))
     size_edg = int(np.sqrt(len(data_subimg))) + 1
