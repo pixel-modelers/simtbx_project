@@ -29,6 +29,94 @@ from simtbx.diffBragg.attr_list import NB_BEAM_ATTRS, NB_CRYST_ATTRS, DIFFBRAGG_
 from simtbx.diffBragg import psf
 from itertools import groupby
 
+
+def _rot_matrix_and_deriv(rotX, rotY, rotZ):
+    """Compute R = Rx*Ry*Rz and dR/d(rotX), dR/d(rotY), dR/d(rotZ).
+    Axes are (-1,0,0), (0,-1,0), (0,0,-1) per diffBragg convention."""
+    cx, sx = np.cos(rotX), np.sin(rotX)
+    cy, sy = np.cos(rotY), np.sin(rotY)
+    cz, sz = np.cos(rotZ), np.sin(rotZ)
+
+    Rx = np.array([[1, 0, 0], [0, cx, sx], [0, -sx, cx]])
+    Ry = np.array([[cy, 0, -sy], [0, 1, 0], [sy, 0, cy]])
+    Rz = np.array([[cz, sz, 0], [-sz, cz, 0], [0, 0, 1]])
+
+    dRx = np.array([[0, 0, 0], [0, -sx, cx], [0, -cx, -sx]])
+    dRy = np.array([[-sy, 0, -cy], [0, 0, 0], [cy, 0, -sy]])
+    dRz = np.array([[-sz, cz, 0], [-cz, -sz, 0], [0, 0, 0]])
+
+    RyRz = Ry @ Rz
+    R = Rx @ RyRz
+    return R, dRx @ RyRz, Rx @ dRy @ Rz, Rx @ Ry @ dRz
+
+
+def domain_rotation_restraint(x, mod, beta):
+    """Compute rotation-distance restraint: penalize each domain's total
+    orientation deviating from the nominal indexed orientation U0.
+
+    penalty_i = (3 - trace(R_i * K_i)) / (2 * beta)
+    where K_i = U_fan_i * U0^T (constant per domain)
+    and R_i = Rx(rotX_i) * Ry(rotY_i) * Rz(rotZ_i)
+
+    (3 - trace) / 2 = 1 - cos(theta) ≈ theta^2/2 for small theta.
+
+    Returns (total_penalty, grad_dict) where grad_dict maps xpos -> gradient contribution.
+    """
+    U0_inv = np.array(mod.U0_nominal.inverse()).reshape(3, 3)
+    total_penalty = 0.0
+    grad_dict = {}
+
+    for i_xtal in range(mod.num_xtals):
+        RotXYZ_params = [mod.P["RotXYZ%d_xtal%d" % (i, i_xtal)] for i in range(3)]
+        rotX, rotY, rotZ = [p.get_val(x[p.xpos]) for p in RotXYZ_params]
+
+        K = np.array(mod.Umatrices[i_xtal]).reshape(3, 3) @ U0_inv
+        R, dR_drotX, dR_drotY, dR_drotZ = _rot_matrix_and_deriv(rotX, rotY, rotZ)
+
+        trace_RK = np.trace(R @ K)
+        total_penalty += (3.0 - trace_RK) / (2.0 * beta)
+
+        # gradient: d/d(rotI) [ (3 - tr(R*K)) / (2*beta) ] = -tr(dR/d(rotI) * K) / (2*beta)
+        for dR, p in zip([dR_drotX, dR_drotY, dR_drotZ], RotXYZ_params):
+            if p.refine:
+                raw_grad = -np.trace(dR @ K) / (2.0 * beta)
+                # chain rule through reparameterization
+                grad_dict[p.xpos] = p.get_deriv(x[p.xpos], np.array([raw_grad]))[0]
+
+    return total_penalty, grad_dict
+
+
+def fan_out_Umatrices(U0, n_domains, spread_deg, seed=None):
+    """Generate n_domains slightly misoriented U matrices by fan-out from U0.
+
+    Uses random rotation axes on the unit sphere with rotation angles
+    drawn uniformly within a cone of half-angle `spread_deg`.
+
+    Args:
+        U0: tuple of 9 floats (3x3 U matrix, row-major) from crystal.get_U()
+        n_domains: number of domains (including the original)
+        spread_deg: cone half-angle in degrees
+        seed: optional random seed for reproducibility
+
+    Returns:
+        list of n_domains U matrices (as scitbx.matrix.sqr)
+    """
+    U0 = sqr(U0)
+    if n_domains <= 1:
+        return [U0]
+
+    rng = np.random.RandomState(seed)
+    Umats = [U0]
+    for _ in range(n_domains - 1):
+        # random axis on unit sphere
+        axis = rng.randn(3)
+        axis /= np.linalg.norm(axis)
+        # random angle within cone
+        angle_deg = rng.uniform(0, spread_deg)
+        R = col(axis).axis_and_angle_as_r3_rotation_matrix(angle_deg, deg=True)
+        Umats.append(R * U0)
+    return Umats
+
 try:
     from line_profiler import LineProfiler
 except ImportError:
@@ -862,8 +950,10 @@ class DataModeler:
         fix = self.params.fix
         types = self.params.types
         P = Parameters()
+        print("SAUSAGE_DEBUG hopper_utils.set_parameters_for_experiment: self.num_xtals=%d" % self.num_xtals, flush=True)
         if self.params.init.random_Gs is not None:
             init.G = np.random.choice(self.params.init.random_Gs)
+        shared_G = getattr(self.params, 'shared_spot_scale', False) and self.num_xtals > 1
         for i_xtal in range(self.num_xtals):
             for ii in range(3):
 
@@ -874,7 +964,10 @@ class DataModeler:
                                   beta=betas.RotXYZ)
                 P.add(p)
 
-            p = ParameterTypes[types.G](init=init.G + init.G*0.01*i_xtal, sigma=sigma.G,
+            if shared_G and i_xtal > 0:
+                continue  # only one G param when shared
+            G_init_xtal = init.G / self.num_xtals if self.num_xtals > 1 else init.G
+            p = ParameterTypes[types.G](init=G_init_xtal + G_init_xtal*0.01*i_xtal, sigma=sigma.G,
                               minval=mins.G, maxval=maxs.G,
                               fix=fix.G, name="G_xtal%d" %i_xtal,
                               center=centers.G, beta=betas.G)
@@ -1098,8 +1191,9 @@ class DataModeler:
 
         for name in self.P:
             p = self.P[name]
-            if (p.beta is not None and p.center is None) or (p.center is not None and p.beta is None):
+            if p.center is not None and p.beta is None:
                 raise RuntimeError("To use restraints, must specify both center and beta for param %s" % name)
+            # beta without center is OK: restraint_center falls back to init
 
     def get_data_model_pairs(self, reorder=False, return_stats=False):
         """
@@ -1895,6 +1989,9 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
             slc = Mod.roi_id_slices[roi_id][0]
             Mod.roiScalesPerPix[slc] = perRoiScaleFactors[i_roi]
 
+    if not hasattr(Mod, '_sausage_debug_printed'):
+        print("SAUSAGE_DEBUG model(): Mod.num_xtals=%d, hasattr(Umatrices)=%s" % (Mod.num_xtals, hasattr(Mod, 'Umatrices')), flush=True)
+        Mod._sausage_debug_printed = True
     for i_xtal in range(Mod.num_xtals):
 
         if hasattr(Mod, "Umatrices"):  # reflects new change for modeling multi-crystal experiments
@@ -1919,7 +2016,8 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
             SIM.D.set_mosaic_blocks_sym(Cryst, symbol , Mod.params.simulator.crystal.num_mosaicity_samples,
                                         refining_eta=not Mod.params.fix.eta_abc)
 
-        G = Mod.P["G_xtal%d" % i_xtal]
+        g_idx = 0 if getattr(Mod.params, 'shared_spot_scale', False) else i_xtal
+        G = Mod.P["G_xtal%d" % g_idx]
         scale = G.get_val(x[G.xpos])
 
         SIM.D.add_diffBragg_spots(pfs)
@@ -2054,7 +2152,8 @@ def look_at_x(x, Mod):
 
 
 def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
-    G = Mod.P['G_xtal%d' %i_xtal]
+    g_idx = 0 if getattr(Mod.params, 'shared_spot_scale', False) else i_xtal
+    G = Mod.P['G_xtal%d' % g_idx]
     scale = G.get_val(x[G.xpos])
 
     RotXYZ = [Mod.P["RotXYZ%d_xtal%d" % (i, i_xtal)] for i in range(3)]
@@ -2293,6 +2392,13 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
             fhkl_grad_channels[i_chan] = fhkl_restraint_grad
             restraint_terms["Fhkl_chan%d"% i_chan] = fhkl_restraint_f
 
+    # Domain rotation restraint: penalize domains drifting far from nominal indexed orientation
+    domain_rot_grad = {}
+    beta_domain_rot = getattr(params.betas, 'domain_rotation', None)
+    if beta_domain_rot is not None and hasattr(mod, 'U0_nominal') and mod.num_xtals > 1:
+        rot_penalty, domain_rot_grad = domain_rotation_restraint(x, mod, beta_domain_rot)
+        restraint_terms["domain_rot"] = rot_penalty
+
 #   accumulate target function
     f_restraints = 0
     if restraint_terms:
@@ -2389,6 +2495,11 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                     gterm = -del_Nvol / params.betas.Nvol * dVol_dN
                     g[p.xpos] += p.get_deriv(x[p.xpos], gterm)
 
+        # domain rotation restraint gradient
+        if domain_rot_grad:
+            for xpos, grad_val in domain_rot_grad.items():
+                g[xpos] += grad_val
+
         if SIM.refining_Fhkl:
             spot_scale_p = mod.P["G_xtal0"]
             G = spot_scale_p.get_val(x[spot_scale_p.xpos])
@@ -2428,8 +2539,28 @@ def refine(exp, ref, params, spec=None, gpu_device=None, return_modeler=False, b
     else:
         assert Modeler.GatherFromExperiment(exp, ref, sg_symbol=params.space_group)
 
+    # Blue sausage fan-out: set num_xtals before set_parameters_for_experiment
+    # so that per-domain RotXYZ and G params are created
+    n_xtals = getattr(params, 'number_of_xtals', 1)
+    if n_xtals > 1:
+        Modeler.num_xtals = n_xtals
+
     SIM = get_simulator_for_data_modelers(Modeler)
     Modeler.set_parameters_for_experiment(best=best)
+
+    # Fan-out Umatrices after params are set
+    if n_xtals > 1:
+        spread = getattr(params, 'domain_spread', None)
+        U0 = Modeler.E.crystal.get_U()
+        Modeler.U0_nominal = sqr(U0)  # store indexed orientation for rotation restraints
+        if spread is not None and spread > 0:
+            Modeler.Umatrices = fan_out_Umatrices(U0, n_xtals, spread)
+        else:
+            # no spread: all domains start at the same orientation
+            Modeler.Umatrices = [sqr(U0)] * n_xtals
+    else:
+        Modeler.Umatrices = [sqr(Modeler.E.crystal.get_U())]
+
     SIM.D.device_Id = gpu_device
 
     nparam = len(Modeler.P)

@@ -73,13 +73,17 @@ if __name__ == "__main__":
     # end of phil stuff ========
 
     write_commandline(params)
+    print("HERE2")
 
     if params.logging.disable:
         logging.disable(level=logging.CRITICAL)  # disables CRITICAL and below
     else:
         mpi_logger.setup_logging_from_params(params)
+    print("HERE2")
+
 
     df = pandas.read_pickle(args.input)
+    print("HERE", len(df))
 
     if params.skip is not None:
         df = df.iloc[params.skip:]
@@ -108,6 +112,7 @@ if __name__ == "__main__":
     modelers.save_freq = args.saveFreq
 
     modelers.prep_for_refinement()
+    print("HERE!")
 
     with DeviceWrapper(modelers.SIM.D.device_Id) as _:
         modelers.alloc_max_pix_per_shot()

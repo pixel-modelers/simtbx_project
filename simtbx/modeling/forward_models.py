@@ -106,6 +106,9 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
     if Ncells_abc_override is not None:
         Ncells_abc = Ncells_abc_override
     Ncells_def = df.ncells_def.values[0]
+    bfactor = 0
+    if "Bfactor" in columns:
+        bfactor = df.Bfactor.values[0]
     spot_scale = df.spot_scales.values[0]
     beamsize_mm = df.beamsize_mm.values[0]
     total_flux = df.total_flux.values[0]
@@ -189,6 +192,13 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
             delta_phi = df.osc_deg.values[0]
             phisteps = df.phisteps.values[0]
             spindle_axis = df.gonio_axis.values[0]
+        # Check for multi-domain (blue sausage) model
+        has_sausage = ("other_Umats" in columns
+                       and df.other_Umats.values[0] is not None
+                       and len(df.other_Umats.values[0]) > 0)
+        # Need SIM handle to run additional domains
+        _return_sim = return_sim or has_sausage
+
         results = diffBragg_forward(CRYSTAL=expt.crystal, DETECTOR=expt.detector, BEAM=expt.beam, Famp=Famp,
                                     fluxes=fluxes, energies=energies, beamsize_mm=beamsize_mm,
                                     Ncells_abc=Ncells_abc, spot_scale_override=spot_scale,
@@ -202,9 +212,57 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
                                     show_timings=show_timings,
                                     perpixel_wavelen=perpixel_wavelen,
                                     det_thicksteps=det_thicksteps, Ncells_def=Ncells_def,
-                                    no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi, 
-                                    num_phi_steps=phisteps, return_sim=return_sim,
-                                    spindle_axis=spindle_axis)
+                                    no_Nabc_scale=no_Nabc_scale, delta_phi=delta_phi,
+                                    num_phi_steps=phisteps, return_sim=_return_sim,
+                                    spindle_axis=spindle_axis,
+                                    bfactor=bfactor)
+
+        if has_sausage:
+            from scitbx.matrix import sqr as matrix_sqr
+            other_Umats = df.other_Umats.values[0]
+            other_spotscales = df.other_spotscales.values[0]
+            G0 = spot_scale
+
+            # Unpack primary domain results
+            if perpixel_wavelen:
+                prim_data, wavelen_data, hdata, kdata, ldata, S = results
+            else:
+                prim_data, S = results
+
+            accumulated = prim_data.copy()
+            img_shape = prim_data.shape
+
+            # Disable HKL tracking for additional domains (already captured from primary)
+            S.D.store_ave_wavelength_image = False
+
+            for Umat_tuple, dom_scale in zip(other_Umats, other_spotscales):
+                ratio = dom_scale / G0
+                S.D.raw_pixels_roi *= 0
+                S.D.Umatrix = matrix_sqr(Umat_tuple)
+                S.D.add_diffBragg_spots_full()
+                dom_data = S.D.raw_pixels_roi.as_numpy_array().reshape(img_shape)
+                accumulated += ratio * dom_data
+
+            if not quiet:
+                print("Sausage prediction: %d domains, G0=%.4f" % (1 + len(other_Umats), G0))
+
+            # Repack results with accumulated data
+            if perpixel_wavelen:
+                results = (accumulated, wavelen_data, hdata, kdata, ldata, S)
+            else:
+                results = (accumulated, S)
+
+            # If caller didn't ask for SIM, free it now
+            if not return_sim:
+                S.D.free_all()
+                S.D.free_Fhkl2()
+                if S.D.gpu_free is not None:
+                    S.D.gpu_free()
+                if perpixel_wavelen:
+                    results = (accumulated, wavelen_data, hdata, kdata, ldata)
+                else:
+                    results = accumulated
+
         return results, expt
 
     else:
@@ -239,7 +297,8 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                       det_thicksteps=None, eta_abc=None, Ncells_def=None,
                       num_phi_steps=1, delta_phi=None, div_mrad=0, divsteps=0,
                       spindle_axis=None, fudge=1, no_Nabc_scale=False,
-                      return_sim=False, spread_data=None):
+                      return_sim=False, spread_data=None,
+                      bfactor=0):
     if spread_data is not None:
         assert isinstance(spread_data, dict)
         assert all(k in spread_data for k in ("atoms", "fprime", "fdblprime"))
@@ -314,6 +373,8 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
     if spread_data is not None:
         S.D.heavy_atom_data = spread_data["atoms"]
         S.D.fprime_fdblprime = spread_data["fprime"], spread_data["fdblprime"]
+    if bfactor != 0:
+        S.D.Bfactor_image = bfactor
     S.D.add_diffBragg_spots_full()
     #if show_timings or LOGGER.level <= 10:
     #    S.D.show_timings()

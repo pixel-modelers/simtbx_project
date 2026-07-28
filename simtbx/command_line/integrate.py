@@ -24,6 +24,9 @@ def get_args():
     parser.add_argument("--weakFracs", nargs="+", default=[.3, .6, .9], type=float, help="weak fraction amounts to scan, will save a unique refl table for each one")
     parser.add_argument("--maxProcess", type=int,default=-1, help="maximum number of shots to process before program termination")
     parser.add_argument("--raiseErrors", action="store_true")
+    parser.add_argument("--useHklShoeboxes", action="store_true",
+                        help="Group pixels by predicted HKL to define shoeboxes instead of peak detection. "
+                             "Handles split/elongated peaks from multi-domain crystals.")
 
     args = parser.parse_args()
     return args
@@ -321,6 +324,9 @@ if __name__=="__main__":
 
     params = utils.get_extracted_params_from_phil_sources(args.predPhil, args.cmdlinePhil)
 
+    if args.useHklShoeboxes:
+        params.predictions.use_hkl_shoeboxes = True
+
     # inputGlob can be a glob in strings, a single pandas file, or a hopper output folder
     if os.path.isfile(args.inputGlob) or os.path.isdir(args.inputGlob):
         if os.path.isfile(args.inputGlob):
@@ -489,6 +495,10 @@ if __name__=="__main__":
                 Rindexed['rlp'] /= Rindexed['ave_wavelen']
                 Rindexed['miller_index'] = updated_hkl
                 Rindexed = Rindexed.select(wave_sel)
+            elif params.predictions.use_hkl_shoeboxes:
+                # perpixel_wavelen was enabled for HKL grouping; unpack the 6-tuple
+                (_, _, _, _, _, SIM), _ = model_out
+                utils.refls_to_hkl(Rindexed, data_expt.detector, data_expt.beam, data_expt.crystal, update_table=True)
             else:
                 (_, SIM),_ = model_out
                 utils.refls_to_hkl(Rindexed, data_expt.detector, data_expt.beam, data_expt.crystal, update_table=True)

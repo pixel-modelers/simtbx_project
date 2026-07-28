@@ -295,6 +295,9 @@ betas
   Fhkl = None
     .type = float
     .help = restraint factor for structure factor intensity scales
+  domain_rotation = None
+    .type = float
+    .help = restraint factor penalizing rotation distance of each domain from the nominal (indexed) orientation. Smaller values = tighter restraint. Only active when number_of_xtals > 1.
 }
 dual
   .help = configuration parameters for dual annealing
@@ -414,6 +417,14 @@ opt_beam = None
 number_of_xtals = 1
   .type = int
   .help = number of crystal domains to model per shot
+  .expert_level=10
+domain_spread = None
+  .type = float
+  .help = fan-out spread in degrees for blue sausage domains (cone half-angle). If set and number_of_xtals > 1, auto-generates slightly misoriented Umatrices from the indexed crystal.
+  .expert_level=10
+shared_spot_scale = False
+  .type = bool
+  .help = if True and number_of_xtals > 1, all crystal domains share a single scale factor G (instead of independent G per domain)
   .expert_level=10
 sanity_test_input = True
   .type = bool
@@ -562,7 +573,7 @@ mins
   G = 0
     .type = float
     .help = min for scale G
-  B = 0
+  B = -100
     .type = float
     .help = min for Bfactor
   Fhkl = 0
@@ -606,7 +617,7 @@ maxs
   G = 1e12
     .type = float
     .help = max for scale G
-  B = 1e3
+  B = 200
     .type = float
     .help = max for Bfactor
   eta_abc = [10,10,10]
@@ -1069,6 +1080,9 @@ refiner {
   refine_Nabc = False
     .type = bool
     .help = whether to refine the mosaic domain size tensor
+  refine_Bfactor = False
+    .type = bool
+    .help = whether to refine per-shot B-factor during stage2
   gain_restraint=None
     .type = floats(size=2)
     .help = "if not None, apply a gain restraint to the data"
@@ -1435,6 +1449,18 @@ predictions {
   mosaic_samples_override = None
     .type = int
     .help = Specify the number of mosaic spread samples
+  use_hkl_shoeboxes = False
+    .type = bool
+    .help = Group pixels by predicted HKL to define shoeboxes instead of peak detection. Handles split or elongated peaks from multi-domain crystals.
+    .expert_level=10
+  hkl_shoebox_padding = 5
+    .type = int
+    .help = Padding in pixels around HKL-grouped bounding box
+    .expert_level=10
+  hkl_tolerance = 0.3
+    .type = float
+    .help = Maximum fractional HKL deviation for a pixel to be included in an HKL shoebox group
+    .expert_level=10
 }
 """
 

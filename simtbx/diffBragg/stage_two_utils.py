@@ -209,7 +209,8 @@ def PAR_from_params(params, experiment, best=None):
                                    maxval=params.maxs.detz_shift*1e-3, fix=params.fix.detz_shift,
                                    center=params.centers.detz_shift, beta=params.betas.detz_shift)
 
-    PAR.B = ParameterType(init=params.init.B, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=True,
+    initB = params.init.B if best is None or "Bfactor" not in list(best) else best.Bfactor.values[0]
+    PAR.B = ParameterType(init=initB, sigma=params.sigmas.B, minval=params.mins.B, maxval=params.maxs.B, fix=params.fix.B,
                           center=params.centers.B, beta=params.betas.B)
 
     lam0, lam1 = params.init.spec
@@ -223,6 +224,19 @@ def PAR_from_params(params, experiment, best=None):
                           fix=params.fix.spec,
                           minval=params.mins.spec[i_p], maxval=params.maxs.spec[i_p])
         PAR.spec_coef.append(p)
+
+    # Multi-domain (blue sausage): load other Umats and scales from stage1 pandas
+    if best is not None and "other_Umats" in list(best) and best.other_Umats.values[0] is not None:
+        other_Umats = best.other_Umats.values[0]
+        other_scales = best.other_spotscales.values[0]
+        PAR.other_Umats = [sqr(U) for U in other_Umats]
+        # sqrt the other scales to match the sqrt applied to PAR.Scale.init
+        # in stage_two_refiner.__init__ (line 107). This ensures ratio_sq = (dom/G0)^2
+        # computes G_i/G_0 correctly when both are in sqrt-space.
+        PAR.other_spotscales = [np.sqrt(s) for s in other_scales]
+        PAR.num_xtals = 1 + len(other_Umats)
+        print("SAUSAGE_DEBUG stage2: loaded %d domains, raw_scales=%s, sqrt_scales=%s"
+              % (PAR.num_xtals, list(other_scales), PAR.other_spotscales), flush=True)
 
     return PAR
 
@@ -242,3 +256,7 @@ class StageTwoParams:
         self.PanXYZ = None
         self.diffuse_sigma = None
         self.diffuse_gamma = None
+        # Multi-domain (blue sausage)
+        self.other_Umats = None  # list of sqr U matrices for domains 1..N-1
+        self.other_spotscales = None  # list of scale factors for domains 1..N-1
+        self.num_xtals = 1

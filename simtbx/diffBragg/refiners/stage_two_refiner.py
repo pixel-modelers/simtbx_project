@@ -122,6 +122,7 @@ class StageTwoRefiner(BaseRefiner):
         self._lambda0_id = 12  # diffBragg interneal index for lambda derivatives
         self._lambda1_id = 13  # diffBragg interneal index for lambda derivatives
         self._ncells_def_id = 21
+        self._bfactor_id = 25
 
         self.symbol = sgsymbol
         self.space_group = sgtbx.space_group(sgtbx.space_group_info(symbol=self.symbol).type().hall_symbol())
@@ -265,6 +266,11 @@ class StageTwoRefiner(BaseRefiner):
         self.D.refine(self._fcell_id)
         if self.params.refiner.refine_Nabc:
             self.D.refine(self._ncells_id)
+        if self.params.refiner.refine_Bfactor:
+            self.D.refine(self._bfactor_id)
+            print("STAGE2_BFACTOR: B-factor refinement ENABLED (refine_Bfactor=True)", flush=True)
+        else:
+            print("STAGE2_BFACTOR: B-factor refinement DISABLED", flush=True)
         self.D.initialize_managers()
 
         for sid in self.shot_ids:
@@ -312,6 +318,7 @@ class StageTwoRefiner(BaseRefiner):
             for i_n, p in enumerate(Ncells_params):
                 p.xpos = self.Ncells_xstart[i_shot] + i_n
                 p.name = "%s_shot%d_rank%d" % ( names[i_n], i_shot, COMM.rank)
+            self.Modelers[i_shot].PAR.B.xpos = self.Bfactor_xpos[i_shot]
 
     def _gain_restraints(self):
         if self.params.refiner.gain_restraint:
@@ -467,12 +474,8 @@ class StageTwoRefiner(BaseRefiner):
         return val
 
     def _get_bfactor(self, i_shot):
-        xval = self.x[self.Bfactor_xpos[i_shot]]
-        PAR = self.Modelers[i_shot].PAR
-        sig = PAR.B.sigma
-        init = PAR.B.init
-        val = sig*(xval-1) + init
-        return val
+        p = self.Modelers[i_shot].PAR.B
+        return p.get_val(self.x[p.xpos])
 
     def _get_bg_vals(self, i_shot, i_spot):
         pass
@@ -483,12 +486,61 @@ class StageTwoRefiner(BaseRefiner):
 
     def _run_diffBragg_current(self):
         LOGGER.info("run diffBragg for shot %d" % self._i_shot)
+        PAR = self.Modelers[self._i_shot].PAR
         pfs = self.Modelers[self._i_shot].pan_fast_slow
-        if self.use_nominal_h:
-            nom_h_p1 = self.Modelers[self._i_shot].all_nominal_hkl_p1
-            self.D.add_diffBragg_spots(pfs, nom_h_p1)
+        npix = len(self.Modelers[self._i_shot].all_data)
+        nom_h_p1 = self.Modelers[self._i_shot].all_nominal_hkl_p1 if self.use_nominal_h else None
+
+        if PAR.num_xtals > 1:
+            # Multi-domain (blue sausage): loop over domains, accumulate raw pixels
+            # weighted by (G_i / G_0)^2 so existing scale_fac = gains * G_0^2 gives
+            # model = gains * Σ(G_i^2 * bragg_pix_i)
+            if not hasattr(self, '_sausage_debug_printed'):
+                print("SAUSAGE_DEBUG stage2 _run_diffBragg_current: num_xtals=%d, shot=%d" % (PAR.num_xtals, self._i_shot), flush=True)
+                self._sausage_debug_printed = True
+            G0 = PAR.Scale.init
+
+            # Domain 0 (primary): ratio = 1
+            self.D.Umatrix = PAR.Umatrix
+            if self.params.symmetrize_Flatt:
+                self._symmetrize_Flatt_for_Umat(PAR.Umatrix)
+            if nom_h_p1 is not None:
+                self.D.add_diffBragg_spots(pfs, nom_h_p1)
+            else:
+                self.D.add_diffBragg_spots(pfs)
+            self._sausage_model_pix = self.D.raw_pixels_roi[:npix].as_numpy_array().copy()
+
+            # Also accumulate Fhkl derivatives for domain 0
+            if self.refine_Fcell:
+                dF = self.D.get_derivative_pixels(self._fcell_id)
+                self._sausage_fcell_deriv = dF[:npix].as_numpy_array().copy()
+
+            # Domains 1..N-1
+            for Umat, dom_scale in zip(PAR.other_Umats, PAR.other_spotscales):
+                ratio_sq = (dom_scale / G0) ** 2
+                self.D.Umatrix = Umat
+                if self.params.symmetrize_Flatt:
+                    self._symmetrize_Flatt_for_Umat(Umat)
+                if nom_h_p1 is not None:
+                    self.D.add_diffBragg_spots(pfs, nom_h_p1)
+                else:
+                    self.D.add_diffBragg_spots(pfs)
+                self._sausage_model_pix += ratio_sq * self.D.raw_pixels_roi[:npix].as_numpy_array()
+                if self.refine_Fcell:
+                    dF = self.D.get_derivative_pixels(self._fcell_id)
+                    self._sausage_fcell_deriv += ratio_sq * dF[:npix].as_numpy_array()
+
+            # Restore primary Umatrix for any downstream code
+            self.D.Umatrix = PAR.Umatrix
+            if self.params.symmetrize_Flatt:
+                self._symmetrize_Flatt_for_Umat(PAR.Umatrix)
         else:
-            self.D.add_diffBragg_spots(pfs)
+            self._sausage_model_pix = None
+            self._sausage_fcell_deriv = None
+            if nom_h_p1 is not None:
+                self.D.add_diffBragg_spots(pfs, nom_h_p1)
+            else:
+                self.D.add_diffBragg_spots(pfs)
         LOGGER.info("finished diffBragg for shot %d" % self._i_shot)
 
     def _store_updated_Fcell(self):
@@ -558,6 +610,18 @@ class StageTwoRefiner(BaseRefiner):
             self.D.set_mosaic_blocks_sym(Cryst, symbol , self.params.simulator.crystal.num_mosaicity_samples,
                                         refining_eta=False) # NOTE:no eta refinement in this stage 2 script (possible in ens.hopper)
 
+    def _symmetrize_Flatt_for_Umat(self, Umat):
+        """Helper for multi-domain: symmetrize mosaic blocks for a specific Umatrix."""
+        RXYZU = hopper_io.diffBragg_Umat(0, 0, 0, Umat)
+        Cryst = deepcopy(self.S.crystal.dxtbx_crystal)
+        B_realspace = self.get_refined_Bmatrix(self._i_shot, recip=False)
+        A = RXYZU * B_realspace
+        A_recip = A.inverse().transpose()
+        Cryst.set_A(A_recip)
+        symbol = self.S.crystal.space_group_info.type().lookup_symbol()
+        self.D.set_mosaic_blocks_sym(Cryst, symbol, self.params.simulator.crystal.num_mosaicity_samples,
+                                     refining_eta=False)
+
     def _set_background_plane(self):
         self.tilt_plane = self.Modelers[self._i_shot].all_background[self.roi_sel]
 
@@ -584,19 +648,30 @@ class StageTwoRefiner(BaseRefiner):
 
     def _pre_extract_deriv_arrays(self):
         npix = len(self.Modelers[self._i_shot].all_data)
-        self._model_pix = self.D.raw_pixels_roi[:npix].as_numpy_array()
 
-        if self.refine_Fcell:
-            dF = self.D.get_derivative_pixels(self._fcell_id)
-            self._extracted_fcell_deriv = dF[:npix].as_numpy_array()
-            if self.calc_curvatures:
-                d2F = self.D.get_second_derivative_pixels(self._fcell_id)
-                self._extracted_fcell_second_deriv = d2F[:npix].as_numpy_array()
+        if self._sausage_model_pix is not None:
+            # Multi-domain: use pre-accumulated weighted sum from _run_diffBragg_current
+            self._model_pix = self._sausage_model_pix
+            if self.refine_Fcell:
+                self._extracted_fcell_deriv = self._sausage_fcell_deriv
+                if self.calc_curvatures:
+                    raise NotImplementedError("curvatures not implemented for multi-domain")
+        else:
+            self._model_pix = self.D.raw_pixels_roi[:npix].as_numpy_array()
+            if self.refine_Fcell:
+                dF = self.D.get_derivative_pixels(self._fcell_id)
+                self._extracted_fcell_deriv = dF[:npix].as_numpy_array()
+                if self.calc_curvatures:
+                    d2F = self.D.get_second_derivative_pixels(self._fcell_id)
+                    self._extracted_fcell_second_deriv = d2F[:npix].as_numpy_array()
 
         if self.params.refiner.refine_Nabc:
             self.dNabc = [d[:npix].as_numpy_array() for d in self.D.get_ncells_derivative_pixels()]
             if self.calc_curvatures:
                 raise NotImplementedError("update the code")
+
+        if self.params.refiner.refine_Bfactor:
+            self._dB = self.D.get_Bfactor_derivative_pixels()[:npix].as_numpy_array()
 
     def _extract_sausage_derivs(self):
         pass
@@ -725,6 +800,9 @@ class StageTwoRefiner(BaseRefiner):
             self.scale_fac = gains*self._get_spot_scale(self._i_shot)**2
 
             self.b_fac = self._get_bfactor(self._i_shot)
+            self.D.Bfactor_image = self.b_fac
+            if self._i_shot == self.shot_ids[0] and self.iterations < 2:
+                print("STAGE2_BFACTOR: shot=%d B=%.4f (set on D.Bfactor_image)" % (self._i_shot, self.b_fac), flush=True)
 
             # TODO: Omatrix update? All crystal models here should have the same to_primitive operation, ideally
             #LOGGER.info("update models shot %d " % self._i_shot)
@@ -788,7 +866,7 @@ class StageTwoRefiner(BaseRefiner):
             self._is_trusted = self.Modelers[self._i_shot].all_trusted
             self.target_functional += self._target_accumulate()
             self._spot_scale_derivatives()
-            #self._Bfactor_derivatives()
+            self._Bfactor_derivatives()
             self._accumulate_Nabc_derivatives()
             self._Fcell_derivatives()
             self._gain_region_derivatives()
@@ -944,20 +1022,17 @@ class StageTwoRefiner(BaseRefiner):
             return d, d2
 
     def _Bfactor_derivatives(self):
-        LOGGER.info("derivatives of Bfactors for shot %d: current B=%e Ang^2" % (self._i_shot, self.b_fac**2))
-        if self.params.fix.B:
+        if not self.params.refiner.refine_Bfactor:
             return
-        dI_dtheta = -.5*self.model_bragg_spots*self.Bfactor_qterm * self.b_fac
-        d2I_dtheta2 = 0 #-.5*self.model_bragg_spots*self.Bfactor_qterm
-        # second derivative is 0 with respect to scale factor
-        sig = self.Modelers[self._i_shot].PAR.B.sigma
-        d = dI_dtheta*sig
-        d2 = d2I_dtheta2*(sig**2)
-
-        xpos = self.Bfactor_xpos[self._i_shot]
-        self.grad[xpos] += self._grad_accumulate(d)
-        if self.calc_curvatures:
-            self.curv[xpos] += self._curv_accumulate(d, d2)
+        p = self.Modelers[self._i_shot].PAR.B
+        d = self.scale_fac * self._dB
+        d = p.get_deriv(self.x[p.xpos], d)
+        grad_val = self._grad_accumulate(d)
+        self.grad[p.xpos] += grad_val
+        if self._i_shot == self.shot_ids[0] and self.iterations < 2:
+            print("STAGE2_BFACTOR: shot=%d B=%.4f xpos=%d grad=%.6e dB_range=[%.4e,%.4e]"
+                  % (self._i_shot, self.b_fac, p.xpos, grad_val,
+                     self._dB.min(), self._dB.max()), flush=True)
 
     def _mpi_aggregation(self):
         # reduce the broadcast summed results:

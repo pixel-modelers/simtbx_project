@@ -16,6 +16,155 @@ from copy import deepcopy
 from collections import Counter
 
 
+def refls_from_hkl_grouping(h_images, k_images, l_images, panel_images, detector, beam,
+                            padding=5, threshold=0, hkl_tolerance=0.3):
+    """
+    Create a reflection table by grouping pixels with the same predicted (h,k,l).
+
+    Instead of peak detection -> centroid -> shoebox, this:
+    1. Rounds per-pixel (h,k,l) to nearest integer
+    2. Groups all pixels sharing the same (panel, h, k, l) -- no connectivity required
+    3. Builds a padded bounding box around each group
+
+    This handles split/elongated peaks from multi-domain (blue sausage) crystals,
+    where a single reflection can appear as two disconnected sub-peaks.
+
+    :param h_images: per-pixel h index (npanels, slow, fast) float array
+    :param k_images: per-pixel k index
+    :param l_images: per-pixel l index
+    :param panel_images: per-pixel intensity from forward model
+    :param detector: dxtbx detector model
+    :param beam: dxtbx beam model
+    :param padding: pixels of padding around the bounding box
+    :param threshold: minimum forward-model intensity for a pixel to be considered
+    :param hkl_tolerance: max fractional deviation from integer for pixel inclusion
+    :return: reflection table with xyzobs.px.value, panel, intensity.sum.value, num_pixels, bbox
+    """
+    npanels = len(detector)
+
+    # Collect pixel groups keyed by (panel, h, k, l)
+    # Store arrays of (y, x, intensity) per group
+    group_data = {}
+
+    for pid in range(npanels):
+        h_img = h_images[pid]
+        k_img = k_images[pid]
+        l_img = l_images[pid]
+        p_img = panel_images[pid]
+
+        mask = p_img > threshold
+        ys, xs = np.where(mask)
+        if len(ys) == 0:
+            continue
+
+        hf = h_img[ys, xs]
+        kf = k_img[ys, xs]
+        lf = l_img[ys, xs]
+        ints = p_img[ys, xs]
+
+        # Filter out NaN HKL values (pixels with no Bragg contribution)
+        finite = np.isfinite(hf) & np.isfinite(kf) & np.isfinite(lf)
+        ys, xs = ys[finite], xs[finite]
+        hf, kf, lf = hf[finite], kf[finite], lf[finite]
+        ints = ints[finite]
+
+        if len(ys) == 0:
+            continue
+
+        hr = np.round(hf).astype(np.int32)
+        kr = np.round(kf).astype(np.int32)
+        lr = np.round(lf).astype(np.int32)
+
+        # Filter: fractional part within tolerance
+        good = ((np.abs(hf - hr) < hkl_tolerance) &
+                (np.abs(kf - kr) < hkl_tolerance) &
+                (np.abs(lf - lr) < hkl_tolerance))
+        # Exclude (0,0,0)
+        good &= ~((hr == 0) & (kr == 0) & (lr == 0))
+
+        ys, xs = ys[good], xs[good]
+        hr, kr, lr = hr[good], kr[good], lr[good]
+        ints = ints[good]
+
+        if len(ys) == 0:
+            continue
+
+        # Group using np.unique on stacked HKL
+        hkl_arr = np.column_stack([hr, kr, lr])
+        unique_hkl, inverse = np.unique(hkl_arr, axis=0, return_inverse=True)
+
+        for i_grp in range(len(unique_hkl)):
+            h, k, l = unique_hkl[i_grp]
+            key = (pid, int(h), int(k), int(l))
+            sel = inverse == i_grp
+            grp_ys = ys[sel]
+            grp_xs = xs[sel]
+            grp_ints = ints[sel]
+
+            if key in group_data:
+                # Same HKL on same panel -- merge (shouldn't happen since we loop per panel once)
+                prev = group_data[key]
+                group_data[key] = (np.concatenate([prev[0], grp_ys]),
+                                   np.concatenate([prev[1], grp_xs]),
+                                   np.concatenate([prev[2], grp_ints]))
+            else:
+                group_data[key] = (grp_ys, grp_xs, grp_ints)
+
+    if not group_data:
+        return flex.reflection_table()
+
+    # Check that no HKL spans multiple panels
+    hkl_to_panels = {}
+    for (pid, h, k, l) in group_data:
+        hkl_key = (h, k, l)
+        if hkl_key not in hkl_to_panels:
+            hkl_to_panels[hkl_key] = []
+        hkl_to_panels[hkl_key].append(pid)
+    for hkl_key, pids in hkl_to_panels.items():
+        assert len(pids) == 1, \
+            "HKL %s spans panels %s -- not supported for HKL shoeboxes" % (hkl_key, pids)
+
+    # Build reflection table
+    miller_indices = flex.miller_index()
+    panels = flex.size_t()
+    xyzobs = flex.vec3_double()
+    intensities_sum = flex.double()
+    intensities_var = flex.double()
+    num_pix = []
+    bbox_list = []
+
+    for (pid, h, k, l), (grp_ys, grp_xs, grp_ints) in group_data.items():
+        xdim, ydim = detector[pid].get_image_size()
+
+        x1 = max(int(grp_xs.min()) - padding, 0)
+        x2 = min(int(grp_xs.max()) + padding + 1, xdim)
+        y1 = max(int(grp_ys.min()) - padding, 0)
+        y2 = min(int(grp_ys.max()) + padding + 1, ydim)
+
+        total_int = float(grp_ints.sum())
+        cx = float(np.sum(grp_xs * grp_ints) / total_int)
+        cy = float(np.sum(grp_ys * grp_ints) / total_int)
+
+        miller_indices.append((h, k, l))
+        panels.append(pid)
+        xyzobs.append((cx + 0.5, cy + 0.5, 0))
+        intensities_sum.append(total_int)
+        intensities_var.append(total_int)
+        num_pix.append(len(grp_ys))
+        bbox_list.append((x1, x2, y1, y2, 0, 1))
+
+    refls = flex.reflection_table()
+    refls['miller_index'] = miller_indices
+    refls['panel'] = panels
+    refls['xyzobs.px.value'] = xyzobs
+    refls['intensity.sum.value'] = intensities_sum
+    refls['intensity.sum.variance'] = intensities_var
+    refls['num_pixels'] = flex.int(num_pix)
+    refls['bbox'] = flex.int6(bbox_list)
+
+    return refls
+
+
 def get_spot_wave(predictions, expt, wavelen_images, h_images, k_images, l_images):
     perSpotWave = flex.double()
     perSpotHKL = flex.miller_index()
@@ -78,6 +227,9 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
     if "num_mosaicity_samples" not in list(df):
         df['num_mosaicity_samples'] = [params.simulator.crystal.num_mosaicity_samples]
 
+    use_hkl_shoeboxes = params.predictions.use_hkl_shoeboxes
+    need_perpixel = params.predictions.laue_mode or use_hkl_shoeboxes
+
     model_out = model_spots_from_pandas(
         df,
         oversample_override=params.predictions.oversample_override,
@@ -91,29 +243,38 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         d_min=params.predictions.resolution_range[0],
         symbol_override=params.predictions.symbol_override,
         force_no_detector_thickness=params.simulator.detector.force_zero_thickness,
-        use_db=params.predictions.method == "diffbragg",
+        use_db=params.predictions.method == "diffbragg" or use_hkl_shoeboxes,
         show_timings=params.predictions.verbose,
         printout_pix=params.predictions.printout_pix,
         quiet=(not params.predictions.verbose),
-        perpixel_wavelen=params.predictions.laue_mode,
+        perpixel_wavelen=need_perpixel,
         det_thicksteps=params.predictions.thicksteps_override,
         from_pdb=from_pdb,
         mosaic_samples_override=params.predictions.mosaic_samples_override,
         no_Nabc_scale=params.no_Nabc_scale, return_sim=True,
         detector_override=params.refiner.reference_geom)
 
-    if not params.predictions.laue_mode:
+    if not need_perpixel:
         (panel_images, SIM), expt = model_out
     else:
         (panel_images, wavelen_images, h_images, k_images, l_images, SIM), expt = model_out
     # NOTE:  panel-images contains per-pixel model, and wavelen_images contains per-pixel wavelength
 
-    predictions = refls_from_sims(panel_images, expt.detector,
-                                expt.beam, thresh=params.predictions.threshold,
-                                max_spot_size=1000,
-                                use_detect_peaks=params.predictions.use_peak_detection)
-    if verbose:
-        print("Found %d Bragg peak predictions above the threshold" %len(predictions))
+    if use_hkl_shoeboxes:
+        predictions = refls_from_hkl_grouping(
+            h_images, k_images, l_images, panel_images, expt.detector, expt.beam,
+            padding=params.predictions.hkl_shoebox_padding,
+            threshold=params.predictions.threshold,
+            hkl_tolerance=params.predictions.hkl_tolerance)
+        if verbose:
+            print("Found %d HKL-grouped reflections" % len(predictions))
+    else:
+        predictions = refls_from_sims(panel_images, expt.detector,
+                                    expt.beam, thresh=params.predictions.threshold,
+                                    max_spot_size=1000,
+                                    use_detect_peaks=params.predictions.use_peak_detection)
+        if verbose:
+            print("Found %d Bragg peak predictions above the threshold" %len(predictions))
 
     # TODO: pulled these from comparing to a normal stills_process prediction table, not sure what they imply
     # TODO: multiple experiments per shot
@@ -137,19 +298,15 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         predictions['miller_index'] = updated_hkl
         predictions = predictions.select(wave_sel)
     else:
+        # Assign miller_index from geometry (overwrites P1 HKL from grouping if applicable)
         refls_to_hkl(predictions, expt.detector, expt.beam, expt.crystal, update_table=True)
-    #from simtbx.diffBragg import utils as db_utils
-    #from simtbx.diffBragg import hopper_utils
-    #M = hopper_utils.DataModeler(params)
-    #E = hopper_utils.DataModeler.exper_json_single_file(df.exp_name.values[0], df.exp_idx.values[0])
-    #M.GatherFromExperiment(E, predictions, remove_duplicate_hkl=False)
-    #M.set_slices("roi_id")
-    #out = db_utils.track_fhkl(M, SIM)
-    #from IPython import embed;embed()
 
     predictions['xyzcal.px'] = predictions['xyzobs.px.value']
     predictions['xyzcal.mm'] = predictions['xyzobs.mm.value']
-    predictions["num_pixels"] = numpix = predictions["shoebox"].count_mask_values(SIGNAL_MASK)
+    if use_hkl_shoeboxes:
+        numpix = predictions['num_pixels']
+    else:
+        predictions["num_pixels"] = numpix = predictions["shoebox"].count_mask_values(SIGNAL_MASK)
     predictions['scatter'] = predictions["intensity.sum.value"] / flex.double(np.array(numpix, np.float64))
 
     if strong is None:

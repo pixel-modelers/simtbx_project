@@ -48,7 +48,6 @@ def _make_logger(loggername, filename=None, formatter=None, level=None, overwrit
         if not hasattr(COMM,"Split"):
           handler = logging.FileHandler(filename)
         else:
-          exit()
           handler = MPIFileHandler(filename, comm=HOST_COMM)
     else:
         handler = logging.StreamHandler()

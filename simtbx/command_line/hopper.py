@@ -259,10 +259,35 @@ class Script:
                 self.params.record_device_timings = False  # only record for rank 0 otherwise there's too much output
             if self.params.simulator.gonio.delta_phi is None:
                 self.params.simulator.gonio.delta_phi = self.params.init.gonio_angle
+            # Blue sausage fan-out: set num_xtals before set_parameters_for_experiment
+            if self.params.number_of_xtals > 1 and not (self.params.consider_multicrystal_shots and len(xtals) > 1):
+                Modeler.num_xtals = self.params.number_of_xtals
+                print("SAUSAGE_DEBUG hopper.py: set Modeler.num_xtals=%d" % Modeler.num_xtals, flush=True)
+            else:
+                print("SAUSAGE_DEBUG hopper.py: NOT setting num_xtals. number_of_xtals=%d, consider_multi=%s, len(xtals)=%d"
+                      % (self.params.number_of_xtals, self.params.consider_multicrystal_shots, len(xtals)), flush=True)
+
             SIM = hopper_utils.get_simulator_for_data_modelers(Modeler)
             Modeler.set_parameters_for_experiment(best)
             MAIN_LOGGER.debug("Set parameters for experiment")
-            Modeler.Umatrices = [Modeler.E.crystal.get_U()]
+            print("SAUSAGE_DEBUG hopper.py: after set_parameters, Modeler.num_xtals=%d, len(P)=%d" % (Modeler.num_xtals, len(Modeler.P)), flush=True)
+
+            # Set Umatrices: fan-out if domain_spread is set, else from expt crystals
+            if self.params.number_of_xtals > 1 and not (self.params.consider_multicrystal_shots and len(xtals) > 1):
+                spread = getattr(self.params, 'domain_spread', None)
+                U0 = Modeler.E.crystal.get_U()
+                Modeler.U0_nominal = sqr(U0)  # store indexed orientation for rotation restraints
+                if spread is not None and spread > 0:
+                    Modeler.Umatrices = hopper_utils.fan_out_Umatrices(
+                        U0, self.params.number_of_xtals, spread)
+                else:
+                    Modeler.Umatrices = [sqr(U0)] * self.params.number_of_xtals
+                print("SAUSAGE_DEBUG hopper.py: set %d Umatrices, spread=%s deg" % (len(Modeler.Umatrices), spread), flush=True)
+                MAIN_LOGGER.debug("Blue sausage: %d domains, spread=%s deg"
+                                  % (self.params.number_of_xtals, spread))
+            else:
+                Modeler.Umatrices = [Modeler.E.crystal.get_U()]
+                print("SAUSAGE_DEBUG hopper.py: single Umatrix (no fan-out)", flush=True)
 
             # TODO: move this to SimulatorFromExperiment
             # TODO: fix multi crystal shot mode

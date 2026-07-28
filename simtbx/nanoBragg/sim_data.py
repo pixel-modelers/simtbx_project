@@ -432,7 +432,7 @@ class SimData:
       else:
         self.D.Ncells_abc_aniso = tuple(self.crystal.Ncells_abc)
       if self.crystal.Ncells_def is not None:
-        self.D.Ncells_def = self.crystal.Ncells_def
+        self.D.Ncells_def = tuple(self.crystal.Ncells_def)
 
       # init mosaicity
       self._init_diffBragg_umats()

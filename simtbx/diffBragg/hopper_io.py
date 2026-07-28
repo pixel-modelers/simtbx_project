@@ -132,6 +132,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
     Amat = new_cryst.get_A()
     other_Umats = []
     other_spotscales = []
+    print("SAUSAGE_DEBUG hopper_io.save_to_pandas: Mod.num_xtals=%d, hasattr(Mod,'Umatrices')=%s"
+          % (Mod.num_xtals, hasattr(Mod, 'Umatrices')), flush=True)
     if Mod.num_xtals > 1:
         for i_xtal in range(1,Mod.num_xtals,1):
             par = hopper_utils.get_param_from_x(x, Mod, i_xtal=i_xtal, as_dict=True)
@@ -139,7 +141,7 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
             rotX_xt = par['rotX']
             rotY_xt = par['rotY']
             rotZ_xt = par['rotZ']
-            U_xt = diffBragg_Umat(rotX_xt, rotY_xt, rotZ_xt, SIM.Umatrices[i_xtal])
+            U_xt = diffBragg_Umat(rotX_xt, rotY_xt, rotZ_xt, Mod.Umatrices[i_xtal])
             other_Umats.append(U_xt)
             other_spotscales.append(scale_xt)
 

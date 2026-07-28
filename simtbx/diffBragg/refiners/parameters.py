@@ -52,9 +52,16 @@ class RangedParameter:
     #  self.maxval = init + 1
     self._arcsin_term = None
 
+  @property
+  def restraint_center(self):
+    """Restraint center: explicit center if set, otherwise fall back to init."""
+    if self.center is not None:
+      return self.center
+    return self.init
+
   def get_restraint_deriv(self, reparam_val):
     val = self.get_val(reparam_val)
-    delta = self.center - val
+    delta = self.restraint_center - val
     deriv = self.get_deriv(reparam_val, -delta/self.beta)
     return deriv
 
@@ -62,7 +69,7 @@ class RangedParameter:
     if not self.refine:
       return 0
     val = self.get_val(reparam_val)
-    dist = self.center - val
+    dist = self.restraint_center - val
     restraint_term = .5*(np.log(2*np.pi*self.beta) + dist**2/self.beta)
     return restraint_term
 
