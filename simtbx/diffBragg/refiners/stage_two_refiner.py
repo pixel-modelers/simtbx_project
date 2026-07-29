@@ -11,6 +11,7 @@ import time
 import warnings
 import signal
 import logging
+import csv
 from copy import deepcopy
 from simtbx.diffBragg import hopper_io
 
@@ -133,6 +134,20 @@ class StageTwoRefiner(BaseRefiner):
         self.region_params = {}  # dictionary for storuing diffBragg/refiners/parameters.RangerParameter for gain correction params
 
         self.I_AM_ROOT = COMM.rank==0
+
+        # --- Tier 0/0.5 diagnostics state ---
+        self._diag_csv_file = None
+        self._diag_csv_writer = None
+        self._prev_x = None
+        self._prev_f = None
+        self._prev_g = None
+        self._diag_fterm_volume = 0.0   # accumulated per eval
+        self._diag_fterm_chisq = 0.0    # accumulated per eval
+        self._diag_neg_v_count = 0      # pixels with v <= 0
+        self._diag_neg_lam_count = 0    # pixels with model_Lambda <= 0
+        self._diag_neg_v_shots = 0      # shots with at least one v <= 0 pixel
+        self._diag_min_multi_skip = 0   # i_fcell skipped by min_multiplicity
+        self._diag_min_multi_skip_pix = 0  # trusted pixel count for skipped i_fcell
 
     def _load_gain_regions(self):
         npan = len(self.S.detector)
@@ -761,6 +776,13 @@ class StageTwoRefiner(BaseRefiner):
         #    self._print_iteration_header()
 
         self.target_functional = 0
+        self._diag_fterm_volume = 0.0
+        self._diag_fterm_chisq = 0.0
+        self._diag_neg_v_count = 0
+        self._diag_neg_lam_count = 0
+        self._diag_neg_v_shots = 0
+        self._diag_min_multi_skip = 0
+        self._diag_min_multi_skip_pix = 0
 
         self.grad = flex.double(self.n_total_params)
         if self.calc_curvatures:
@@ -884,6 +906,9 @@ class StageTwoRefiner(BaseRefiner):
 
         self._gain_restraints()
 
+        # --- Tier 0/0.5 diagnostics ---
+        self._log_tier0_diagnostics()
+
         LOGGER.info("Aliases")
         self._f = self.target_functional
         self._g = self.g = self.grad
@@ -894,7 +919,6 @@ class StageTwoRefiner(BaseRefiner):
         # reset ROI pixels TODO: is this necessary
         LOGGER.info("Zero pixels")
         self.D.raw_pixels_roi *= 0
-        self.gnorm = -1
 
         tsave = time.time()
         LOGGER.info("DUMP param and Zscore data")
@@ -914,6 +938,145 @@ class StageTwoRefiner(BaseRefiner):
 
     def callback_after_step(self, minimizer):
         self.iterations = minimizer.iter()
+
+    def _log_tier0_diagnostics(self):
+        """Tier 0 + 0.5 per-evaluation diagnostics. All ranks participate in reduce, rank 0 writes."""
+        # all ranks must participate in reduce
+        fterm_vol = COMM.reduce(self._diag_fterm_volume, MPI.SUM, root=0)
+        fterm_chisq = COMM.reduce(self._diag_fterm_chisq, MPI.SUM, root=0)
+        neg_v = COMM.reduce(self._diag_neg_v_count, MPI.SUM, root=0)
+        neg_lam = COMM.reduce(self._diag_neg_lam_count, MPI.SUM, root=0)
+        neg_v_shots = COMM.reduce(self._diag_neg_v_shots, MPI.SUM, root=0)
+        multi_skip = COMM.reduce(self._diag_min_multi_skip, MPI.SUM, root=0)
+        multi_skip_pix = COMM.reduce(self._diag_min_multi_skip_pix, MPI.SUM, root=0)
+
+        if not self.I_AM_ROOT:
+            return
+
+        x_np = self.x.as_numpy_array()
+        g_np = self.grad.as_numpy_array()
+        f = self.target_functional
+
+        # --- global norms ---
+        g_norm2 = np.sqrt(np.sum(g_np**2))
+        g_norminf = np.max(np.abs(g_np))
+        x_norm2 = np.sqrt(np.sum(x_np**2))
+        tradeps = self.trad_conv_eps
+        conv_ratio = g_norm2 / (tradeps * max(1.0, x_norm2))
+        self.gnorm = g_norm2  # replace sentinel
+
+        # --- per-block norms ---
+        n_shots = self.n_total_shots
+        shot_indices = np.arange(n_shots)
+        scale_idx = shot_indices * N_PARAM_PER_SHOT
+        bfac_idx = shot_indices * N_PARAM_PER_SHOT + 1
+        nabc_idx = np.concatenate([shot_indices*N_PARAM_PER_SHOT + k for k in (2,3,4)])
+
+        g_scale = g_np[scale_idx]
+        g_bfac = g_np[bfac_idx]
+        g_nabc = g_np[nabc_idx]
+        g_fcell = g_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
+        g_gain = g_np[self.regions_xstart : self.regions_xstart + self.num_regions]
+
+        x_scale = x_np[scale_idx]
+        x_bfac = x_np[bfac_idx]
+        x_nabc = x_np[nabc_idx]
+        x_fcell = x_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
+        x_gain = x_np[self.regions_xstart : self.regions_xstart + self.num_regions]
+
+        def block_norms(g_block, x_block):
+            return (np.sqrt(np.sum(g_block**2)),
+                    np.max(np.abs(g_block)) if len(g_block) > 0 else 0.0,
+                    np.sqrt(np.sum(x_block**2)),
+                    int(np.sum(g_block == 0)))
+
+        scale_gn2, scale_ginf, scale_xn2, scale_gzero = block_norms(g_scale, x_scale)
+        bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero = block_norms(g_bfac, x_bfac)
+        nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero = block_norms(g_nabc, x_nabc)
+        fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero = block_norms(g_fcell, x_fcell)
+        gain_gn2, gain_ginf, gain_xn2, gain_gzero = block_norms(g_gain, x_gain)
+
+        # --- Tier 0.5: line-search reconstruction ---
+        step_norm2 = dd_prev = dd_new = armijo = curv_ratio = np.nan
+        step_scale_n2 = step_fcell_n2 = np.nan
+        if self._prev_x is not None:
+            s = x_np - self._prev_x
+            step_norm2 = np.sqrt(np.sum(s**2))
+            dd_prev = np.dot(self._prev_g, s)
+            dd_new = np.dot(g_np, s)
+            c1 = 1e-4
+            armijo = f - self._prev_f - c1 * dd_prev
+            curv_ratio = dd_new / dd_prev if abs(dd_prev) > 1e-300 else np.nan
+            step_scale_n2 = np.sqrt(np.sum(s[scale_idx]**2))
+            step_fcell_n2 = np.sqrt(np.sum(s[self.fcell_xstart:self.fcell_xstart+self.n_global_fcell]**2))
+
+        # stash for next eval
+        self._prev_x = x_np.copy()
+        self._prev_f = f
+        self._prev_g = g_np.copy()
+
+        # --- sigmaZ stats (already reduced in _mpi_aggregation) ---
+        all_sigZ = self._reduced_all_sigZ
+        sigZ_mean = np.mean(all_sigZ) if all_sigZ is not None else np.nan
+        sigZ_median = np.median(all_sigZ) if all_sigZ is not None else np.nan
+
+        # --- Fcell physical values ---
+        if hasattr(self, '_fcell_at_i_fcell') and self._fcell_at_i_fcell is not None:
+            fcell_min = float(self._fcell_at_i_fcell.min())
+            fcell_max = float(self._fcell_at_i_fcell.max())
+            fcell_mean = float(self._fcell_at_i_fcell.mean())
+        else:
+            fcell_min = fcell_max = fcell_mean = np.nan
+
+        # --- write CSV ---
+        if self._diag_csv_file is None and self.output_dir is not None:
+            diag_path = os.path.join(self.output_dir, "stage2_diagnostics.csv")
+            self._diag_csv_file = open(diag_path, "w", newline="")
+            self._diag_csv_writer = csv.writer(self._diag_csv_file)
+            self._diag_csv_writer.writerow([
+                "eval", "iter", "wall_time",
+                "f", "f_volume", "f_chisq", "f_diff",
+                "g_norm2", "g_norminf", "x_norm2", "tradeps",
+                "conv_ratio", "n_total_params", "n_global_fcell", "n_total_shots", "num_regions",
+                "scale_gn2", "scale_ginf", "scale_xn2", "scale_gzero",
+                "bfac_gn2", "bfac_ginf", "bfac_xn2", "bfac_gzero",
+                "nabc_gn2", "nabc_ginf", "nabc_xn2", "nabc_gzero",
+                "fcell_gn2", "fcell_ginf", "fcell_xn2", "fcell_gzero",
+                "gain_gn2", "gain_ginf", "gain_xn2", "gain_gzero",
+                "neg_v_pix", "neg_lam_pix", "neg_v_shots",
+                "min_multi_skip", "min_multi_skip_pix",
+                "sigZ_mean", "sigZ_median",
+                "fcell_min", "fcell_max", "fcell_mean",
+                "step_norm2", "dd_prev", "dd_new", "armijo", "curv_ratio",
+                "step_scale_n2", "step_fcell_n2",
+            ])
+
+        if self._diag_csv_writer is not None:
+            f_prev = self.f_vals[-1] if self.f_vals else np.nan
+            f_diff = f - f_prev
+            self._diag_csv_writer.writerow([
+                self.target_eval_count, self.iterations, time.time(),
+                f, fterm_vol, fterm_chisq, f_diff,
+                g_norm2, g_norminf, x_norm2, tradeps,
+                conv_ratio, self.n_total_params, self.n_global_fcell, self.n_total_shots, self.num_regions,
+                scale_gn2, scale_ginf, scale_xn2, scale_gzero,
+                bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero,
+                nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero,
+                fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero,
+                gain_gn2, gain_ginf, gain_xn2, gain_gzero,
+                neg_v, neg_lam, neg_v_shots,
+                multi_skip, multi_skip_pix,
+                sigZ_mean, sigZ_median,
+                fcell_min, fcell_max, fcell_mean,
+                step_norm2, dd_prev, dd_new, armijo, curv_ratio,
+                step_scale_n2, step_fcell_n2,
+            ])
+            self._diag_csv_file.flush()
+
+        LOGGER.info("DIAG eval=%d iter=%d conv_ratio=%.6e g_norm2=%.6e x_norm2=%.6e tradeps=%.2e "
+                     "n_params=%d n_fcell=%d dd_prev=%.4e armijo=%.4e step=%.4e neg_v=%d"
+                     % (self.target_eval_count, self.iterations, conv_ratio, g_norm2, x_norm2, tradeps,
+                        self.n_total_params, self.n_global_fcell, dd_prev, armijo, step_norm2, neg_v))
 
     def _save_model(self, model_info):
         LOGGER.info("SAVING MODEL FOR SHOT %d" % self._i_shot)
@@ -965,6 +1128,10 @@ class StageTwoRefiner(BaseRefiner):
 
             multi = self.hkl_frequency[i_fcell]
             if multi < self.min_multiplicity:
+                # count skipped reflections and their trusted pixel count
+                self._diag_min_multi_skip += 1
+                n_pix = sum(int(MOD.all_trusted[slc].sum()) for slc in MOD.i_fcell_slices[i_fcell])
+                self._diag_min_multi_skip_pix += n_pix
                 continue
 
             xpos = self.fcell_xstart + i_fcell
@@ -1044,9 +1211,9 @@ class StageTwoRefiner(BaseRefiner):
         self.grad = self._MPI_reduce_broadcast(self.grad)
         if self.calc_curvatures:
             self.curv = self._MPI_reduce_broadcast(self.curv)
-        all_sigZ = COMM.reduce(self.all_sigZ)
+        self._reduced_all_sigZ = COMM.reduce(self.all_sigZ)
         if COMM.rank==0:
-            LOGGER.info("F=%10.7e, sigmaZ: mean=%f, median=%f" % (self.target_functional, np.mean(all_sigZ), np.median(all_sigZ) ))
+            LOGGER.info("F=%10.7e, sigmaZ: mean=%f, median=%f" % (self.target_functional, np.mean(self._reduced_all_sigZ), np.median(self._reduced_all_sigZ) ))
 
     def _curvature_analysis(self):
         self.tot_neg_curv = 0
@@ -1144,13 +1311,17 @@ class StageTwoRefiner(BaseRefiner):
             np.savez(outf, fvals=self._fcell_at_i_fcell)
 
     def _target_accumulate(self):
-        fterm = self.log2pi + self.log_v + self.u*self.u*self.one_over_v
         M = self.Modelers[self._i_shot]
-        fterm /= M.all_freq
+        vol_term = (self.log2pi + self.log_v) / M.all_freq
+        chisq_term = (self.u*self.u*self.one_over_v) / M.all_freq
         if self._is_trusted is not None:
-            fterm = fterm[self._is_trusted]
-        fterm = 0.5*(fterm.sum())
-        return fterm
+            vol_term = vol_term[self._is_trusted]
+            chisq_term = chisq_term[self._is_trusted]
+        vol_sum = 0.5 * vol_term.sum()
+        chisq_sum = 0.5 * chisq_term.sum()
+        self._diag_fterm_volume += vol_sum
+        self._diag_fterm_chisq += chisq_sum
+        return vol_sum + chisq_sum
 
     def _grad_accumulate(self, d):
         gterm = d * self.one_over_v * self.one_minus_2u_minus_u_squared_over_v
@@ -1199,11 +1370,18 @@ class StageTwoRefiner(BaseRefiner):
         Mod = self.Modelers[self._i_shot]
         v = self.model_Lambda + Mod.nominal_sigma_rdout ** 2
         v_is_neg = (v <= 0).ravel()
+        # non-smoothness counters
+        neg_lam = (self.model_Lambda <= 0).ravel()
+        n_neg_lam_trusted = int(neg_lam[Mod.all_trusted].sum())
+        n_neg_v_trusted = int(v_is_neg[Mod.all_trusted].sum())
+        self._diag_neg_lam_count += n_neg_lam_trusted
+        self._diag_neg_v_count += n_neg_v_trusted
+        if n_neg_v_trusted > 0:
+            self._diag_neg_v_shots += 1
         if any(v_is_neg[Mod.all_trusted]):
             LOGGER.warning(Bcolors.WARNING+"NEGATIVE INTENSITY IN MODEL!"+Bcolors.ENDC)
-        #    raise ValueError("model of Bragg spots cannot have negative intensities...")
         self.log_v = np.log(v)
-        self.log_v[v <= 0] = 0  # but will I ever negative_model ?
+        self.log_v[v <= 0] = 0
 
     def get_refined_Bmatrix(self, i_shot, recip=False):
         if recip:

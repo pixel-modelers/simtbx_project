@@ -666,7 +666,28 @@ class RefineLauncher:
             LOGGER.info("_launcher running optimization")
 
             self.RUC.run(setup=False)
-            LOGGER.info("_launcher done running optimization")
+            LOGGER.info("_launcher done running optimization (exit_reason=%s)" % getattr(self.RUC, 'exit_reason', 'unknown'))
+            # Close diagnostics CSV and write manifest
+            if hasattr(self.RUC, '_diag_csv_file') and self.RUC._diag_csv_file is not None:
+                self.RUC._diag_csv_file.close()
+                self.RUC._diag_csv_file = None
+            if COMM.rank == 0 and self.RUC.output_dir is not None:
+                import json
+                manifest = {
+                    "exit_reason": getattr(self.RUC, 'exit_reason', 'unknown'),
+                    "final_iter": getattr(self.RUC.minimizer, 'iter', lambda: -1)() if hasattr(self.RUC, 'minimizer') and self.RUC.minimizer is not None else -1,
+                    "final_nfun": getattr(self.RUC.minimizer, 'nfun', lambda: -1)() if hasattr(self.RUC, 'minimizer') and self.RUC.minimizer is not None else -1,
+                    "final_eval_count": self.RUC.target_eval_count,
+                    "n_total_params": self.RUC.n_total_params,
+                    "n_global_fcell": self.RUC.n_global_fcell,
+                    "n_total_shots": self.RUC.n_total_shots,
+                    "tradeps": self.RUC.trad_conv_eps,
+                    "trial_id": i_trial,
+                }
+                manifest_path = os.path.join(self.RUC.output_dir, "stage2_manifest_trial%d.json" % i_trial)
+                with open(manifest_path, "w") as mf:
+                    json.dump(manifest, mf, indent=2)
+                LOGGER.info("Wrote stage2 manifest to %s" % manifest_path)
             if self.RUC.hit_break_to_use_curvatures:
                 self.RUC.fix_params_with_negative_curvature = False
                 self.RUC.num_positive_curvatures = 0

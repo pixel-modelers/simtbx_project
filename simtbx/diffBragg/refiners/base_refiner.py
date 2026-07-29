@@ -193,6 +193,8 @@ class BaseRefiner:
             if setup_only:
                 return
 
+        self.exit_reason = "unknown"
+
         if self.use_curvatures:
             try:
                 self.minimizer = scitbx.lbfgs.run(
@@ -201,11 +203,17 @@ class BaseRefiner:
                     exception_handling_params=self._handler,
                     termination_params=self._terminator,
                     gradient_only=self.gradient_only)
+                self.exit_reason = "normal"
             except BreakToUseCurvatures:
                 self.hit_break_to_use_curvatures = True
+                self.exit_reason = "break_to_use_curvatures"
             except BreakBecauseSignal:
                 self.hit_break_signal = True
-                pass
+                self.exit_reason = "signal"
+            except RuntimeError as e:
+                self.exit_reason = "runtime: %s" % e
+            except Exception as e:
+                self.exit_reason = "%s: %s" % (type(e).__name__, e)
 
         else:
             try:
@@ -217,13 +225,25 @@ class BaseRefiner:
                     exception_handling_params=self._handler,
                     termination_params=self._terminator,
                     gradient_only=self.gradient_only)
+                self.exit_reason = "normal"
 
             except BreakToUseCurvatures:
                 self.hit_break_to_use_curvatures = True
-                pass
+                self.exit_reason = "break_to_use_curvatures"
             except BreakBecauseSignal:
                 self.hit_break_signal = True
-                pass
+                self.exit_reason = "signal"
+            except RuntimeError as e:
+                self.exit_reason = "runtime: %s" % e
+            except Exception as e:
+                self.exit_reason = "%s: %s" % (type(e).__name__, e)
+
+        # Log termination info
+        import logging
+        _logger = logging.getLogger("diffBragg.main")
+        final_iter = getattr(self.minimizer, 'iter', lambda: -1)() if hasattr(self, 'minimizer') and self.minimizer is not None else -1
+        final_nfun = getattr(self.minimizer, 'nfun', lambda: -1)() if hasattr(self, 'minimizer') and self.minimizer is not None else -1
+        _logger.info("LBFGS EXIT: reason=%s iter=%d nfun=%d" % (self.exit_reason, final_iter, final_nfun))
 
     @property
     def use_curvatures(self):
