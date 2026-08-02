@@ -14,6 +14,7 @@ import logging
 import csv
 from copy import deepcopy
 from simtbx.diffBragg import hopper_io
+from simtbx.diffBragg import utils as diffBragg_utils
 
 LOGGER = logging.getLogger("diffBragg.main")
 warnings.filterwarnings("ignore")
@@ -643,6 +644,13 @@ class StageTwoRefiner(BaseRefiner):
     def _update_sausages(self):
         pass
 
+    def _update_gonio(self):
+        Mod = self.Modelers[self._i_shot]
+        if getattr(Mod, 'osc_deg', None) is not None and Mod.osc_deg > 0:
+            diffBragg_utils.update_SIM_with_gonio(
+                self.S, delta_phi=Mod.osc_deg,
+                num_phi_steps=Mod.phisteps)
+
     def _update_rotXYZ(self):
         pass
 
@@ -838,6 +846,7 @@ class StageTwoRefiner(BaseRefiner):
             self._symmetrize_Flatt()
             self._update_dxtbx_detector()
             self._update_sausages()
+            self._update_gonio()
 
             self._run_diffBragg_current()
 

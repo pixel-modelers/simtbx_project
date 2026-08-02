@@ -1140,48 +1140,77 @@ class DataModeler:
         GEO = self.params.geometry
         DEG_TO_PI = np.pi/180
         vary_rots = [not fixed_flag for fixed_flag in GEO.fix.panel_rotations]
-        o = RangedParameter(name="group0_RotOrth",
-                            init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[0] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[0] * DEG_TO_PI,
-                            fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
-
-        f = RangedParameter(name="group0_RotFast",
-                            init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[1] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[1] * DEG_TO_PI,
-                            fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
-                            is_global=True)
-
-        s = RangedParameter(name="group0_RotSlow",
-                            init=0,
-                            sigma=1,  # TODO
-                            minval=GEO.min.panel_rotations[2] * DEG_TO_PI,
-                            maxval=GEO.max.panel_rotations[2] * DEG_TO_PI,
-                            fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
-                            is_global=True)
-
         vary_shifts = [not fixed_flag for fixed_flag in GEO.fix.panel_translations]
-        # vary_shifts = [True]*3
-        x = RangedParameter(name="group0_ShiftX", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[0] * 1e-3, maxval=GEO.max.panel_translations[0] * 1e-3,
-                            fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
-                            is_global=True)
-        y = RangedParameter(name="group0_ShiftY", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[1] * 1e-3, maxval=GEO.max.panel_translations[1] * 1e-3,
-                            fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
-                            is_global=True)
-        z = RangedParameter(name="group0_ShiftZ", init=0,
-                            sigma=1,
-                            minval=GEO.min.panel_translations[2] * 1e-3, maxval=GEO.max.panel_translations[2] * 1e-3,
-                            fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
-                            is_global=True)
-        for p in [o,f,s,x,y,z]:
-            P.add(p)
+
+        # Load panel group file if specified, otherwise default to single group0
+        det = self.E.detector
+        if self.params.refiner.panel_group_file is not None:
+            self.panel_group_from_id = utils.load_panel_group_file(self.params.refiner.panel_group_file)
+            if not self.panel_group_from_id:
+                raise ValueError("Loading panel group file %s produced empty panel group dict!"
+                                 % self.params.refiner.panel_group_file)
+        else:
+            self.panel_group_from_id = {pid: 0 for pid in range(len(det))}
+
+        panel_groups = sorted(set(self.panel_group_from_id.values()))
+        self.n_panel_groups = len(panel_groups)
+
+        # Build reference origins: each panel uses origin of the first panel in its group
+        panels_per_group = {gid: [] for gid in panel_groups}
+        for pid in self.panel_group_from_id:
+            panels_per_group[self.panel_group_from_id[pid]].append(pid)
+        self.panel_reference_from_id = {}
+        for pid in self.panel_group_from_id:
+            gid = self.panel_group_from_id[pid]
+            ref_panel = det[panels_per_group[gid][0]]
+            self.panel_reference_from_id[pid] = ref_panel.get_origin()
+
+        # All groups are refined in per-image hopper mode
+        self.panel_groups_refined = set(panel_groups)
+
+        sigma_rot = GEO.sigmas.panel_rot
+        sigma_xyz = GEO.sigmas.panel_xyz
+        for i_group in panel_groups:
+            o = RangedParameter(name="group%d_RotOrth" % i_group,
+                                init=0,
+                                sigma=sigma_rot[0],
+                                minval=GEO.min.panel_rotations[0] * DEG_TO_PI,
+                                maxval=GEO.max.panel_rotations[0] * DEG_TO_PI,
+                                fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
+
+            f = RangedParameter(name="group%d_RotFast" % i_group,
+                                init=0,
+                                sigma=sigma_rot[1],
+                                minval=GEO.min.panel_rotations[1] * DEG_TO_PI,
+                                maxval=GEO.max.panel_rotations[1] * DEG_TO_PI,
+                                fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
+                                is_global=True)
+
+            s = RangedParameter(name="group%d_RotSlow" % i_group,
+                                init=0,
+                                sigma=sigma_rot[2],
+                                minval=GEO.min.panel_rotations[2] * DEG_TO_PI,
+                                maxval=GEO.max.panel_rotations[2] * DEG_TO_PI,
+                                fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
+                                is_global=True)
+
+            x = RangedParameter(name="group%d_ShiftX" % i_group, init=0,
+                                sigma=sigma_xyz[0],
+                                minval=GEO.min.panel_translations[0] * 1e-3, maxval=GEO.max.panel_translations[0] * 1e-3,
+                                fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
+                                is_global=True)
+            y = RangedParameter(name="group%d_ShiftY" % i_group, init=0,
+                                sigma=sigma_xyz[1],
+                                minval=GEO.min.panel_translations[1] * 1e-3, maxval=GEO.max.panel_translations[1] * 1e-3,
+                                fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
+                                is_global=True)
+            z = RangedParameter(name="group%d_ShiftZ" % i_group, init=0,
+                                sigma=sigma_xyz[2],
+                                minval=GEO.min.panel_translations[2] * 1e-3, maxval=GEO.max.panel_translations[2] * 1e-3,
+                                fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
+                                is_global=True)
+            for p in [o,f,s,x,y,z]:
+                P.add(p)
         P.refining_detector = any(vary_rots + vary_shifts)
 
         # iterating over this dict is time-consuming when refinine Fhkl, so we split up the names here:
@@ -1858,11 +1887,19 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
 
     if Mod.P.refining_detector:
         if not hasattr(SIM, "panel_group_from_id"):
-            SIM.panel_group_from_id = {0:0}
-            SIM.panel_groups_refined = {0}
-            SIM.panel_reference_from_id = {0: deepcopy(SIM.detector[0].get_origin())}
-            Mod.group_id_slices = {0: [slice(0, len(Mod.all_data), 1)]}
-            Mod.unique_panel_group_ids = {0}
+            if hasattr(Mod, "panel_group_from_id"):
+                # Use panel group info loaded from panel_group_file in set_parameters_for_experiment
+                SIM.panel_group_from_id = Mod.panel_group_from_id
+                SIM.panel_groups_refined = Mod.panel_groups_refined
+                SIM.panel_reference_from_id = {pid: deepcopy(orig) for pid, orig in Mod.panel_reference_from_id.items()}
+                from simtbx.diffBragg.refiners.geometry import set_group_id_slices
+                set_group_id_slices(Mod, Mod.panel_group_from_id)
+            else:
+                SIM.panel_group_from_id = {0:0}
+                SIM.panel_groups_refined = {0}
+                SIM.panel_reference_from_id = {0: deepcopy(SIM.detector[0].get_origin())}
+                Mod.group_id_slices = {0: [slice(0, len(Mod.all_data), 1)]}
+                Mod.unique_panel_group_ids = {0}
         update_detector(x, Mod.P, SIM)
     if Mod.params.logging.parameters:
         print_params(Mod, x)

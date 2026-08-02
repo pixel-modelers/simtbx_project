@@ -836,9 +836,12 @@ def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictio
         raise RuntimeError("No detector in experiment, must provide a reference geom.")
     # TODO verify all shots have the same detector ?
     if params.refiner.reference_geom is not None:
-        detector = ExperimentList.from_file(params.refiner.reference_geom, check_format=False)[
-            0].detector
+        ref_expt = ExperimentList.from_file(params.refiner.reference_geom, check_format=False)[0]
+        detector = ref_expt.detector
+        ref_beam = ref_expt.beam
         MAIN_LOGGER.debug("Using reference geom from expt %s" % params.refiner.reference_geom)
+    else:
+        ref_beam = None
 
     if COMM.size > num_exp:
         raise ValueError("Requested %d MPI ranks to process %d shots. Reduce number of ranks to %d"
@@ -866,6 +869,8 @@ def load_inputs(pandas_table, params, exper_key="exp_name", refls_key='predictio
         expt_list.append(expt)
         MAIN_LOGGER.info("EVENT: DONE loading experiment list")
         expt.detector = detector  # in case of supplied ref geom
+        if ref_beam is not None:
+            expt.beam = ref_beam
 
         exper_dataframe = pandas_table.query("%s=='%s'" % (exper_key, exper_name)).query("%s==%d" % (exper_idx_key, exper_id))
 

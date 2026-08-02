@@ -93,8 +93,10 @@ def model_spots_from_pandas(pandas_frame,  rois_per_panel=None,
         expt.detector = utils.shift_panelZ(expt.detector, df.detz_shift_mm.values[0])
 
     if detector_override is not None:
-        new_det = ExperimentList.from_file(detector_override, False)[0].detector
-        expt.detector = new_det
+        ref_expt = ExperimentList.from_file(detector_override, False)[0]
+        expt.detector = ref_expt.detector
+        if ref_expt.beam is not None:
+            expt.beam = ref_expt.beam
     if force_no_detector_thickness:
         expt.detector = utils.strip_thickness_from_detector(expt.detector)
     if reset_Bmatrix:

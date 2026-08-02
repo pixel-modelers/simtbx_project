@@ -77,7 +77,7 @@ def detector_model_derivs(Modeler, ref_params, SIM, x, reduce=True, scale=1, com
                 else:
                     pixderivs = detector_derivs[i_name][pixel_rng]
                     pixderivs = det_param.get_deriv(x[det_param.xpos], pixderivs)
-                    Jac[par_name] += pixderivs
+                    Jac[par_name][pixel_rng] += pixderivs
     else:
         return Jac
 

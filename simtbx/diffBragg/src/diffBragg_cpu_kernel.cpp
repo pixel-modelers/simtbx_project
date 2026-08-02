@@ -765,9 +765,17 @@ void diffBragg_sum_over_steps(
             if (db_flags.Fhkl_have_scale_factors)
                 s_hkl = d_image.Fhkl_scale[i_hklasu + Fhkl_channel*db_cryst.Num_ASU];
 
+            // per-image isotropic B-factor: exp(-B * stol^2)
+            // stol is sin(theta)/lambda in m^-1 in the kernel, convert to Ang^-1
+            double stol_sqr_Ang = stol*stol*1e-20;
+            double Bfac_term = 1.0;
+            if (db_cryst.Bfactor_image != 0){
+                Bfac_term = exp(-db_cryst.Bfactor_image * stol_sqr_Ang);
+            }
+
             if (db_flags.gradient_mode && db_flags.calc_Fhkl_gradients){
                 double Fhkl_deriv_scale = db_cryst.r_e_sqr*db_beam.fluence*db_cryst.spot_scale*polar_for_Fhkl_grad/db_steps.Nsteps;
-                double dfhkl = I_noFcell*I_cell * Fhkl_deriv_scale;
+                double dfhkl = I_noFcell*I_cell * Bfac_term * Fhkl_deriv_scale;
                 double grad_incr = dfhkl*gradient_coef;
                 int fhkl_grad_idx=i_hklasu + Fhkl_channel*db_cryst.Num_ASU;
                 if (db_flags.track_Fhkl_indices)
@@ -785,14 +793,7 @@ void diffBragg_sum_over_steps(
             }
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
-
-            // per-image isotropic B-factor: exp(-B * stol^2)
-            // stol is sin(theta)/lambda in m^-1 in the kernel, convert to Ang^-1
-            double stol_sqr_Ang = stol*stol*1e-20;
-            if (db_cryst.Bfactor_image != 0){
-                double Bfac_term = exp(-db_cryst.Bfactor_image * stol_sqr_Ang);
-                Iincrement *= Bfac_term;
-            }
+            Iincrement *= Bfac_term;
             if (db_flags.refine_Bfactor){
                 // dI/dB = Iincrement * (-stol^2_Ang)  (Iincrement already includes Bfac_term)
                 dI_Bfactor += Iincrement * (-stol_sqr_Ang);
@@ -834,8 +835,8 @@ void diffBragg_sum_over_steps(
             }
 
             if (db_flags.refine_fp_fdp){
-                fp_fdp_manager_dI[0] += 2*I_noFcell * (c_deriv_Fcell);
-                fp_fdp_manager_dI[1] += 2*I_noFcell * (d_deriv_Fcell);
+                fp_fdp_manager_dI[0] += 2*I_noFcell*Bfac_term * (c_deriv_Fcell);
+                fp_fdp_manager_dI[1] += 2*I_noFcell*Bfac_term * (d_deriv_Fcell);
             }
 
             //if (db_flags.refine_gauss_spec){
@@ -1043,13 +1044,13 @@ void diffBragg_sum_over_steps(
                 }
                 double value;
                 if (db_flags.refine_Icell)
-                    value = I_noFcell;
+                    value = I_noFcell*Bfac_term;
                 else
-                    value = 2*I_noFcell*F_cell; //2*Iincrement/F_cell ;
+                    value = 2*I_noFcell*F_cell*Bfac_term;
                 double value2=0;
                 if (db_flags.compute_curvatures){
                     if (F_cell > 0)
-                        value2 =2*I_noFcell;
+                        value2 =2*I_noFcell*Bfac_term;
                 }
                 //if (f_cell_idx >= 0 && f_cell_idx <= 2){
                 // NOTE use nominal hkl to regulate when gradients are compputed, as h,k,l can drift within a shoebox

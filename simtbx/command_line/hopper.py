@@ -4,6 +4,7 @@ import socket
 from copy import deepcopy
 import glob
 from simtbx.diffBragg import utils, hopper_utils
+from scitbx.matrix import sqr
 from dxtbx.model.experiment_list import ExperimentListFactory
 import time
 from xfel.merging.application.input.file_loader import create_experiment_identifier
@@ -238,8 +239,10 @@ class Script:
                     continue
 
             if self.params.refiner.reference_geom is not None:
-                detector = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0].detector
-                Modeler.E.detector = detector
+                ref_expt = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0]
+                Modeler.E.detector = ref_expt.detector
+                if ref_expt.beam is not None:
+                    Modeler.E.beam = ref_expt.beam
 
             # here we support inputting an experiment list with multiple crystals
             # the first crystal in the exp list is used to instantiate a diffBragg instance,

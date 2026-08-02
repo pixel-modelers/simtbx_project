@@ -661,10 +661,19 @@ void gpu_sum_over_steps(
                 Fhkl_channel = Fhkl_channels[_source];
             if (s_Fhkl_have_scale_factors)
                 s_hkl = Fhkl_scale[i_hklasu + Fhkl_channel*s_Num_ASU];
+
+            // per-image isotropic B-factor: exp(-B * stol^2)
+            CUDAREAL _stol = 0.5*sqrt(_scattering[0]*_scattering[0]+_scattering[1]*_scattering[1]+_scattering[2]*_scattering[2]);
+            CUDAREAL stol_sqr_Ang = _stol*_stol*1e-20;
+            CUDAREAL Bfac_term = 1.0;
+            if (s_Bfactor_image != 0){
+                Bfac_term = exp(-s_Bfactor_image * stol_sqr_Ang);
+            }
+
             if (s_gradient_mode && s_calc_Fhkl_gradients){
                 CUDAREAL Fhkl_deriv_scale = s_overall_scale*polar_for_grad;
                 CUDAREAL I_noFcell=texture_scale*I0;
-                CUDAREAL dfhkl = I_noFcell*_I_cell * Fhkl_deriv_scale;
+                CUDAREAL dfhkl = I_noFcell*_I_cell * Bfac_term * Fhkl_deriv_scale;
                 CUDAREAL grad_incr = dfhkl*deriv_coef;
                 int fhkl_grad_idx=i_hklasu + Fhkl_channel*s_Num_ASU;
 
@@ -681,14 +690,7 @@ void gpu_sum_over_steps(
 
             CUDAREAL _I_total = s_hkl*_I_cell *I0;
             CUDAREAL Iincrement = _I_total*texture_scale;
-
-            // per-image isotropic B-factor
-            CUDAREAL _stol = 0.5*sqrt(_scattering[0]*_scattering[0]+_scattering[1]*_scattering[1]+_scattering[2]*_scattering[2]);
-            CUDAREAL stol_sqr_Ang = _stol*_stol*1e-20;
-            if (s_Bfactor_image != 0){
-                CUDAREAL Bfac_term = exp(-s_Bfactor_image * stol_sqr_Ang);
-                Iincrement *= Bfac_term;
-            }
+            Iincrement *= Bfac_term;
             if (s_refine_Bfactor){
                 dI_Bfactor += Iincrement * (-stol_sqr_Ang);
             }
@@ -719,8 +721,8 @@ void gpu_sum_over_steps(
 
             if (s_refine_fp_fdp){
                 CUDAREAL I_noFcell = texture_scale*I0;
-                fp_fdp_manager_dI[0] += 2*I_noFcell * (c_deriv_Fcell);
-                fp_fdp_manager_dI[1] += 2*I_noFcell * (d_deriv_Fcell);
+                fp_fdp_manager_dI[0] += 2*I_noFcell*Bfac_term * (c_deriv_Fcell);
+                fp_fdp_manager_dI[1] += 2*I_noFcell*Bfac_term * (d_deriv_Fcell);
             }
 
             if(s_verbose > 3)
@@ -924,13 +926,13 @@ void gpu_sum_over_steps(
             if (s_refine_fcell){
                 CUDAREAL value;
                 if (s_refine_Icell)
-                    value = I0* texture_scale;
+                    value = I0*texture_scale*Bfac_term;
                 else
-                    value = 2*I0*_F_cell * texture_scale; //Iincrement/_F_cell ;
+                    value = 2*I0*_F_cell*texture_scale*Bfac_term;
                 CUDAREAL value2=0;
                 if (s_compute_curvatures){
                 //    NOTE if _Fcell >0
-                    value2 = 2*I0 * texture_scale;
+                    value2 = 2*I0*texture_scale*Bfac_term;
                 }
                 //if (fcell_idx >=0 && fcell_idx <=2){
                 if (s_use_nominal_hkl){

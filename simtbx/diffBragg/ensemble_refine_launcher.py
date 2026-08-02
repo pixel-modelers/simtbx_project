@@ -206,8 +206,12 @@ class RefineLauncher:
             raise RuntimeError("No detector in experiment, must provide a reference geom.")
         # TODO verify all shots have the same detector ?
         if self.params.refiner.reference_geom is not None:
-            detector = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0].detector
+            ref_expt = ExperimentListFactory.from_json_file(self.params.refiner.reference_geom, check_format=False)[0]
+            detector = ref_expt.detector
+            ref_beam = ref_expt.beam
             LOGGER.debug("Using reference geom from expt %s" % self.params.refiner.reference_geom)
+        else:
+            ref_beam = None
 
         if COMM.size > num_exp:
             raise ValueError("Requested %d MPI ranks to process %d shots. Reduce number of ranks to %d"
@@ -288,6 +292,8 @@ class RefineLauncher:
             expt_list.append(expt)
             LOGGER.info("EVENT: DONE loading experiment list")
             expt.detector = detector  # in case of supplied ref geom
+            if ref_beam is not None:
+                expt.beam = ref_beam
             self._check_experiment_integrity(expt)
 
             is_exp = pandas_table[exp_key]==exper_name
