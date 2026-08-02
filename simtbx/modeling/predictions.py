@@ -403,7 +403,10 @@ def label_weak_spots_for_integration(fraction, predictions, num_res_bins=10):
     :param num_res_bins: number of resolution bins
     """
     res = 1. / np.linalg.norm(predictions["rlp"], axis=1)
+    if len(res) == 0:
+        return
     res_sort = np.sort(res)
+    num_res_bins = min(num_res_bins, len(res_sort))
     res_bins = [rb[0]-1e-6 for rb in np.array_split( res_sort, num_res_bins)] + [res_sort[-1]+1e-6]
     res_bin_assigments = np.digitize(res, res_bins)
     is_weak_but_integratable = np.zeros(len(predictions)).astype(bool)

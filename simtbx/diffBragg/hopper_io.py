@@ -203,6 +203,10 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
         gonio_angle=gonio_angle, Bfactor_init=Bfactor_init, Bfactor=Bfactor)
 
     df["gonio_axis"] = [SIM.D.spindle_axis]
+    # Store beam direction from internal diffBragg object, wavelength from dxtbx beam (Angstroms)
+    _xray_beams = SIM.D.xray_beams
+    df["beam_s0"] = [tuple(_xray_beams[0].get_unit_s0())]
+    df["beam_wavelength"] = expt.beam.get_wavelength()
 
     if Mod.P.refining_detector:
         for name in ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]:

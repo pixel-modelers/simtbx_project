@@ -1170,20 +1170,24 @@ class DataModeler:
 
         sigma_rot = GEO.sigmas.panel_rot
         sigma_xyz = GEO.sigmas.panel_xyz
+        betas_rot = GEO.betas.panel_rot
+        betas_xyz = GEO.betas.panel_xyz
         for i_group in panel_groups:
             o = RangedParameter(name="group%d_RotOrth" % i_group,
                                 init=0,
                                 sigma=sigma_rot[0],
                                 minval=GEO.min.panel_rotations[0] * DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[0] * DEG_TO_PI,
-                                fix=not vary_rots[0], center=0, beta=GEO.betas.panel_rot[0], is_global=True)
+                                fix=not vary_rots[0], center=0 if betas_rot else None,
+                                beta=betas_rot[0] if betas_rot else None, is_global=True)
 
             f = RangedParameter(name="group%d_RotFast" % i_group,
                                 init=0,
                                 sigma=sigma_rot[1],
                                 minval=GEO.min.panel_rotations[1] * DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[1] * DEG_TO_PI,
-                                fix=not vary_rots[1], center=0, beta=GEO.betas.panel_rot[1],
+                                fix=not vary_rots[1], center=0 if betas_rot else None,
+                                beta=betas_rot[1] if betas_rot else None,
                                 is_global=True)
 
             s = RangedParameter(name="group%d_RotSlow" % i_group,
@@ -1191,23 +1195,27 @@ class DataModeler:
                                 sigma=sigma_rot[2],
                                 minval=GEO.min.panel_rotations[2] * DEG_TO_PI,
                                 maxval=GEO.max.panel_rotations[2] * DEG_TO_PI,
-                                fix=not vary_rots[2], center=0, beta=GEO.betas.panel_rot[2],
+                                fix=not vary_rots[2], center=0 if betas_rot else None,
+                                beta=betas_rot[2] if betas_rot else None,
                                 is_global=True)
 
             x = RangedParameter(name="group%d_ShiftX" % i_group, init=0,
                                 sigma=sigma_xyz[0],
                                 minval=GEO.min.panel_translations[0] * 1e-3, maxval=GEO.max.panel_translations[0] * 1e-3,
-                                fix=not vary_shifts[0], center=0, beta=GEO.betas.panel_xyz[0],
+                                fix=not vary_shifts[0], center=0 if betas_xyz else None,
+                                beta=betas_xyz[0] if betas_xyz else None,
                                 is_global=True)
             y = RangedParameter(name="group%d_ShiftY" % i_group, init=0,
                                 sigma=sigma_xyz[1],
                                 minval=GEO.min.panel_translations[1] * 1e-3, maxval=GEO.max.panel_translations[1] * 1e-3,
-                                fix=not vary_shifts[1], center=0, beta=GEO.betas.panel_xyz[1],
+                                fix=not vary_shifts[1], center=0 if betas_xyz else None,
+                                beta=betas_xyz[1] if betas_xyz else None,
                                 is_global=True)
             z = RangedParameter(name="group%d_ShiftZ" % i_group, init=0,
                                 sigma=sigma_xyz[2],
                                 minval=GEO.min.panel_translations[2] * 1e-3, maxval=GEO.max.panel_translations[2] * 1e-3,
-                                fix=not vary_shifts[2], center=0, beta=GEO.betas.panel_xyz[2],
+                                fix=not vary_shifts[2], center=0 if betas_xyz else None,
+                                beta=betas_xyz[2] if betas_xyz else None,
                                 is_global=True)
             for p in [o,f,s,x,y,z]:
                 P.add(p)

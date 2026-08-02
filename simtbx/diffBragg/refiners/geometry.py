@@ -1279,6 +1279,12 @@ def save_opt_det(phil_params, x, ref_params, SIM):
     El = ExperimentList()
     E = Experiment()
     E.detector = opt_det
+    # Include beam: copy the dxtbx beam and update direction from internal diffBragg state
+    if hasattr(SIM, 'beam') and hasattr(SIM.beam, 'nanoBragg_constructor_beam'):
+        from copy import deepcopy
+        E.beam = deepcopy(SIM.beam.nanoBragg_constructor_beam)
+        if hasattr(SIM.beam, 'xray_beams') and len(SIM.beam.xray_beams) > 0:
+            E.beam.set_unit_s0(SIM.beam.xray_beams[0].get_unit_s0())
     El.append(E)
     El.as_file(phil_params.geometry.optimized_detector_name)
     print("Saved detector model to %s" % phil_params.geometry.optimized_detector_name )

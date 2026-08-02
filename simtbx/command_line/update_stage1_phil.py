@@ -41,9 +41,13 @@ Gmax = df1.spot_scales.max()*100
 
 # B-factor (if column exists from stage1 B-factor refinement)
 Bfac_phil = ""
+Bfac_center_phil = ""
+Bfac_restraint_phil = ""
 if 'Bfactor' in df1.columns:
     Bmed = df1.Bfactor.median()
     Bfac_phil = "  B = {B}\n".format(B=Bmed)
+    Bfac_center_phil = "  B = {B}\n".format(B=Bmed)
+    Bfac_restraint_phil = "  B = 10\n"
     print("B-factor: median=%.2f (from %d shots)" % (Bmed, len(df1)))
 
 update_phil = """
@@ -60,7 +64,7 @@ centers {{
   ucell_alpha = {al}
   ucell_beta = {be}
   ucell_gamma = {ga}
-}}
+{Bfac_center_phil}}}
 betas {{
   Nvol = 1e-2
   ucell_a = 1e-7
@@ -69,9 +73,9 @@ betas {{
   ucell_alpha = 1e-7
   ucell_beta = 1e-7
   ucell_gamma = 1e-7
-}}
+{Bfac_restraint_phil}}}
 use_restraints = True
-""".format(G=Gmed,na=na, nb=nb, nc=nb, ea=ea, eb=eb, ec=ec,a=a,b=b,c=c,al=al,be=be,ga=ga, nvol=nvol, Bfac_phil=Bfac_phil)
+""".format(G=Gmed,na=na, nb=nb, nc=nb, ea=ea, eb=eb, ec=ec,a=a,b=b,c=c,al=al,be=be,ga=ga, nvol=nvol, Bfac_phil=Bfac_phil, Bfac_center_phil=Bfac_center_phil, Bfac_restraint_phil=Bfac_restraint_phil)
 
 Gmin_Gmax="""
 mins.G={Gmin}
