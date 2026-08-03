@@ -969,6 +969,12 @@ simulator {
     size_mm = 1
       .type = float
       .help = diameter of the beam in mm
+    divergence_mrad = 0
+      .type = float
+      .help = beam divergence half-angle in milliradians. Models the cone of incident beam directions from focusing optics.
+    divsteps = 0
+      .type = int
+      .help = number of divergence steps per direction (will be squared). Must be even. 0 means no divergence modeling.
   }
   detector {
     thick = None

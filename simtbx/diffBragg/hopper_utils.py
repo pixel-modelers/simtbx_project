@@ -374,6 +374,12 @@ class DataModeler:
         for i_channel, (en1, en2) in enumerate(zip(SIM.Fhkl_channel_bounds, SIM.Fhkl_channel_bounds[1:])):
             sel = (energies >= en1) * (energies < en2)
             Fhkl_channel_ids[sel] = i_channel
+        # With beam divergence, xray_beams has num_div_angles * len(spectrum) sources;
+        # tile the channel ids to match (each divergence angle gets the same spectrum channels)
+        n_spectrum = len(energies)
+        n_sources = len(SIM.D.xray_beams)
+        if n_sources > n_spectrum and n_sources % n_spectrum == 0:
+            Fhkl_channel_ids = np.tile(Fhkl_channel_ids, n_sources // n_spectrum)
         if set_in_diffBragg:
             SIM.D.update_Fhkl_channels(Fhkl_channel_ids)
         self.Fhkl_channel_ids = Fhkl_channel_ids
@@ -2426,7 +2432,13 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                     nd, nb, ne,
                     nf, ne, nc]
             Nmat = np.reshape(Nmat, (3,3))
-            Nvol = np.linalg.det(Nmat)
+            det_N = np.linalg.det(Nmat)
+            # If Ndef is being refined, restrain on det(Nmat)^2
+            ndef_refined = not params.fix.Ndef
+            if ndef_refined:
+                Nvol = det_N**2
+            else:
+                Nvol = det_N
             del_Nvol = params.centers.Nvol - Nvol
             fN_vol = .5*del_Nvol**2/params.betas.Nvol
             restraint_terms["Nvol"] = fN_vol
@@ -2504,6 +2516,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
 
             if params.betas.Nvol is not None:
                 Nmat_inv = np.linalg.inv(Nmat)
+                ndef_refined = not params.fix.Ndef
                 dVol_dN_vals = []
                 for i_N in range(6):
                     if i_N ==0 :
@@ -2535,8 +2548,14 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
                     else:
                         p = mod.P["Ndef%d" % (i_N-3)]
                     dN = np.reshape(dN, (3,3))
-                    dVol_dN = Nvol * np.trace(np.dot(Nmat_inv, dN))
-                    dVol_dN_vals.append( dVol_dN)
+                    # d(det)/dN = det * trace(N^-1 dN)
+                    ddet_dN = det_N * np.trace(np.dot(Nmat_inv, dN))
+                    if ndef_refined:
+                        # d(det^2)/dN = 2*det * d(det)/dN = 2*det^2 * trace(N^-1 dN)
+                        dVol_dN = 2 * det_N * ddet_dN
+                    else:
+                        dVol_dN = ddet_dN
+                    dVol_dN_vals.append(dVol_dN)
                     gterm = -del_Nvol / params.betas.Nvol * dVol_dN
                     g[p.xpos] += p.get_deriv(x[p.xpos], gterm)
 

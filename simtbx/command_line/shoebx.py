@@ -56,7 +56,7 @@ assert len(set(M.roi_id)) == max(M.roi_id)+1
 sigma_rdout = M.params.refiner.sigma_r / M.params.refiner.adu_per_photon
 #M.hi = (0,0,0)]
 #hkls = M.Hi
-cmap = 'gray_r'
+cmap = 'gnuplot'
 
 from cctbx import uctbx
 # TODO put unit cell manager in the modeler file
@@ -187,7 +187,7 @@ if not args.scroll:
     gca().set_title("DATA", fontsize=18)
     masked_dat_vals = full_dat_im[~full_trust_im]
     full_dat_im[~full_trust_im] = np.nan
-    imshow(full_dat_im,  cmap='gray_r')
+    imshow(full_dat_im,  cmap='gnuplot')
     xt = np.arange(sub_sh[1], size_edg*sub_sh[1], sub_sh[1])-0.5
     yt = np.arange(sub_sh[0], size_edg * sub_sh[0], sub_sh[0])-0.5
     gca().set_xticks(xt)
@@ -214,7 +214,7 @@ if not args.scroll:
     masked_mod_vals = full_im[~full_trust_im]
     full_im[~full_trust_im] = np.nan
     gca().set_facecolor('tomato')
-    imshow(full_im, cmap='gray_r')#gnuplot')
+    imshow(full_im, cmap='gnuplot')
     xt = np.arange(sub_sh[1], size_edg*sub_sh[1], sub_sh[1])-.5
     yt = np.arange(sub_sh[0], size_edg*sub_sh[0], sub_sh[0])-.5
     gca().set_xticks(xt)
@@ -317,7 +317,7 @@ if not args.scroll:
             display_fig.canvas.draw_idle()
     lab_buttons.on_clicked(toggle_label)
 
-    buttons = RadioButtons(toggle_cmap_ax, ('gray_r', 'gnuplot', 'cividis', 'hot', 'viridis'), active=0)
+    buttons = RadioButtons(toggle_cmap_ax, ('gnuplot', 'gray_r', 'cividis', 'hot', 'viridis'), active=0)
     def toggle_cmap(label):
         mod_ax.images[0].set_cmap(label)
         dat_ax.images[0].set_cmap(label)
@@ -342,8 +342,13 @@ if not args.scroll:
     def update_mod_clim(text):
         update_clim(text, mod_ax)
 
+    # reduce default color scale by 10x for better contrast
+    dat_vmin, dat_vmax = dat_ax.images[0].get_clim()
+    mod_vmin, mod_vmax = mod_ax.images[0].get_clim()
+    dat_ax.images[0].set_clim(dat_vmin, dat_vmax / 10.)
+    mod_ax.images[0].set_clim(mod_vmin, mod_vmax / 10.)
     init_dat_clim = "%d,%d" % dat_ax.images[0].get_clim()
-    init_mod_clim = "%d,%d" % dat_ax.images[0].get_clim()
+    init_mod_clim = "%d,%d" % mod_ax.images[0].get_clim()
     dat_clim_box = TextBox(toggle_dat_clim_ax, 'Data vmin,vmax: ', initial=init_dat_clim)
     dat_clim_box.on_submit(update_dat_clim)
     mod_clim_box = TextBox(toggle_mod_clim_ax, 'Model vmin,vmax: ', initial=init_mod_clim)

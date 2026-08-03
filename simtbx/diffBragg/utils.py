@@ -895,6 +895,8 @@ def simulator_from_expt_and_params(expt, params=None):
     # create a nanoBragg beam
     beam = NBbeam()
     beam.size_mm = params.simulator.beam.size_mm
+    beam.divergence_mrad = params.simulator.beam.divergence_mrad
+    beam.divsteps = params.simulator.beam.divsteps
     beam.unit_s0 = expt.beam.get_unit_s0()
     if spectra_file is not None:
         init_spectrum = load_spectra_file(spectra_file, total_flux, spectra_stride, as_spectrum=True)

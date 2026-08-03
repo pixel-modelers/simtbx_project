@@ -113,9 +113,7 @@ class NBbeam(object):
     for hdiv, vdiv in divs:
       vec_xyz = rotate_axis(-beam_vector, polar_vector, vdiv)
       unit_s0 = rotate_axis(vec_xyz, vert_vector, hdiv)
-      div_ang = np.arccos(np.dot(unit_s0, -beam_vector))
-      if np.isnan(div_ang):
-          div_ang = 0
+      div_ang = np.arccos(np.clip(np.dot(unit_s0, -beam_vector), -1, 1))
       if hdiv == 0 and vdiv == 0:
         assert np.allclose(div_ang, 0)
         assert np.allclose(unit_s0, nominal_beam.get_unit_s0())

@@ -342,6 +342,63 @@ class StageTwoRefiner(BaseRefiner):
                 self.target_functional += p.get_restraint_val(self.x[p.xpos])
                 self.grad[p.xpos] += p.get_restraint_deriv(self.x[p.xpos])
 
+    def _bfactor_restraints(self):
+        if not self.params.refiner.refine_Bfactor:
+            return
+        for i_shot in self.shot_ids:
+            p = self.Modelers[i_shot].PAR.B
+            if p.beta is None:
+                return  # no restraint configured
+            self.target_functional += p.get_restraint_val(self.x[p.xpos])
+            self.grad[p.xpos] += p.get_restraint_deriv(self.x[p.xpos])
+
+    def _save_per_shot_sigZ(self):
+        """Save per-shot and per-shoebox sigZ/scores at configured intervals.
+        Output maps back to stage1 modeler.npy files for comparison."""
+        if not self._collect_shoebox_scores:
+            return
+
+        # --- per-shot sigZ with modeler path ---
+        local_rows = []
+        for i, i_shot in enumerate(self.shot_ids):
+            MOD = self.Modelers[i_shot]
+            sigZ = self.all_sigZ[i] if i < len(self.all_sigZ) else np.nan
+            modeler_path = ""
+            if hasattr(MOD, 'pandas_table_row') and 'stage1_output_img' in MOD.pandas_table_row.index:
+                modeler_path = str(MOD.pandas_table_row['stage1_output_img'])
+            exp_name = ""
+            if hasattr(MOD, 'pandas_table_row') and 'exp_name' in MOD.pandas_table_row.index:
+                exp_name = str(MOD.pandas_table_row['exp_name'])
+            B = self._get_bfactor(i_shot)
+            G = self._get_spot_scale(i_shot)**2
+            local_rows.append((i_shot, COMM.rank, sigZ, B, G, len(MOD.Hi), modeler_path, exp_name))
+
+        all_rows = COMM.gather(local_rows, root=0)
+        if COMM.rank == 0 and all_rows is not None and self.output_dir is not None:
+            rows = [r for rank_rows in all_rows for r in rank_rows]
+            rows.sort(key=lambda r: r[0])
+            outpath = os.path.join(self.output_dir,
+                                   "per_shot_sigZ_eval%d.csv" % self.target_eval_count)
+            with open(outpath, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["shot_id", "rank", "sigZ", "B", "G", "n_refls",
+                            "stage1_modeler", "exp_name"])
+                w.writerows(rows)
+            LOGGER.info("Saved per-shot sigZ to %s (%d shots)" % (outpath, len(rows)))
+
+        # --- per-shoebox sigZ and score (collected during shot loop) ---
+        all_shoebox_rows = COMM.gather(self._per_shoebox_data, root=0)
+        if COMM.rank == 0 and all_shoebox_rows is not None and self.output_dir is not None:
+            rows = [r for rank_rows in all_shoebox_rows for r in rank_rows]
+            rows.sort(key=lambda r: (r[0], r[1]))
+            outpath = os.path.join(self.output_dir,
+                                   "per_shoebox_scores_eval%d.csv" % self.target_eval_count)
+            with open(outpath, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["shot_id", "i_fcell", "sigZ", "cc", "ntrust", "stage1_modeler"])
+                w.writerows(rows)
+            LOGGER.info("Saved per-shoebox scores to %s (%d shoeboxes)" % (outpath, len(rows)))
+
     def _get_i_fcell_slices(self, Modeler):
         """finds the boundaries for each fcell in the 1-D array of per-shot data"""
         # TODO move this to Data Modeler class ?
@@ -822,6 +879,9 @@ class StageTwoRefiner(BaseRefiner):
             self._save_optimized_gain_map()
 
         self.all_sigZ = []
+        self._collect_shoebox_scores = (self.saveZ_freq is not None
+                                        and self.target_eval_count % self.saveZ_freq == 0)
+        self._per_shoebox_data = [] if self._collect_shoebox_scores else None
 
         for self._i_shot in self.shot_ids:
             self._set_current_gain_per_pixel()
@@ -863,15 +923,33 @@ class StageTwoRefiner(BaseRefiner):
 
             self._derivative_convenience_factors()
 
-            if self.saveZ_freq is not None and self.target_eval_count % self.saveZ_freq == 0:
+            if self._collect_shoebox_scores:
                 MOD = self.Modelers[self._i_shot]
+                modeler_path = ""
+                if hasattr(MOD, 'pandas_table_row') and 'stage1_output_img' in MOD.pandas_table_row.index:
+                    modeler_path = str(MOD.pandas_table_row['stage1_output_img'])
                 self._spot_Zscores = []
                 for i_fcell in MOD.unique_i_fcell:
                     for slc in MOD.i_fcell_slices[i_fcell]:
-                        sigZ = self._Zscore[slc]
                         trus = MOD.all_trusted[slc]
-                        sigZ = sigZ[trus].std()
-                        self._spot_Zscores.append((i_fcell, sigZ))
+                        if not np.any(trus):
+                            continue
+                        Z_roi = self._Zscore[slc][trus]
+                        dat_roi = MOD.all_data[slc][trus]
+                        mod_roi = self.model_Lambda[slc][trus]
+                        roi_sigZ = Z_roi.std() if len(Z_roi) > 1 else np.nan
+                        # Pearson CC between data and model
+                        cc = np.nan
+                        if len(dat_roi) > 2:
+                            d_dm = dat_roi - dat_roi.mean()
+                            m_dm = mod_roi - mod_roi.mean()
+                            denom = np.sqrt((d_dm**2).sum() * (m_dm**2).sum())
+                            if denom > 0:
+                                cc = float((d_dm * m_dm).sum() / denom)
+                        self._spot_Zscores.append((i_fcell, roi_sigZ))
+                        self._per_shoebox_data.append(
+                            (self._i_shot, i_fcell, float(roi_sigZ), cc,
+                             int(trus.sum()), modeler_path))
                 self._shot_Zscores.append(self._spot_Zscores)
 
             if save_model:
@@ -914,6 +992,10 @@ class StageTwoRefiner(BaseRefiner):
         LOGGER.info("Time for MPIaggregation=%.4f" % tmpi)
 
         self._gain_restraints()
+        self._bfactor_restraints()
+
+        # --- per-shot sigZ + per-shoebox scoring ---
+        self._save_per_shot_sigZ()
 
         # --- Tier 0/0.5 diagnostics ---
         self._log_tier0_diagnostics()
