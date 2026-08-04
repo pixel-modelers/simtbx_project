@@ -95,7 +95,8 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
 
     scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf,\
         diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, \
-        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle, Bfactor = \
+        diff_sig_b, diff_sig_c, a,b,c,al,be,ga,detz_shift, gonio_angle, Bfactor, \
+        spec_sigma, beam_x, beam_y = \
         hopper_utils.get_param_from_x(x, Mod)
 
     scale_p = Mod.P["G_xtal0"]
@@ -207,6 +208,9 @@ def save_to_pandas(x, Mod, SIM, orig_exp_name, params, expt, rank_exp_idx, stg1_
     _xray_beams = SIM.D.xray_beams
     df["beam_s0"] = [tuple(_xray_beams[0].get_unit_s0())]
     df["beam_wavelength"] = expt.beam.get_wavelength()
+    df["spec_sigma"] = spec_sigma
+    df["beam_x_mrad"] = beam_x
+    df["beam_y_mrad"] = beam_y
 
     if Mod.P.refining_detector:
         for name in ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]:

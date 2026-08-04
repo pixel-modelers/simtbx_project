@@ -225,6 +225,42 @@ def PAR_from_params(params, experiment, best=None):
                           minval=params.mins.spec[i_p], maxval=params.maxs.spec[i_p])
         PAR.spec_coef.append(p)
 
+    # Gaussian spectrum sigma
+    PAR.spec_sigma = None
+    if params.init.spec_sigma is not None:
+        init_ss = params.init.spec_sigma
+        if best is not None and "spec_sigma" in list(best):
+            init_ss = float(best.spec_sigma.values[0])
+        fix_ss = params.fix.spec_sigma if hasattr(params.fix, 'spec_sigma') else True
+        PAR.spec_sigma = ParameterType(
+            init=init_ss, sigma=params.sigmas.spec_sigma if hasattr(params.sigmas, 'spec_sigma') else 1,
+            minval=params.mins.spec_sigma if hasattr(params.mins, 'spec_sigma') else 0.1,
+            maxval=params.maxs.spec_sigma if hasattr(params.maxs, 'spec_sigma') else 100,
+            fix=fix_ss,
+            center=params.centers.spec_sigma if hasattr(params.centers, 'spec_sigma') and params.centers.spec_sigma is not None else None,
+            beta=params.betas.spec_sigma if hasattr(params.betas, 'spec_sigma') and params.betas.spec_sigma is not None else None)
+
+    # Per-shot beam direction offsets (mrad)
+    PAR.beam_XY = None
+    fix_bxy = params.fix.beam_XY if hasattr(params.fix, 'beam_XY') else True
+    if not fix_bxy or (best is not None and "beam_x_mrad" in list(best)):
+        init_bx = params.init.beam_XY[0] if hasattr(params.init, 'beam_XY') else 0
+        init_by = params.init.beam_XY[1] if hasattr(params.init, 'beam_XY') else 0
+        if best is not None and "beam_x_mrad" in list(best):
+            init_bx = float(best.beam_x_mrad.values[0])
+            init_by = float(best.beam_y_mrad.values[0])
+        PAR.beam_XY = []
+        for i_bxy, init_val in enumerate([init_bx, init_by]):
+            p = ParameterType(
+                init=init_val,
+                sigma=params.sigmas.beam_XY[i_bxy] if hasattr(params.sigmas, 'beam_XY') else 0.01,
+                minval=params.mins.beam_XY[i_bxy] if hasattr(params.mins, 'beam_XY') else -10,
+                maxval=params.maxs.beam_XY[i_bxy] if hasattr(params.maxs, 'beam_XY') else 10,
+                fix=fix_bxy,
+                center=params.centers.beam_XY[i_bxy] if hasattr(params.centers, 'beam_XY') and params.centers.beam_XY is not None else None,
+                beta=params.betas.beam_XY[i_bxy] if hasattr(params.betas, 'beam_XY') and params.betas.beam_XY is not None else None)
+            PAR.beam_XY.append(p)
+
     # Multi-domain (blue sausage): load other Umats and scales from stage1 pandas
     if best is not None and "other_Umats" in list(best) and best.other_Umats.values[0] is not None:
         other_Umats = best.other_Umats.values[0]

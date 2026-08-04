@@ -292,6 +292,12 @@ betas
   spec = None
     .type = floats(size=2)
     .help = restraint factor for spectrum coefs
+  spec_sigma = None
+    .type = float
+    .help = restraint factor for Gaussian spectrum sigma
+  beam_XY = None
+    .type = floats(size=2)
+    .help = restraint factor for beam direction offsets
   Fhkl = None
     .type = float
     .help = restraint factor for structure factor intensity scales
@@ -375,6 +381,12 @@ centers
   spec = None
     .type = floats(size=2)
     .help = restraint target for specturm correction (0 + 1*Lambda )
+  spec_sigma = None
+    .type = float
+    .help = restraint target for Gaussian spectrum sigma (eV)
+  beam_XY = None
+    .type = floats(size=2)
+    .help = restraint target for beam direction offsets (mrad)
 }
 skip = None
   .type = int
@@ -464,6 +476,12 @@ sigmas
   spec = [1,1]
     .type=floats(size=2)
     .help = spectrum offset and scale factor sigmas
+  spec_sigma = 1
+    .type = float
+    .help = sensitivity for Gaussian spectrum sigma
+  beam_XY = [0.01, 0.01]
+    .type = floats(size=2)
+    .help = sensitivity for beam direction offsets
   roiPerScale = 1
     .type = float
   detz_shift = 1
@@ -516,6 +534,12 @@ init
   spec = [0,1]
     .type = floats(size=2)
     .help = initial offset and scale factor applied to each energy channel wavelength
+  spec_sigma = None
+    .type = float
+    .help = initial Gaussian spectrum sigma in eV. If set, a Gaussian spectrum is used with this width.
+  beam_XY = [0, 0]
+    .type = floats(size=2)
+    .help = initial beam direction offsets in mrad (horizontal, vertical)
   detz_shift = 0
     .type = float
     .help = initial value for the detector position overall shift along z-direction in millimeters
@@ -585,6 +609,12 @@ mins
   spec = [-0.01, 0.95]
     .type = floats(size=2)
     .help = min value for spectrum correction (-0.01 + Lambda *1.05)
+  spec_sigma = 0.1
+    .type = float
+    .help = min value for Gaussian spectrum sigma (eV)
+  beam_XY = [-10, -10]
+    .type = floats(size=2)
+    .help = min value for beam direction offsets (mrad)
 }
 maxs
   .help = max value allowed for parameter
@@ -629,6 +659,12 @@ maxs
   spec = [0.01, 1.05]
     .type = floats(size=2)
     .help = max value for spectrum correction (0.01 + Lambda *1.05)
+  spec_sigma = 100
+    .type = float
+    .help = max value for Gaussian spectrum sigma (eV)
+  beam_XY = [10, 10]
+    .type = floats(size=2)
+    .help = max value for beam direction offsets (mrad)
 }
 fix
   .help = flags for fixing parameters during refinement
@@ -643,6 +679,12 @@ fix
   spec = True
     .type = bool
     .help = fix the spectrum. If False, a spectrum correction is refined (wavelength shift and scale)
+  spec_sigma = True
+    .type = bool
+    .help = fix the Gaussian spectrum sigma during refinement
+  beam_XY = True
+    .type = bool
+    .help = fix the beam direction offsets during refinement
   perRoiScale = True
     .type = bool
     .help = a per-roi scale factor

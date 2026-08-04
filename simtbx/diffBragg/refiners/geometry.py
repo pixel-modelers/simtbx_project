@@ -271,6 +271,26 @@ class CrystalParameters:
                                     sigma=p.sigma, center=p.center, beta=p.beta)
             self.parameters.append(ref_p)
 
+            # Gaussian spectrum sigma (per-shot)
+            if hasattr(Mod.PAR, 'spec_sigma') and Mod.PAR.spec_sigma is not None:
+                p = Mod.PAR.spec_sigma
+                fix_ss = self.phil.fix.spec_sigma if hasattr(self.phil.fix, 'spec_sigma') else True
+                ref_p = RangedParameter(name="rank%d_shot%d_spec_sigma" % (COMM.rank, i_shot),
+                                        minval=p.minval, maxval=p.maxval, fix=fix_ss, init=p.init,
+                                        sigma=p.sigma, center=p.center, beta=p.beta)
+                self.parameters.append(ref_p)
+
+            # Per-shot beam direction offsets
+            if hasattr(Mod.PAR, 'beam_XY') and Mod.PAR.beam_XY is not None:
+                fix_bxy = self.phil.fix.beam_XY if hasattr(self.phil.fix, 'beam_XY') else True
+                for i_bxy, bxy_name in enumerate(["beam_X", "beam_Y"]):
+                    p = Mod.PAR.beam_XY[i_bxy]
+                    ref_p = RangedParameter(
+                        name="rank%d_shot%d_%s" % (COMM.rank, i_shot, bxy_name),
+                        minval=p.minval, maxval=p.maxval, fix=fix_bxy, init=p.init,
+                        sigma=p.sigma, center=p.center, beta=p.beta)
+                    self.parameters.append(ref_p)
+
 
 def hkl_vary_flags(SIM):
     num_fhkl_param = SIM.Num_ASU*SIM.num_Fhkl_channels
@@ -621,6 +641,42 @@ def model(x, ref_params, i_shot, Modeler, SIM, return_bragg_model=False):
             d = pr.get_deriv(x[pr.xpos], d)
             d = convolve_model_with_psf(d, **conv_args)
             J[pr.name] = (common_grad_term*d)[Modeler.all_trusted].sum()
+
+    # Analytical spec_sigma gradient via sourceI chain rule
+    # dTarget/d(sigma) = sum_k [sourceI_grad[k] * ((E_k-E0)^2 - <(E-E0)^2>) / sigma^3]
+    ss_key = "rank%d_shot%d_spec_sigma" % (COMM.rank, i_shot)
+    if ss_key in ref_params and not ref_params[ss_key].fix:
+        ss_p = ref_params[ss_key]
+        sigma_val = ss_p.get_val(x[ss_p.xpos])
+        Gscale = G.get_val(x[G.xpos])
+        sI_grad = SIM.D.add_sourceI_gradients(Modeler.pan_fast_slow, resid, V, Modeler.all_trusted,
+                                               Modeler.all_freq, Gscale)
+        nom_wave = getattr(Modeler, '_nominal_wavelength', None)
+        if nom_wave is None:
+            waves, fluxes = zip(*SIM.beam.spectrum)
+            waves, fluxes = np.array(waves), np.array(fluxes)
+            nom_wave = float(np.sum(waves * fluxes) / np.sum(fluxes))
+            Modeler._nominal_wavelength = nom_wave
+        center_eV = hopper_utils.utils.ENERGY_CONV / nom_wave
+        spec_energies = np.array([hopper_utils.utils.ENERGY_CONV / w for w, _ in SIM.beam.spectrum])
+        dE_sq = (spec_energies - center_eV)**2
+        gauss_wt = np.exp(-0.5 * dE_sq / sigma_val**2)
+        mean_dE_sq = np.sum(gauss_wt * dE_sq) / np.sum(gauss_wt)
+        dsigma = (dE_sq - mean_dE_sq) / sigma_val**3
+        spec_grad = np.sum(sI_grad * dsigma)
+        spec_grad = ss_p.get_deriv(x[ss_p.xpos], spec_grad)
+        J[ss_p.name] = spec_grad
+
+    # Analytical beam direction gradients via rotation derivative approximation
+    # dI/d(beam_x_mrad) ≈ -1e-3 * dI/d(rotY), dI/d(beam_y_mrad) ≈ -1e-3 * dI/d(rotX)
+    for bxy_suffix, rot_id in [("beam_X", hopper_utils.ROTY_ID), ("beam_Y", hopper_utils.ROTX_ID)]:
+        bxy_key = "rank%d_shot%d_%s" % (COMM.rank, i_shot, bxy_suffix)
+        if bxy_key in ref_params and not ref_params[bxy_key].fix:
+            bxy_p = ref_params[bxy_key]
+            d = -1e-3 * scale * SIM.D.get_derivative_pixels(rot_id).as_numpy_array()[:npix]
+            d = bxy_p.get_deriv(x[bxy_p.xpos], d)
+            d = convolve_model_with_psf(d, **conv_args)
+            J[bxy_p.name] = (common_grad_term * d)[Modeler.all_trusted].sum()
 
     # detector model gradients
     det_Jac = detector_model_derivs(Modeler, ref_params, SIM, x,
@@ -991,6 +1047,11 @@ def geom_min(params):
     for i, diffbragg_id in enumerate(PAN_XYZ_IDS):
         if not params.geometry.fix.panel_translations[i]:
             launcher.SIM.D.refine(diffbragg_id)
+    # Enable rotation derivatives for beam_XY analytical gradients
+    fix_beam_XY = params.fix.beam_XY if hasattr(params.fix, 'beam_XY') else True
+    if not fix_beam_XY:
+        launcher.SIM.D.refine(ROTXYZ_ID[0])  # ROTX for beam_Y
+        launcher.SIM.D.refine(ROTXYZ_ID[1])  # ROTY for beam_X
 
     # do a barrel roll!
     target = Target(LMP, save_state_freq=params.geometry.save_state_freq, overwrite_state=params.geometry.save_state_overwrite)

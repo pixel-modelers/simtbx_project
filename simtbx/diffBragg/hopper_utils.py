@@ -947,6 +947,12 @@ class DataModeler:
             lam0, lam1 = get_lam0_lam1_from_pandas(best)
             self.params.init.spec = lam0, lam1
 
+            if "spec_sigma" in list(best) and self.params.init.spec_sigma is not None:
+                self.params.init.spec_sigma = float(best.spec_sigma.values[0])
+            if "beam_x_mrad" in list(best) and "beam_y_mrad" in list(best):
+                self.params.init.beam_XY = [float(best.beam_x_mrad.values[0]),
+                                            float(best.beam_y_mrad.values[0])]
+
         init = self.params.init
         sigma = self.params.sigmas
         mins = self.params.mins
@@ -1142,6 +1148,33 @@ class DataModeler:
                             name="lambda_scale", center=centers.spec[1] if centers.spec is not None else None,
                             beta=betas.spec[1] if betas.spec is not None else None)
         P.add(p)
+
+        # Gaussian spectrum sigma parameter
+        spec_sigma_init = self.params.init.spec_sigma
+        fix_spec_sigma = fix.spec_sigma if hasattr(fix, 'spec_sigma') else True
+        if spec_sigma_init is None:
+            fix_spec_sigma = True
+            spec_sigma_init = 10.0  # placeholder
+        p = RangedParameter(init=spec_sigma_init, sigma=self.params.sigmas.spec_sigma,
+                            minval=mins.spec_sigma, maxval=maxs.spec_sigma,
+                            fix=fix_spec_sigma, name="spec_sigma",
+                            center=centers.spec_sigma if hasattr(centers, 'spec_sigma') and centers.spec_sigma is not None else None,
+                            beta=betas.spec_sigma if hasattr(betas, 'spec_sigma') and betas.spec_sigma is not None else None)
+        P.add(p)
+
+        # Per-shot beam direction offsets (mrad)
+        fix_beam_XY = fix.beam_XY if hasattr(fix, 'beam_XY') else True
+        beam_XY_init = self.params.init.beam_XY if hasattr(self.params.init, 'beam_XY') else [0, 0]
+        for i_bxy, bxy_name in enumerate(["beam_X", "beam_Y"]):
+            p = RangedParameter(
+                init=beam_XY_init[i_bxy],
+                sigma=self.params.sigmas.beam_XY[i_bxy] if hasattr(self.params.sigmas, 'beam_XY') else 0.01,
+                minval=mins.beam_XY[i_bxy] if hasattr(mins, 'beam_XY') else -10,
+                maxval=maxs.beam_XY[i_bxy] if hasattr(maxs, 'beam_XY') else 10,
+                fix=fix_beam_XY, name=bxy_name,
+                center=centers.beam_XY[i_bxy] if hasattr(centers, 'beam_XY') and centers.beam_XY is not None else None,
+                beta=betas.beam_XY[i_bxy] if hasattr(betas, 'beam_XY') and betas.beam_XY is not None else None)
+            P.add(p)
 
         GEO = self.params.geometry
         DEG_TO_PI = np.pi/180
@@ -1896,6 +1929,44 @@ def print_params(Mod, x):
     MAIN_LOGGER.debug(val_s)
 
 
+def _make_gauss_spectrum(SIM, sigma_eV, nchannels=20, nominal_wave=None):
+    """Generate Gaussian spectrum centered on beam energy with given sigma (eV).
+    nominal_wave: center wavelength in Angstroms. If None, uses weighted mean of current spectrum.
+    """
+    if nominal_wave is None:
+        waves, fluxes = zip(*SIM.beam.spectrum)
+        waves, fluxes = np.array(waves), np.array(fluxes)
+        nominal_wave = np.sum(waves * fluxes) / np.sum(fluxes)
+    center_eV = utils.ENERGY_CONV / nominal_wave
+    total_flux = sum(f for _, f in SIM.beam.spectrum)
+    spec_energies = np.linspace(center_eV - 4*sigma_eV, center_eV + 4*sigma_eV, nchannels)
+    weights = np.exp(-0.5 * ((spec_energies - center_eV) / sigma_eV)**2)
+    weights *= total_flux / weights.sum()
+    spec_waves = utils.ENERGY_CONV / spec_energies
+    return list(zip(spec_waves, weights))
+
+
+def _apply_beam_offset(SIM, beam_x_mrad, beam_y_mrad):
+    """Rotate beam direction by small offsets (mrad) and update xray_beams."""
+    if abs(beam_x_mrad) < 1e-12 and abs(beam_y_mrad) < 1e-12:
+        return
+    s0 = np.array(SIM.beam.unit_s0, dtype=float)
+    # Small rotation: beam_x = rotation around vertical (Y), beam_y = rotation around horizontal (X)
+    rx = beam_x_mrad * 1e-3  # to radians
+    ry = beam_y_mrad * 1e-3
+    # Rodrigues for small angles (first order sufficient for mrad perturbations)
+    # Rotate around Y axis by rx
+    cos_rx, sin_rx = np.cos(rx), np.sin(rx)
+    Ry = np.array([[cos_rx, 0, sin_rx], [0, 1, 0], [-sin_rx, 0, cos_rx]])
+    # Rotate around X axis by ry
+    cos_ry, sin_ry = np.cos(ry), np.sin(ry)
+    Rx = np.array([[1, 0, 0], [0, cos_ry, -sin_ry], [0, sin_ry, cos_ry]])
+    new_s0 = Rx @ Ry @ s0
+    new_s0 /= np.linalg.norm(new_s0)
+    SIM.beam.unit_s0 = tuple(new_s0)
+    SIM.D.xray_beams = SIM.beam.xray_beams
+
+
 def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_spectrum=False,
           update_Fhkl_scales=True):
 
@@ -1983,6 +2054,31 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
         p1 = Mod.P["lambda_scale"]
         lambda_coef = p0.get_val(x[p0.xpos]), p1.get_val(x[p1.xpos])
         SIM.D.lambda_coefficients = lambda_coef
+
+    # Gaussian spectrum sigma
+    spec_sigma_p = Mod.P["spec_sigma"]
+    if spec_sigma_p.refine:
+        if not hasattr(Mod, '_nominal_wavelength'):
+            waves, fluxes = zip(*SIM.beam.spectrum)
+            waves, fluxes = np.array(waves), np.array(fluxes)
+            Mod._nominal_wavelength = float(np.sum(waves * fluxes) / np.sum(fluxes))
+        sigma_eV = spec_sigma_p.get_val(x[spec_sigma_p.xpos])
+        nch = Mod.params.simulator.spectrum.gauss_spec.nchannels
+        SIM.beam.spectrum = _make_gauss_spectrum(SIM, sigma_eV, nchannels=nch,
+                                                  nominal_wave=Mod._nominal_wavelength)
+        SIM.D.xray_beams = SIM.beam.xray_beams
+
+    # Per-shot beam direction offsets
+    beam_x_p = Mod.P["beam_X"]
+    beam_y_p = Mod.P["beam_Y"]
+    if beam_x_p.refine or beam_y_p.refine:
+        # Save original beam direction for restoration
+        if not hasattr(Mod, '_nominal_unit_s0'):
+            Mod._nominal_unit_s0 = tuple(SIM.beam.unit_s0)
+        SIM.beam.unit_s0 = Mod._nominal_unit_s0  # reset to nominal first
+        bx = beam_x_p.get_val(x[beam_x_p.xpos])
+        by = beam_y_p.get_val(x[beam_y_p.xpos])
+        _apply_beam_offset(SIM, bx, by)
 
     # Mosaic block
     Nabc_params = [Mod.P["Nabc%d" % (i_n,)] for i_n in range(3)]
@@ -2172,6 +2268,21 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                     d = p.get_deriv(x[p.xpos], d)
                     J[p.xpos] += d
 
+            # Analytical beam direction gradients via rotation derivative approximation
+            # dI/d(beam_x_mrad) ≈ -1e-3 * dI/d(rotY), dI/d(beam_y_mrad) ≈ -1e-3 * dI/d(rotX)
+            if beam_x_p.refine:
+                beam_x_grad = -1e-3 * scale * SIM.D.get_derivative_pixels(ROTY_ID).as_numpy_array()[:npix]
+                beam_x_grad = beam_x_p.get_deriv(x[beam_x_p.xpos], beam_x_grad)
+                J[beam_x_p.xpos] += beam_x_grad
+
+            if beam_y_p.refine:
+                beam_y_grad = -1e-3 * scale * SIM.D.get_derivative_pixels(ROTX_ID).as_numpy_array()[:npix]
+                beam_y_grad = beam_y_p.get_deriv(x[beam_y_p.xpos], beam_y_grad)
+                J[beam_y_p.xpos] += beam_y_grad
+
+            # NOTE: spec_sigma gradient computed analytically in target_func()
+            # via add_sourceI_gradients + chain rule
+
     if (not Mod.params.fix.perRoiScale or Mod.params.use_perRoiScale) and compute_grad:
         if compute_grad:
             for p in perRoiParams:
@@ -2237,13 +2348,21 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     Bfac_p = Mod.P["Bfactor"]
     Bfactor = Bfac_p.get_val(x[Bfac_p.xpos])
 
+    spec_sigma_p = Mod.P["spec_sigma"]
+    spec_sigma = spec_sigma_p.get_val(x[spec_sigma_p.xpos])
+
+    beam_x_p = Mod.P["beam_X"]
+    beam_y_p = Mod.P["beam_Y"]
+    beam_x = beam_x_p.get_val(x[beam_x_p.xpos])
+    beam_y = beam_y_p.get_val(x[beam_y_p.xpos])
+
     if as_dict:
-        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
-        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_b', 'diff_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle', 'Bfactor'
+        vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor, spec_sigma, beam_x, beam_y
+        keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_b', 'diff_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle', 'Bfactor', 'spec_sigma', 'beam_x', 'beam_y'
         param_dict = dict(zip(keys, vals))
         return param_dict
     else:
-        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor
+        return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor, spec_sigma, beam_x, beam_y
 
 
 class TargetFunc:
@@ -2361,6 +2480,12 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
             SIM.D.let_loose(ROTX_ID)
             SIM.D.let_loose(ROTY_ID)
             SIM.D.let_loose(ROTZ_ID)
+        # Enable rotation derivatives for beam_XY analytical gradients
+        # beam_X uses rotY derivative, beam_Y uses rotX derivative
+        if mod.P["beam_X"].refine:
+            SIM.D.let_loose(ROTY_ID)
+        if mod.P["beam_Y"].refine:
+            SIM.D.let_loose(ROTX_ID)
         if mod.P["ucell0"].refine:
             for i_ucell in range(len(mod.ucell_man.variables)):
                 SIM.D.let_loose(UCELL_ID_OFFSET + i_ucell)
@@ -2500,6 +2625,29 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         #Jac_t = Jac[:,trusted]
         # gradient vector
         #g = np.array([np.sum(common_grad_term*Jac_t[param_idx]) for param_idx in range(Jac_t.shape[0])])
+
+        # Analytical gradient for spec_sigma via sourceI chain rule
+        # dTarget/d(sigma) = sum_k [sourceI_grad[k] * ((E_k - E0)^2 - <(E-E0)^2>) / sigma^3]
+        if mod.P["spec_sigma"].refine:
+            p = mod.P["spec_sigma"]
+            sigma_val = p.get_val(x[p.xpos])
+            g_idx = 0 if getattr(mod.params, 'shared_spot_scale', False) else 0
+            G = mod.P['G_xtal%d' % g_idx]
+            Gscale = G.get_val(x[G.xpos])
+            resid_64 = resid.astype(np.float64) if resid.dtype != np.float64 else resid
+            V_64 = V.astype(np.float64) if V.dtype != np.float64 else V
+            sI_grad = SIM.D.add_sourceI_gradients(
+                mod.pan_fast_slow, resid_64, V_64, trusted,
+                mod.all_freq, Gscale)
+            center_eV = utils.ENERGY_CONV / mod._nominal_wavelength
+            spec_energies = np.array([utils.ENERGY_CONV / w for w, _ in SIM.beam.spectrum])
+            dE_sq = (spec_energies - center_eV)**2
+            gauss_wt = np.exp(-0.5 * dE_sq / sigma_val**2)
+            mean_dE_sq = np.sum(gauss_wt * dE_sq) / np.sum(gauss_wt)
+            dsigma = (dE_sq - mean_dE_sq) / sigma_val**3
+            spec_grad = np.sum(sI_grad * dsigma)
+            spec_grad = p.get_deriv(x[p.xpos], spec_grad)
+            g[p.xpos] += spec_grad
 
         if params.use_restraints:
             # update gradients according to restraints
