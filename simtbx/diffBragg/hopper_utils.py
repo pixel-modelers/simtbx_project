@@ -913,43 +913,44 @@ class DataModeler:
             assert self.params.betas.Nvol is not None
 
         if best is not None:
-            # set the crystal Umat (rotational displacement) and Bmat (unit cell)
-            # Umatrix
-            # NOTE: just set the best Amatrix here
-            #C = deepcopy(self.E.crystal)
-            #crystal = self.E.crystal
-            #self.E.crystal = crystal
+            best_cols = list(best)
 
-            ## TODO , currently need this anyway
-            ucparam = best[["a","b","c","al","be","ga"]].values[0]
-            ucman = utils.manager_from_params(ucparam)
-            self.E.crystal.set_B(ucman.B_recipspace)
-            self.E.crystal.set_A(best.Amats.values[0])
+            # set the crystal Umat (rotational displacement) and Bmat (unit cell)
+            if "a" in best_cols and "Amats" in best_cols:
+                ucparam = best[["a","b","c","al","be","ga"]].values[0]
+                ucman = utils.manager_from_params(ucparam)
+                self.E.crystal.set_B(ucman.B_recipspace)
+                self.E.crystal.set_A(best.Amats.values[0])
 
             # mosaic block
-            self.params.init.Nabc = tuple(best.ncells.values[0])
-            self.params.init.Ndef = tuple(best.ncells_def.values[0])
-            # scale factor
-            self.params.init.G = best.spot_scales.values[0]
+            if "ncells" in best_cols:
+                self.params.init.Nabc = tuple(best.ncells.values[0])
+            if "ncells_def" in best_cols:
+                self.params.init.Ndef = tuple(best.ncells_def.values[0])
 
-            if "detz_shift_mm" in list(best):
+            # scale factor
+            if "spot_scales" in best_cols:
+                self.params.init.G = best.spot_scales.values[0]
+
+            if "detz_shift_mm" in best_cols:
                 self.params.init.detz_shift = best.detz_shift_mm.values[0]
 
-            if "gonio_angle" in list(best):
+            if "gonio_angle" in best_cols:
                 self.params.init.gonio_angle = best.gonio_angle.values[0]
-            if "Bfactor" in list(best):
+            if "Bfactor" in best_cols:
                 self.params.init.B = best.Bfactor.values[0]
 
-            # TODO: set best eta_abc params
-            self.params.init.eta_abc = tuple(best.eta_abc.values[0])
-            self.params.init.eta_abc = tuple([eta_val if eta_val > self.params.mins.eta_abc[i_eta] else self.params.mins.eta_abc[i_eta]+1e-2 for i_eta, eta_val in enumerate(self.params.init.eta_abc)])
+            if "eta_abc" in best_cols:
+                self.params.init.eta_abc = tuple(best.eta_abc.values[0])
+                self.params.init.eta_abc = tuple([eta_val if eta_val > self.params.mins.eta_abc[i_eta] else self.params.mins.eta_abc[i_eta]+1e-2 for i_eta, eta_val in enumerate(self.params.init.eta_abc)])
 
-            lam0, lam1 = get_lam0_lam1_from_pandas(best)
-            self.params.init.spec = lam0, lam1
+            if "lam0" in best_cols or "spectrum_filename" in best_cols:
+                lam0, lam1 = get_lam0_lam1_from_pandas(best)
+                self.params.init.spec = lam0, lam1
 
-            if "spec_sigma" in list(best) and self.params.init.spec_sigma is not None:
+            if "spec_sigma" in best_cols and self.params.init.spec_sigma is not None:
                 self.params.init.spec_sigma = float(best.spec_sigma.values[0])
-            if "beam_x_mrad" in list(best) and "beam_y_mrad" in list(best):
+            if "beam_x_mrad" in best_cols and "beam_y_mrad" in best_cols:
                 self.params.init.beam_XY = [float(best.beam_x_mrad.values[0]),
                                             float(best.beam_y_mrad.values[0])]
 

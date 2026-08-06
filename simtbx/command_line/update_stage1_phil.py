@@ -46,9 +46,22 @@ Bfac_restraint_phil = ""
 if 'Bfactor' in df1.columns:
     Bmed = df1.Bfactor.median()
     Bfac_phil = "  B = {B}\n".format(B=Bmed)
-    Bfac_center_phil = "  B = {B}\n".format(B=Bmed)
-    Bfac_restraint_phil = "  B = 10\n"
-    print("B-factor: median=%.2f (from %d shots)" % (Bmed, len(df1)))
+    if os.environ.get("RESTRAIN_BFACTOR", "0") == "1":
+        Bfac_center_phil = "  B = {B}\n".format(B=Bmed)
+        Bfac_restraint_phil = "  B = 10\n"
+        print("B-factor: median=%.2f, restraint ON (from %d shots)" % (Bmed, len(df1)))
+    else:
+        print("B-factor: median=%.2f, restraint OFF (from %d shots)" % (Bmed, len(df1)))
+
+# Nvol restraint (conditional)
+if os.environ.get("RESTRAIN_NVOL", "1") == "1":
+    Nvol_center_phil = "  Nvol = {nvol}\n".format(nvol=nvol)
+    Nvol_beta_phil = "  Nvol = 1e-2\n"
+    print("Nvol: median=%.1f, restraint ON" % nvol)
+else:
+    Nvol_center_phil = "  #Nvol = {nvol}\n".format(nvol=nvol)
+    Nvol_beta_phil = "  #Nvol = 1e-2\n"
+    print("Nvol: median=%.1f, restraint OFF" % nvol)
 
 update_phil = """
 init {{
@@ -57,8 +70,7 @@ init {{
   eta_abc = [{ea},{eb},{ec}]
 {Bfac_phil}}}
 centers {{
-  Nvol = {nvol}
-  ucell_a = {a}
+{Nvol_center_phil}  ucell_a = {a}
   ucell_b = {b}
   ucell_c = {c}
   ucell_alpha = {al}
@@ -66,8 +78,7 @@ centers {{
   ucell_gamma = {ga}
 {Bfac_center_phil}}}
 betas {{
-  Nvol = 1e-2
-  ucell_a = 1e-7
+{Nvol_beta_phil}  ucell_a = 1e-7
   ucell_b = 1e-7
   ucell_c = 1e-7
   ucell_alpha = 1e-7
@@ -75,7 +86,9 @@ betas {{
   ucell_gamma = 1e-7
 {Bfac_restraint_phil}}}
 use_restraints = True
-""".format(G=Gmed,na=na, nb=nb, nc=nb, ea=ea, eb=eb, ec=ec,a=a,b=b,c=c,al=al,be=be,ga=ga, nvol=nvol, Bfac_phil=Bfac_phil, Bfac_center_phil=Bfac_center_phil, Bfac_restraint_phil=Bfac_restraint_phil)
+""".format(G=Gmed,na=na, nb=nb, nc=nb, ea=ea, eb=eb, ec=ec,a=a,b=b,c=c,al=al,be=be,ga=ga,
+           Nvol_center_phil=Nvol_center_phil, Nvol_beta_phil=Nvol_beta_phil,
+           Bfac_phil=Bfac_phil, Bfac_center_phil=Bfac_center_phil, Bfac_restraint_phil=Bfac_restraint_phil)
 
 Gmin_Gmax="""
 mins.G={Gmin}
