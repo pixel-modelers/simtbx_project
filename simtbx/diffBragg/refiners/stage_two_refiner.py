@@ -60,8 +60,21 @@ from simtbx.diffBragg.refiners import BaseRefiner
 from cctbx import miller, sgtbx
 from simtbx.diffBragg.refiners.parameters import RangedParameter
 
-# how many parameters per shot: scale, B-factor, Ncells abc (Na,Nb,Nc), Ncells def (Nd,Ne,Nf)
-N_PARAM_PER_SHOT = 8
+# Lazy-import helpers to avoid circular imports (geometry -> ensemble_refine_launcher -> stage_two_refiner)
+UCELL_ID_OFFSET = 3  # from hopper_utils; duplicated here to avoid import
+PAN_O_ID = 14
+PAN_F_ID = 17
+PAN_S_ID = 18
+PAN_X_ID = 15
+PAN_Y_ID = 16
+PAN_Z_ID = 10
+PAN_OFS_IDS = (PAN_O_ID, PAN_F_ID, PAN_S_ID)
+PAN_XYZ_IDS = (PAN_X_ID, PAN_Y_ID, PAN_Z_ID)
+
+# base per-shot parameters: scale, B-factor, Ncells abc (Na,Nb,Nc), Ncells def (Nd,Ne,Nf), RotXYZ
+N_PARAM_PER_SHOT_BASE = 11
+# backwards compat alias (used in places that don't depend on ucell count)
+N_PARAM_PER_SHOT = N_PARAM_PER_SHOT_BASE
 
 
 class StageTwoRefiner(BaseRefiner):
@@ -112,6 +125,9 @@ class StageTwoRefiner(BaseRefiner):
         LOGGER.debug("Loaded %d shots across all ranks" % self.n_shots_total)
         self.f_vals = []  # store the functional over time
 
+        self._rotX_id = 0  # diffBragg internal index for RotX derivative manager
+        self._rotY_id = 1  # diffBragg internal index for RotY derivative manager
+        self._rotZ_id = 2  # diffBragg internal index for RotZ derivative manager
         self._ncells_id = 9  # diffBragg internal index for Ncells derivative manager
         self._detector_distance_id = 10  # diffBragg internal index for detector_distance derivative manager
         self._panelRotO_id = 14  # diffBragg internal index for derivative manager
@@ -232,18 +248,34 @@ class StageTwoRefiner(BaseRefiner):
         self.n_total_shots = len(self.shot_mapping)
 
         test_shot = self.shot_ids[0]
-        self.n_ucell_param = len(self.Modelers[test_shot].PAR.ucell_man.variables)  # not used
-        self.n_total_params = self.n_total_shots*N_PARAM_PER_SHOT + self.n_global_fcell + self.num_regions
+        self.n_ucell_param = len(self.Modelers[test_shot].PAR.ucell_man.variables)
+        # per-shot layout: Scale(0), B(1), Na/Nb/Nc(2-4), Nd/Ne/Nf(5-7), RotX/Y/Z(8-10), [ucell(11..11+n_ucell)]
+        if self.params.refiner.refine_ucell:
+            self.n_params_per_shot = N_PARAM_PER_SHOT_BASE + self.n_ucell_param
+        else:
+            self.n_params_per_shot = N_PARAM_PER_SHOT_BASE
+
+        # Panel geometry: global params (6 per panel group)
+        self._setup_panel_groups()
+        n_panel_params = self.n_panel_groups * 6 if self.params.refiner.refine_panel_geom else 0
+
+        self.n_total_params = self.n_total_shots*self.n_params_per_shot + self.n_global_fcell + self.num_regions + n_panel_params
 
         self.spot_scale_xpos = {}
         self.Bfactor_xpos = {}
         self.Ncells_xstart = {}
         self.Ndef_xstart = {}
+        self.RotXYZ_xstart = {}
+        self.ucell_xstart = {}
         for shot_id in self.shot_ids:
-            self.spot_scale_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT
-            self.Bfactor_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 1
-            self.Ncells_xstart[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 2
-            self.Ndef_xstart[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 5
+            base = self.shot_mapping[shot_id]*self.n_params_per_shot
+            self.spot_scale_xpos[shot_id] = base
+            self.Bfactor_xpos[shot_id] = base + 1
+            self.Ncells_xstart[shot_id] = base + 2
+            self.Ndef_xstart[shot_id] = base + 5
+            self.RotXYZ_xstart[shot_id] = base + 8
+            if self.params.refiner.refine_ucell:
+                self.ucell_xstart[shot_id] = base + N_PARAM_PER_SHOT_BASE
         LOGGER.info("--0 create an Fcell mapping")
         if self.refine_Fcell:
             #idx, data = self.S.D.Fhkl_tuple
@@ -258,11 +290,14 @@ class StageTwoRefiner(BaseRefiner):
         self.x = flex.double(np.ones(self.n_total_params))
         LOGGER.info("--Setting up per shot parameters")
 
-        self.fcell_xstart = self.n_total_shots*N_PARAM_PER_SHOT
+        self.fcell_xstart = self.n_total_shots*self.n_params_per_shot
         self.regions_xstart = self.fcell_xstart + self.n_global_fcell
+        self.panel_xstart = self.regions_xstart + self.num_regions  # panel geom params start after regions
 
         self._setup_region_refinement_parameters()
         self._setup_ncells_refinement_parameters()
+        self._setup_ucell_refinement_parameters()
+        self._setup_panel_refinement_parameters()
         self._track_num_times_pixel_was_modeled()
 
         self._setup_nominal_hkl_p1()
@@ -287,11 +322,24 @@ class StageTwoRefiner(BaseRefiner):
             self.D.refine(self._ncells_id)
         if self.params.refiner.refine_Ndef:
             self.D.refine(self._ncells_def_id)
+        if self.params.refiner.refine_RotXYZ:
+            self.D.refine(self._rotX_id)
+            self.D.refine(self._rotY_id)
+            self.D.refine(self._rotZ_id)
         if self.params.refiner.refine_Bfactor:
             self.D.refine(self._bfactor_id)
             print("STAGE2_BFACTOR: B-factor refinement ENABLED (refine_Bfactor=True)", flush=True)
         else:
             print("STAGE2_BFACTOR: B-factor refinement DISABLED", flush=True)
+        if self.params.refiner.refine_ucell:
+            for i_uc in range(self.n_ucell_param):
+                self.D.refine(UCELL_ID_OFFSET + i_uc)
+            LOGGER.info("Ucell refinement ENABLED (%d params)" % self.n_ucell_param)
+        if self.params.refiner.refine_panel_geom:
+            for pid in PAN_OFS_IDS + PAN_XYZ_IDS:
+                self.D.refine(pid)
+            LOGGER.info("Panel geometry refinement ENABLED (%d groups, %d params)"
+                        % (self.n_panel_groups, self.n_panel_groups * 6))
         self.D.initialize_managers()
 
         for sid in self.shot_ids:
@@ -345,7 +393,99 @@ class StageTwoRefiner(BaseRefiner):
             for i_n, p in enumerate(Ndef_params):
                 p.xpos = self.Ndef_xstart[i_shot] + i_n
                 p.name = "%s_shot%d_rank%d" % ( ndef_names[i_n], i_shot, COMM.rank)
+            rot_names = "RotX", "RotY", "RotZ"
+            RotXYZ_params = self.Modelers[i_shot].PAR.RotXYZ_params
+            for i_r, p in enumerate(RotXYZ_params):
+                p.xpos = self.RotXYZ_xstart[i_shot] + i_r
+                p.name = "%s_shot%d_rank%d" % ( rot_names[i_r], i_shot, COMM.rank)
             self.Modelers[i_shot].PAR.B.xpos = self.Bfactor_xpos[i_shot]
+
+    def _setup_ucell_refinement_parameters(self):
+        if not self.params.refiner.refine_ucell:
+            return
+        ucell_names = self.Modelers[self.shot_ids[0]].PAR.ucell_man.variable_names
+        for i_shot in self.shot_ids:
+            for i_uc, p in enumerate(self.Modelers[i_shot].PAR.ucell):
+                p.xpos = self.ucell_xstart[i_shot] + i_uc
+                p.name = "%s_shot%d_rank%d" % (ucell_names[i_uc], i_shot, COMM.rank)
+
+    def _setup_panel_groups(self):
+        """Load panel group definitions. Called early in _setup before n_total_params is computed."""
+        if self.params.refiner.refine_panel_geom:
+            from simtbx.diffBragg import utils as _utils
+            if self.params.refiner.panel_group_file is not None:
+                self.panel_group_from_id = _utils.load_panel_group_file(
+                    self.params.refiner.panel_group_file)
+            else:
+                npan = len(self.S.detector)
+                self.panel_group_from_id = {pid: 0 for pid in range(npan)}
+            self.panel_groups_sorted = sorted(set(self.panel_group_from_id.values()))
+            self.n_panel_groups = len(self.panel_groups_sorted)
+
+            # Build reference origins for each panel
+            det = self.S.detector
+            panels_per_group = {gid: [] for gid in self.panel_groups_sorted}
+            for pid in self.panel_group_from_id:
+                panels_per_group[self.panel_group_from_id[pid]].append(pid)
+            self.panel_reference_from_id = {}
+            for pid in self.panel_group_from_id:
+                gid = self.panel_group_from_id[pid]
+                ref_panel = det[panels_per_group[gid][0]]
+                self.panel_reference_from_id[pid] = ref_panel.get_origin()
+
+            # Store on SIM for update_detector compatibility
+            self.S.panel_group_from_id = self.panel_group_from_id
+            self.S.panel_reference_from_id = self.panel_reference_from_id
+            self.S.panel_groups_refined = set(self.panel_groups_sorted)
+        else:
+            self.n_panel_groups = 0
+            self.panel_groups_sorted = []
+            self.panel_group_from_id = {}
+            self.panel_reference_from_id = {}
+
+    def _setup_panel_refinement_parameters(self):
+        """Create RangedParameter objects for panel geometry (6 per group)."""
+        self.panel_params = {}
+        if not self.params.refiner.refine_panel_geom:
+            return
+
+        GEO = self.params.geometry
+        DEG_TO_PI = np.pi / 180.
+        vary_rots = [not fixed_flag for fixed_flag in GEO.fix.panel_rotations]
+        vary_shifts = [not fixed_flag for fixed_flag in GEO.fix.panel_translations]
+        sigma_rot = GEO.sigmas.panel_rot
+        sigma_xyz = GEO.sigmas.panel_xyz
+
+        for i_g, group_id in enumerate(self.panel_groups_sorted):
+            base_xpos = self.panel_xstart + i_g * 6
+            names_inits_sigmas_minmax_fix = [
+                ("group%d_RotOrth" % group_id, 0, sigma_rot[0],
+                 GEO.min.panel_rotations[0]*DEG_TO_PI, GEO.max.panel_rotations[0]*DEG_TO_PI, not vary_rots[0]),
+                ("group%d_RotFast" % group_id, 0, sigma_rot[1],
+                 GEO.min.panel_rotations[1]*DEG_TO_PI, GEO.max.panel_rotations[1]*DEG_TO_PI, not vary_rots[1]),
+                ("group%d_RotSlow" % group_id, 0, sigma_rot[2],
+                 GEO.min.panel_rotations[2]*DEG_TO_PI, GEO.max.panel_rotations[2]*DEG_TO_PI, not vary_rots[2]),
+                ("group%d_ShiftX" % group_id, 0, sigma_xyz[0],
+                 GEO.min.panel_translations[0]*1e-3, GEO.max.panel_translations[0]*1e-3, not vary_shifts[0]),
+                ("group%d_ShiftY" % group_id, 0, sigma_xyz[1],
+                 GEO.min.panel_translations[1]*1e-3, GEO.max.panel_translations[1]*1e-3, not vary_shifts[1]),
+                ("group%d_ShiftZ" % group_id, 0, sigma_xyz[2],
+                 GEO.min.panel_translations[2]*1e-3, GEO.max.panel_translations[2]*1e-3, not vary_shifts[2]),
+            ]
+            for j, (name, init, sigma, minv, maxv, fix) in enumerate(names_inits_sigmas_minmax_fix):
+                p = RangedParameter(init=init, minval=minv, maxval=maxv, sigma=sigma,
+                                    center=0, beta=1e10, fix=fix)
+                p.xpos = base_xpos + j
+                p.name = name
+                self.panel_params[name] = p
+
+        # Set up group_id_slices on each Modeler for efficient per-group pixel access
+        from simtbx.diffBragg.refiners.geometry import set_group_id_slices
+        for i_shot in self.shot_ids:
+            set_group_id_slices(self.Modelers[i_shot], self.panel_group_from_id)
+
+        LOGGER.info("Panel params: %d groups, %d params total, vary_rots=%s, vary_shifts=%s"
+                     % (self.n_panel_groups, len(self.panel_params), vary_rots, vary_shifts))
 
     def _gain_restraints(self):
         if self.params.refiner.gain_restraint:
@@ -362,6 +502,57 @@ class StageTwoRefiner(BaseRefiner):
                 return  # no restraint configured
             self.target_functional += p.get_restraint_val(self.x[p.xpos])
             self.grad[p.xpos] += p.get_restraint_deriv(self.x[p.xpos])
+
+    def _Fhkl_restraints(self):
+        """Restrain Fhkl envelope: penalize deviation of bin-mean intensity from initial.
+
+        The restraint is:  f += 0.5 * sum_bins (I_mean_b - I_init_b)^2 / beta
+        where I_mean_b = mean(F_i^2) for all i_fcell in bin b.
+
+        Gradient w.r.t. x_i (log-parameterized):
+           g_i += (I_mean_b - I_init_b) * 2 * sig_i * F_i^2 / (beta * N_b)
+        where dF/dx = sig * F for the log parameterization.
+        """
+        beta = self.params.betas.Fhkl
+        if beta is None or not self.refine_Fcell:
+            return
+        if not hasattr(self, '_fcell_bin_id'):
+            return
+
+        # Current F values and intensities
+        F_current = self._fcell_at_i_fcell
+        I_current = F_current ** 2
+
+        # Compute current bin means
+        I_mean = np.zeros(self._fcell_n_bins)
+        for b in range(self._fcell_n_bins):
+            mask = self._fcell_bin_id == b
+            if mask.any():
+                I_mean[b] = I_current[mask].mean()
+
+        # Restraint target and gradient
+        delta = I_mean - self._fcell_bin_Imean_init
+        f_restraint = 0.5 * np.sum(delta ** 2 / beta)
+        self.target_functional += f_restraint
+
+        # Per-Fcell gradient: chain rule through bin mean and log parameterization
+        sigs = self.fcell_sigmas_from_i_fcell
+        if np.isscalar(sigs):
+            sigs = np.full(self.n_global_fcell, sigs)
+        for i_fcell in range(self.n_global_fcell):
+            b = self._fcell_bin_id[i_fcell]
+            N_b = self._fcell_bin_count[b]
+            if N_b == 0:
+                continue
+            xpos = self.fcell_xstart + i_fcell
+            # d(restraint)/dx_i = delta_b / beta * d(I_mean_b)/dx_i
+            # d(I_mean_b)/dx_i = 2*sig_i*F_i^2 / N_b  (for log param: dF/dx = sig*F)
+            g_i = delta[b] / beta * 2.0 * sigs[i_fcell] * I_current[i_fcell] / N_b
+            self.grad[xpos] += g_i
+
+        if self.I_AM_ROOT and (self.iterations < 3 or self.target_eval_count % 10 == 0):
+            LOGGER.info("Fhkl_envelope_restraint: f=%.4e beta=%.2e delta_range=[%.4e, %.4e]"
+                        % (f_restraint, beta, delta.min(), delta.max()))
 
     def _save_per_shot_sigZ(self):
         """Save per-shot and per-shoebox sigZ/scores at configured intervals.
@@ -516,7 +707,51 @@ class StageTwoRefiner(BaseRefiner):
             self.fcell_init_from_i_fcell = np.array(self.fcell_init_from_i_fcell)
 
             self.fcell_sigmas_from_i_fcell = self.params.sigmas.Fhkl
+
+            # Set up resolution bins for Fhkl envelope restraint
+            self._setup_fcell_restraint_bins()
             LOGGER.info("DONE make fcell_init")
+
+    def _setup_fcell_restraint_bins(self):
+        """Compute resolution bins for Fhkl envelope restraint.
+        Each i_fcell gets assigned a bin based on d-spacing. The initial
+        bin-mean intensity (mean of F_init^2) is stored as the restraint target."""
+        uc = self.S.crystal.dxtbx_crystal.get_unit_cell()
+        n_bins = self.params.Fhkl_dspace_bins
+
+        # Compute d-spacing for each i_fcell
+        d_spacings = np.array([uc.d(self.hiasu.from_idx[i])
+                               for i in range(self.n_global_fcell)])
+
+        # Equal-count binning by d-spacing (sorted ascending = high-res first)
+        sorted_d = np.sort(d_spacings)
+        bin_edges = [sorted_d[0] - 1e-6]
+        for chunk in np.array_split(sorted_d, n_bins):
+            if len(chunk):
+                bin_edges.append(chunk[-1])
+        bin_edges[-1] += 1e-6
+        bin_edges = np.array(bin_edges)
+
+        # Assign each i_fcell to a bin
+        self._fcell_bin_id = np.digitize(d_spacings, bin_edges) - 1
+        self._fcell_bin_id = np.clip(self._fcell_bin_id, 0, n_bins - 1)
+        self._fcell_n_bins = n_bins
+
+        # Compute initial bin-mean intensities (I = F^2)
+        I_init = self.fcell_init_from_i_fcell ** 2
+        self._fcell_bin_Imean_init = np.zeros(n_bins)
+        self._fcell_bin_count = np.zeros(n_bins)
+        for b in range(n_bins):
+            mask = self._fcell_bin_id == b
+            if mask.any():
+                self._fcell_bin_Imean_init[b] = I_init[mask].mean()
+                self._fcell_bin_count[b] = mask.sum()
+
+        LOGGER.info("Fhkl envelope restraint: %d bins, d=[%.2f, %.2f] A, "
+                     "bin counts=[%d, %d]"
+                     % (n_bins, d_spacings.min(), d_spacings.max(),
+                        int(self._fcell_bin_count.min()),
+                        int(self._fcell_bin_count.max())))
 
     def _save_fcell_shot_coupling(self):
         """Save which shots observe each Fcell (once at setup). MPI-gathered."""
@@ -559,7 +794,15 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _get_rotXYZ(self, i_shot):
-        vals = [self.Modelers[i_shot].RotXYZ[i_rot].init for i_rot in range(3)]
+        if self.params.refiner.refine_RotXYZ:
+            vals = []
+            RotXYZ_p = self.Modelers[i_shot].PAR.RotXYZ_params
+            for p in RotXYZ_p:
+                xval = self.x[p.xpos]
+                val = p.get_val(xval)
+                vals.append(val)
+        else:
+            vals = [self.Modelers[i_shot].PAR.RotXYZ_params[i_rot].init for i_rot in range(3)]
         return vals
 
     def _get_rotX(self, i_shot):
@@ -575,11 +818,15 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _get_ucell_vars(self, i_shot):
-        vars = []
-        for i in range(self.n_ucell_param):
-            var = self.Modelers[i_shot].PAR.ucell[i].init
-            vars.append(var)
-        return vars
+        vals = []
+        if self.params.refiner.refine_ucell:
+            for i in range(self.n_ucell_param):
+                p = self.Modelers[i_shot].PAR.ucell[i]
+                vals.append(p.get_val(self.x[p.xpos]))
+        else:
+            for i in range(self.n_ucell_param):
+                vals.append(self.Modelers[i_shot].PAR.ucell[i].init)
+        return vals
 
     def _get_panelRot_val(self, panel_id):
         pass
@@ -636,8 +883,14 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _send_ucell_gradients_to_derivative_managers(self):
-        """Needs to be called once each time the orientation is updated"""
-        pass
+        """Set ucell derivative matrices on diffBragg. Called after ucell_man.variables are updated."""
+        if not self.params.refiner.refine_ucell:
+            return
+        ucell_man = self.Modelers[self._i_shot].PAR.ucell_man
+        for i_uc in range(self.n_ucell_param):
+            self.D.set_ucell_derivative_matrix(
+                i_uc + UCELL_ID_OFFSET,
+                ucell_man.derivative_matrices[i_uc])
 
     def _run_diffBragg_current(self):
         LOGGER.info("run diffBragg for shot %d" % self._i_shot)
@@ -754,8 +1007,8 @@ class StageTwoRefiner(BaseRefiner):
 
     def _symmetrize_Flatt(self):
         if self.params.symmetrize_Flatt:
-            # NOTE: RotXYZ refinement disabled for this script, so offsets always 0,0,0
-            RXYZU = hopper_io.diffBragg_Umat(0,0,0,self.D.Umatrix)
+            rotXYZ = self._get_rotXYZ(self._i_shot)
+            RXYZU = hopper_io.diffBragg_Umat(rotXYZ[0], rotXYZ[1], rotXYZ[2], self.D.Umatrix)
             Cryst = deepcopy(self.S.crystal.dxtbx_crystal)
             B_realspace = self.get_refined_Bmatrix(self._i_shot, recip=False)
             A = RXYZU * B_realspace
@@ -791,7 +1044,10 @@ class StageTwoRefiner(BaseRefiner):
                 num_phi_steps=Mod.phisteps)
 
     def _update_rotXYZ(self):
-        pass
+        vals = self._get_rotXYZ(self._i_shot)
+        self.D.set_value(self._rotX_id, vals[0])
+        self.D.set_value(self._rotY_id, vals[1])
+        self.D.set_value(self._rotZ_id, vals[2])
 
     def _update_ncells(self):
         vals = self._get_ncells_abc(self._i_shot)
@@ -804,6 +1060,13 @@ class StageTwoRefiner(BaseRefiner):
     def _update_dxtbx_detector(self):
         shiftZ = self._get_detector_distance_val(self._i_shot)
         self.S.D.shift_origin_z(self.S.detector,  shiftZ)
+
+    def _update_panel_geom(self):
+        if not self.params.refiner.refine_panel_geom:
+            return
+        from simtbx.diffBragg.geom_utils import update_detector as _geom_update_detector
+        _geom_update_detector(self.x, self.panel_params, self.S, save=None,
+                              rank=COMM.rank, force=False)
 
     def _extract_spectra_coefficient_derivatives(self):
         pass
@@ -830,22 +1093,58 @@ class StageTwoRefiner(BaseRefiner):
         if self.params.refiner.refine_Nabc:
             self.dNabc = [d[:npix].as_numpy_array() for d in self.D.get_ncells_derivative_pixels()]
             if self.calc_curvatures:
-                raise NotImplementedError("update the code")
+                self.d2Nabc = [d[:npix].as_numpy_array() for d in self.D.get_ncells_second_derivative_pixels()]
 
         if self.params.refiner.refine_Ndef:
             self.dNdef = [d[:npix].as_numpy_array() for d in self.D.get_ncells_def_derivative_pixels()]
+            if self.calc_curvatures:
+                self.d2Ndef = [d[:npix].as_numpy_array() for d in self.D.get_ncells_def_second_derivative_pixels()]
+
+        if self.params.refiner.refine_RotXYZ:
+            rot_ids = [self._rotX_id, self._rotY_id, self._rotZ_id]
+            self.dRotXYZ = [self.D.get_derivative_pixels(rid).as_numpy_array()[:npix] for rid in rot_ids]
+            if self.calc_curvatures:
+                self.d2RotXYZ = [self.D.get_second_derivative_pixels(rid).as_numpy_array()[:npix] for rid in rot_ids]
 
         if self.params.refiner.refine_Bfactor:
             self._dB = self.D.get_Bfactor_derivative_pixels()[:npix].as_numpy_array()
+            if self.calc_curvatures:
+                # d2I/dB2 = s^4 * I = -s^2 * dI/dB, where s^2 = q^2/4
+                Bfactor_qterm = self.Modelers[self._i_shot].all_q_perpix**2 / 4.
+                self._d2B = -Bfactor_qterm * self._dB
+
+        if self.params.refiner.refine_ucell:
+            self.dUcell = []
+            for i_uc in range(self.n_ucell_param):
+                d = self.D.get_derivative_pixels(UCELL_ID_OFFSET + i_uc).as_numpy_array()[:npix]
+                self.dUcell.append(d)
+
+        if self.params.refiner.refine_panel_geom:
+            self._panel_derivs = []
+            for pid in PAN_OFS_IDS + PAN_XYZ_IDS:
+                try:
+                    d = self.D.get_derivative_pixels(pid).as_numpy_array()[:npix]
+                except ValueError:
+                    d = None
+                self._panel_derivs.append(d)
 
     def _extract_sausage_derivs(self):
         pass
 
     def _extract_Umatrix_derivative_pixels(self):
-        pass
+        if self.params.refiner.refine_RotXYZ:
+            npix = len(self.Modelers[self._i_shot].all_data)
+            rot_ids = [self._rotX_id, self._rotY_id, self._rotZ_id]
+            self.dRotXYZ = [self.D.get_derivative_pixels(rid).as_numpy_array()[:npix] for rid in rot_ids]
 
     def _extract_Bmatrix_derivative_pixels(self):
-        pass
+        if not self.params.refiner.refine_ucell:
+            return
+        npix = len(self.Modelers[self._i_shot].all_data)
+        self.dUcell = []
+        for i_uc in range(self.n_ucell_param):
+            d = self.D.get_derivative_pixels(UCELL_ID_OFFSET + i_uc).as_numpy_array()[:npix]
+            self.dUcell.append(d)
 
     def _extract_ncells_def_derivative_pixels(self):
         if self.params.refiner.refine_Ndef:
@@ -859,10 +1158,19 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _extract_panelRot_derivative_pixels(self):
-        pass
+        if not self.params.refiner.refine_panel_geom:
+            return
+        npix = len(self.Modelers[self._i_shot].all_data)
+        self._panel_derivs = []
+        for pid in PAN_OFS_IDS + PAN_XYZ_IDS:
+            try:
+                d = self.D.get_derivative_pixels(pid).as_numpy_array()[:npix]
+            except ValueError:
+                d = None
+            self._panel_derivs.append(d)
 
     def _extract_panelXYZ_derivative_pixels(self):
-        pass
+        pass  # extracted together with panelRot in _extract_panelRot_derivative_pixels
 
     def _scale_Fcell_derivative_pixels(self):
         self.fcell_deriv = self.fcell_second_deriv = 0
@@ -876,10 +1184,29 @@ class StageTwoRefiner(BaseRefiner):
     def _scale_Nabc_derivative_pixels(self):
         if self.params.refiner.refine_Nabc:
             self.dNabc = [self.scale_fac*d for d in self.dNabc]
+            if self.calc_curvatures:
+                self.d2Nabc = [self.scale_fac*d for d in self.d2Nabc]
 
     def _scale_Ndef_derivative_pixels(self):
         if self.params.refiner.refine_Ndef:
             self.dNdef = [self.scale_fac*d for d in self.dNdef]
+            if self.calc_curvatures:
+                self.d2Ndef = [self.scale_fac*d for d in self.d2Ndef]
+
+    def _scale_RotXYZ_derivative_pixels(self):
+        if self.params.refiner.refine_RotXYZ:
+            self.dRotXYZ = [self.scale_fac*d for d in self.dRotXYZ]
+            if self.calc_curvatures:
+                self.d2RotXYZ = [self.scale_fac*d for d in self.d2RotXYZ]
+
+    def _scale_ucell_derivative_pixels(self):
+        if self.params.refiner.refine_ucell:
+            self.dUcell = [self.scale_fac*d for d in self.dUcell]
+
+    def _scale_panel_derivative_pixels(self):
+        if self.params.refiner.refine_panel_geom:
+            self._panel_derivs = [self.scale_fac*d if d is not None else None
+                                  for d in self._panel_derivs]
 
     def _get_per_spot_scale(self, i_shot, i_spot):
         pass
@@ -894,9 +1221,21 @@ class StageTwoRefiner(BaseRefiner):
         self._scale_Fcell_derivative_pixels()
         self._scale_Nabc_derivative_pixels()
         self._scale_Ndef_derivative_pixels()
+        self._scale_RotXYZ_derivative_pixels()
+        self._scale_ucell_derivative_pixels()
+        self._scale_panel_derivative_pixels()
 
     def _update_ucell(self):
-        self.D.Bmatrix = self.Modelers[self._i_shot].PAR.Bmatrix
+        if self.params.refiner.refine_ucell:
+            ucell_man = self.Modelers[self._i_shot].PAR.ucell_man
+            ucell_man.variables = self._get_ucell_vars(self._i_shot)
+            self.D.Bmatrix = ucell_man.B_recipspace
+            for i_uc in range(self.n_ucell_param):
+                self.D.set_ucell_derivative_matrix(
+                    i_uc + UCELL_ID_OFFSET,
+                    ucell_man.derivative_matrices[i_uc])
+        else:
+            self.D.Bmatrix = self.Modelers[self._i_shot].PAR.Bmatrix
 
     def _update_umatrix(self):
         self.D.Umatrix = self.Modelers[self._i_shot].PAR.Umatrix
@@ -998,6 +1337,7 @@ class StageTwoRefiner(BaseRefiner):
             self._update_eta()  # mosaic spread
             self._symmetrize_Flatt()
             self._update_dxtbx_detector()
+            self._update_panel_geom()
             self._update_sausages()
             self._update_gonio()
 
@@ -1075,8 +1415,11 @@ class StageTwoRefiner(BaseRefiner):
             self._Bfactor_derivatives()
             self._accumulate_Nabc_derivatives()
             self._accumulate_Ndef_derivatives()
+            self._accumulate_RotXYZ_derivatives()
+            self._accumulate_ucell_derivatives()
             self._Fcell_derivatives()
             self._gain_region_derivatives()
+            self._accumulate_panel_derivatives()
 
             trusted = self.Modelers[self._i_shot].all_trusted
             shot_sigZ = np.std(self._Zscore[trusted])
@@ -1101,6 +1444,7 @@ class StageTwoRefiner(BaseRefiner):
 
         self._gain_restraints()
         self._bfactor_restraints()
+        self._Fhkl_restraints()
 
         # --- per-shot params (every eval) ---
         self._gathered_shot_data = self._gather_and_save_shot_params()
@@ -1169,16 +1513,19 @@ class StageTwoRefiner(BaseRefiner):
 
         # --- per-block norms ---
         n_shots = self.n_total_shots
+        npp = self.n_params_per_shot
         shot_indices = np.arange(n_shots)
-        scale_idx = shot_indices * N_PARAM_PER_SHOT
-        bfac_idx = shot_indices * N_PARAM_PER_SHOT + 1
-        nabc_idx = np.concatenate([shot_indices*N_PARAM_PER_SHOT + k for k in (2,3,4)])
-        ndef_idx = np.concatenate([shot_indices*N_PARAM_PER_SHOT + k for k in (5,6,7)])
+        scale_idx = shot_indices * npp
+        bfac_idx = shot_indices * npp + 1
+        nabc_idx = np.concatenate([shot_indices*npp + k for k in (2,3,4)])
+        ndef_idx = np.concatenate([shot_indices*npp + k for k in (5,6,7)])
+        rotxyz_idx = np.concatenate([shot_indices*npp + k for k in (8,9,10)])
 
         g_scale = g_np[scale_idx]
         g_bfac = g_np[bfac_idx]
         g_nabc = g_np[nabc_idx]
         g_ndef = g_np[ndef_idx]
+        g_rotxyz = g_np[rotxyz_idx]
         g_fcell = g_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
         g_gain = g_np[self.regions_xstart : self.regions_xstart + self.num_regions]
 
@@ -1186,6 +1533,7 @@ class StageTwoRefiner(BaseRefiner):
         x_bfac = x_np[bfac_idx]
         x_nabc = x_np[nabc_idx]
         x_ndef = x_np[ndef_idx]
+        x_rotxyz = x_np[rotxyz_idx]
         x_fcell = x_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
         x_gain = x_np[self.regions_xstart : self.regions_xstart + self.num_regions]
 
@@ -1199,6 +1547,7 @@ class StageTwoRefiner(BaseRefiner):
         bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero = block_norms(g_bfac, x_bfac)
         nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero = block_norms(g_nabc, x_nabc)
         ndef_gn2, ndef_ginf, ndef_xn2, ndef_gzero = block_norms(g_ndef, x_ndef)
+        rotxyz_gn2, rotxyz_ginf, rotxyz_xn2, rotxyz_gzero = block_norms(g_rotxyz, x_rotxyz)
         fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero = block_norms(g_fcell, x_fcell)
         gain_gn2, gain_ginf, gain_xn2, gain_gzero = block_norms(g_gain, x_gain)
 
@@ -1273,6 +1622,7 @@ class StageTwoRefiner(BaseRefiner):
                 "bfac_gn2", "bfac_ginf", "bfac_xn2", "bfac_gzero",
                 "nabc_gn2", "nabc_ginf", "nabc_xn2", "nabc_gzero",
                 "ndef_gn2", "ndef_ginf", "ndef_xn2", "ndef_gzero",
+                "rotxyz_gn2", "rotxyz_ginf", "rotxyz_xn2", "rotxyz_gzero",
                 "fcell_gn2", "fcell_ginf", "fcell_xn2", "fcell_gzero",
                 "gain_gn2", "gain_ginf", "gain_xn2", "gain_gzero",
                 "neg_v_pix", "neg_lam_pix", "neg_v_shots",
@@ -1297,6 +1647,7 @@ class StageTwoRefiner(BaseRefiner):
                 bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero,
                 nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero,
                 ndef_gn2, ndef_ginf, ndef_xn2, ndef_gzero,
+                rotxyz_gn2, rotxyz_ginf, rotxyz_xn2, rotxyz_gzero,
                 fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero,
                 gain_gn2, gain_ginf, gain_xn2, gain_gzero,
                 neg_v, neg_lam, neg_v_shots,
@@ -1314,6 +1665,10 @@ class StageTwoRefiner(BaseRefiner):
                      "n_params=%d n_fcell=%d dd_prev=%.4e armijo=%.4e step=%.4e neg_v=%d"
                      % (self.target_eval_count, self.iterations, conv_ratio, g_norm2, x_norm2, tradeps,
                         self.n_total_params, self.n_global_fcell, dd_prev, armijo, step_norm2, neg_v))
+        LOGGER.info("BLOCKS gn2: Scale=%.3e B=%.3e Nabc=%.3e Ndef=%.3e RotXYZ=%.3e Fcell=%.3e Gain=%.3e | "
+                     "xn2: Scale=%.3e Fcell=%.3e | step_fcell=%.3e"
+                     % (scale_gn2, bfac_gn2, nabc_gn2, ndef_gn2, rotxyz_gn2, fcell_gn2, gain_gn2,
+                        scale_xn2, fcell_xn2, step_fcell_n2))
 
     def _save_model(self, model_info):
         LOGGER.info("SAVING MODEL FOR SHOT %d" % self._i_shot)
@@ -1373,13 +1728,14 @@ class StageTwoRefiner(BaseRefiner):
 
             xpos = self.fcell_xstart + i_fcell
             Famp = self._fcell_at_i_fcell[i_fcell]
-            sig = 1
+            sig = self.fcell_sigmas_from_i_fcell if np.isscalar(self.fcell_sigmas_from_i_fcell) \
+                else self.fcell_sigmas_from_i_fcell[i_fcell]
 
             for slc in MOD.i_fcell_slices[i_fcell]:
                 self.fcell_dI_dtheta = self.fcell_deriv[slc]
 
                 if self.log_fcells:
-                    # case 2 rescaling
+                    # case 2 rescaling: d(I)/d(x) = F * dI/dF (log parameterization)
                     sig_times_fcell = sig*Famp
                     d = sig_times_fcell*self.fcell_dI_dtheta
                 else:
@@ -1395,7 +1751,18 @@ class StageTwoRefiner(BaseRefiner):
                 self.grad[xpos] += dump
                 dumps.append(dump)
                 if self.calc_curvatures:
-                    raise NotImplementedError("No curvature for Fcell refinement")
+                    fcell_d2I_dtheta = self.fcell_second_deriv[slc]
+                    if self.log_fcells:
+                        # d2I/dx2 = F*dI/dF + F^2*d2I/dF^2 for log param
+                        d2 = sig_times_fcell*self.fcell_dI_dtheta + sig_times_fcell*sig_times_fcell*fcell_d2I_dtheta
+                    else:
+                        d2 = sig*sig*fcell_d2I_dtheta
+                    # manual curv accumulate for this slice (can't use _curv_accumulate which uses full-shot _is_trusted)
+                    one_over_v_slc = self.one_over_v[slc]
+                    cterm = one_over_v_slc * (d2*self.one_minus_2u_minus_u_squared_over_v[slc] -
+                                d*d*(self.one_over_v_times_one_minus_2u_minus_u_squared_over_v[slc] -
+                                     (2 + 2*self.u_times_one_over_v[slc] + self.u_u_one_over_v[slc]*one_over_v_slc)))
+                    self.curv[xpos] += 0.5 * cterm[trust].sum()
 
     def _accumulate_Nabc_derivatives(self):
         if not self.params.refiner.refine_Nabc:
@@ -1405,6 +1772,9 @@ class StageTwoRefiner(BaseRefiner):
             p = Mod.PAR.Nabc[i_n]
             d = p.get_deriv(self.x[p.xpos],  self.dNabc[i_n])
             self.grad[p.xpos] += self._grad_accumulate(d)
+            if self.calc_curvatures:
+                d2 = p.get_second_deriv(self.x[p.xpos], self.dNabc[i_n], self.d2Nabc[i_n])
+                self.curv[p.xpos] += self._curv_accumulate(d, d2)
 
     def _accumulate_Ndef_derivatives(self):
         if not self.params.refiner.refine_Ndef:
@@ -1414,6 +1784,53 @@ class StageTwoRefiner(BaseRefiner):
             p = Mod.PAR.Ndef[i_n]
             d = p.get_deriv(self.x[p.xpos], self.dNdef[i_n])
             self.grad[p.xpos] += self._grad_accumulate(d)
+            if self.calc_curvatures:
+                d2 = p.get_second_deriv(self.x[p.xpos], self.dNdef[i_n], self.d2Ndef[i_n])
+                self.curv[p.xpos] += self._curv_accumulate(d, d2)
+
+    def _accumulate_RotXYZ_derivatives(self):
+        if not self.params.refiner.refine_RotXYZ:
+            return
+        Mod = self.Modelers[self._i_shot]
+        for i_r in range(3):
+            p = Mod.PAR.RotXYZ_params[i_r]
+            d = p.get_deriv(self.x[p.xpos], self.dRotXYZ[i_r])
+            self.grad[p.xpos] += self._grad_accumulate(d)
+            if self.calc_curvatures:
+                d2 = p.get_second_deriv(self.x[p.xpos], self.dRotXYZ[i_r], self.d2RotXYZ[i_r])
+                self.curv[p.xpos] += self._curv_accumulate(d, d2)
+
+    def _accumulate_ucell_derivatives(self):
+        if not self.params.refiner.refine_ucell:
+            return
+        Mod = self.Modelers[self._i_shot]
+        for i_uc in range(self.n_ucell_param):
+            p = Mod.PAR.ucell[i_uc]
+            d = p.get_deriv(self.x[p.xpos], self.dUcell[i_uc])
+            self.grad[p.xpos] += self._grad_accumulate(d)
+
+    def _accumulate_panel_derivatives(self):
+        if not self.params.refiner.refine_panel_geom:
+            return
+        MOD = self.Modelers[self._i_shot]
+        names = "RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"
+        for group_id in MOD.unique_panel_group_ids:
+            for pixel_rng in MOD.group_id_slices[group_id]:
+                trusted_pixels = MOD.all_trusted[pixel_rng]
+                for i_name, name in enumerate(names):
+                    par_name = "group%d_%s" % (group_id, name)
+                    det_param = self.panel_params[par_name]
+                    if det_param.fix:
+                        continue
+                    if self._panel_derivs[i_name] is None:
+                        continue
+                    pixderivs = self._panel_derivs[i_name][pixel_rng][trusted_pixels]
+                    pixderivs = det_param.get_deriv(self.x[det_param.xpos], pixderivs)
+                    # Use common_grad_term for panel derivatives (same target function)
+                    gterm = self.common_grad_term[pixel_rng][trusted_pixels]
+                    freq = MOD.all_freq[pixel_rng][trusted_pixels]
+                    g_accum = 0.5 * (pixderivs * gterm / freq).sum()
+                    self.grad[det_param.xpos] += g_accum
 
     def _spot_scale_derivatives(self, return_derivatives=False):
         if not self.refine_crystal_scale:
@@ -1438,10 +1855,14 @@ class StageTwoRefiner(BaseRefiner):
         if not self.params.refiner.refine_Bfactor:
             return
         p = self.Modelers[self._i_shot].PAR.B
-        d = self.scale_fac * self._dB
-        d = p.get_deriv(self.x[p.xpos], d)
+        d_raw = self.scale_fac * self._dB
+        d = p.get_deriv(self.x[p.xpos], d_raw)
         grad_val = self._grad_accumulate(d)
         self.grad[p.xpos] += grad_val
+        if self.calc_curvatures:
+            d2_raw = self.scale_fac * self._d2B
+            d2 = p.get_second_deriv(self.x[p.xpos], d_raw, d2_raw)
+            self.curv[p.xpos] += self._curv_accumulate(d, d2)
         if self._i_shot == self.shot_ids[0] and self.iterations < 2:
             print("STAGE2_BFACTOR: shot=%d B=%.4f xpos=%d grad=%.6e dB_range=[%.4e,%.4e]"
                   % (self._i_shot, self.b_fac, p.xpos, grad_val,
@@ -1461,12 +1882,212 @@ class StageTwoRefiner(BaseRefiner):
         if COMM.rank==0:
             LOGGER.info("F=%10.7e, sigmaZ: mean=%f, median=%f" % (self.target_functional, np.mean(self._reduced_all_sigZ), np.median(self._reduced_all_sigZ) ))
 
+    def _get_curvature_block_indices(self):
+        """Build dict mapping block name -> array of x-vector indices for ALL shots (global)."""
+        blocks = {}
+        npp = self.n_params_per_shot
+        scale_idx, b_idx, nabc_idx, ndef_idx, rot_idx, ucell_idx = [], [], [], [], [], []
+        # Use shot_mapping (global across all ranks) not shot_ids (local to this rank)
+        for sid, i_shot in self.shot_mapping.items():
+            base = i_shot * npp
+            scale_idx.append(base)
+            b_idx.append(base + 1)
+            nabc_idx.extend([base+2, base+3, base+4])
+            ndef_idx.extend([base+5, base+6, base+7])
+            rot_idx.extend([base+8, base+9, base+10])
+            if self.params.refiner.refine_ucell:
+                for i_uc in range(self.n_ucell_param):
+                    ucell_idx.append(base + N_PARAM_PER_SHOT_BASE + i_uc)
+        blocks["Scale"] = np.array(scale_idx, dtype=int)
+        blocks["B"] = np.array(b_idx, dtype=int)
+        blocks["Nabc"] = np.array(nabc_idx, dtype=int)
+        blocks["Ndef"] = np.array(ndef_idx, dtype=int)
+        blocks["RotXYZ"] = np.array(rot_idx, dtype=int)
+        if ucell_idx:
+            blocks["Ucell"] = np.array(ucell_idx, dtype=int)
+        blocks["Fcell"] = np.arange(self.fcell_xstart, self.fcell_xstart + self.n_global_fcell, dtype=int)
+        if self.num_regions > 0:
+            blocks["Gain"] = np.arange(self.regions_xstart, self.regions_xstart + self.num_regions, dtype=int)
+        if self.params.refiner.refine_panel_geom and self.n_panel_groups > 0:
+            blocks["Panel"] = np.arange(self.panel_xstart, self.panel_xstart + self.n_panel_groups * 6, dtype=int)
+        return blocks
+
+    def _print_curvature_diagnostics(self, curv_np, blocks, label=""):
+        """Print per-block curvature statistics (rank 0 only)."""
+        if COMM.rank != 0:
+            return
+        prefix = "CURV_DIAG eval=%d%s" % (self.target_eval_count, (" "+label) if label else "")
+        n_total = len(curv_np)
+        n_neg = (curv_np < 0).sum()
+        n_zero = (curv_np == 0).sum()
+        pos = curv_np[curv_np > 0]
+        msg = ["%s: total=%d neg=%d(%.1f%%) zero=%d" %
+               (prefix, n_total, n_neg, 100.*n_neg/max(n_total,1), n_zero)]
+        if len(pos):
+            msg.append("  pos_range=[%.3e, %.3e] median=%.3e" % (pos.min(), pos.max(), np.median(pos)))
+        # per-block breakdown
+        for bname, idx in blocks.items():
+            if len(idx) == 0:
+                continue
+            bc = curv_np[idx]
+            n_b = len(bc)
+            neg_b = (bc < 0).sum()
+            pos_b = bc[bc > 0]
+            zero_b = (bc == 0).sum()
+            if n_b == 0:
+                continue
+            line = "  %-6s: n=%-6d neg=%d(%.1f%%) zero=%d" % (bname, n_b, neg_b, 100.*neg_b/n_b, zero_b)
+            if len(pos_b):
+                line += " pos_med=%.3e [%.3e,%.3e]" % (np.median(pos_b), pos_b.min(), pos_b.max())
+            if neg_b > 0:
+                neg_vals = bc[bc < 0]
+                line += " neg_med=%.3e [%.3e,%.3e]" % (np.median(neg_vals), neg_vals.min(), neg_vals.max())
+            msg.append(line)
+        print("\n".join(msg), flush=True)
+
+    def _clamp_curvatures(self, curv_np, blocks):
+        """Clamp negative curvatures and floor small ones so they can be used for L-BFGS preconditioning.
+
+        After clamping negatives, applies a global floor so the dynamic range
+        of curvatures doesn't exceed curvature_max_ratio (default 1e4).
+        This prevents blocks with tiny curvatures (e.g. Scale) from getting
+        disproportionately large steps.
+        """
+        mode = self.params.refiner.curvature_clamp
+        neg = curv_np < 0
+        n_neg = neg.sum()
+
+        if mode == "abs":
+            curv_np = np.abs(curv_np)
+
+        elif mode == "median":
+            # Per-block: replace negatives with median of positives
+            for bname, idx in blocks.items():
+                if len(idx) == 0:
+                    continue
+                bc = curv_np[idx]
+                pos = bc > 0
+                neg_b = ~pos & (bc != 0)  # skip zeros (unrefined params)
+                if not neg_b.any():
+                    continue
+                if pos.any():
+                    med = np.median(bc[pos])
+                else:
+                    med = np.median(np.abs(bc[bc != 0])) if (bc != 0).any() else 1.0
+                bc[neg_b] = med
+                curv_np[idx] = bc
+
+            # Fallback: clamp any remaining negatives not in named blocks
+            still_neg = curv_np < 0
+            if still_neg.any():
+                pos_all = curv_np[curv_np > 0]
+                fallback = np.median(pos_all) if len(pos_all) else 1.0
+                curv_np[still_neg] = fallback
+                if COMM.rank == 0:
+                    print("CURV_DIAG: fallback clamped %d remaining negatives -> %.3e"
+                          % (still_neg.sum(), fallback), flush=True)
+
+        # Per-block floor: compress dynamic range WITHIN each block.
+        # Each block's curvatures are floored at block_median / max_ratio.
+        # This preserves intra-block curvature information (e.g. strong vs weak Fcells)
+        # while preventing outlier shots from dominating the step direction.
+        # Cross-block scaling is handled by the curvature magnitudes themselves.
+        max_ratio = self.params.refiner.curvature_max_ratio
+        if max_ratio is not None and max_ratio > 0:
+            for bname, idx in blocks.items():
+                if len(idx) == 0:
+                    continue
+                bc = curv_np[idx]
+                pos = bc > 0
+                pos_vals = bc[pos]
+                if len(pos_vals) == 0:
+                    continue
+                block_med = np.median(pos_vals)
+                block_floor = block_med / max_ratio
+                n_floored = (pos & (bc < block_floor)).sum()
+                bc[pos] = np.maximum(bc[pos], block_floor)
+                curv_np[idx] = bc
+                if COMM.rank == 0 and n_floored > 0:
+                    print("CURV_DIAG: floor[%s] %d/%d below %.3e (med=%.3e, ratio=%.0e)"
+                          % (bname, n_floored, len(pos_vals), block_floor, block_med, max_ratio), flush=True)
+
+        # Neutralize Scale curvatures: replace with Fcell median.
+        # Scale has pathologically small curvatures (~0.05) due to exp parameterization,
+        # causing L-BFGS to overshoot. Setting to Fcell median (~100) gives neutral
+        # preconditioning while keeping all other blocks at physically meaningful values.
+        if self.params.refiner.curvature_neutralize_scale and "Scale" in blocks and "Fcell" in blocks:
+            fcell_pos = curv_np[blocks["Fcell"]]
+            fcell_pos = fcell_pos[fcell_pos > 0]
+            if len(fcell_pos):
+                replacement = np.median(fcell_pos)
+                scale_idx = blocks["Scale"]
+                old_med = np.median(curv_np[scale_idx][curv_np[scale_idx] > 0]) if (curv_np[scale_idx] > 0).any() else 0
+                curv_np[scale_idx] = replacement
+                if COMM.rank == 0:
+                    print("CURV_DIAG: neutralize Scale: %.3e -> %.3e (Fcell median)" % (old_med, replacement), flush=True)
+
+        # Per-block normalization: rescale each block so all have the same median.
+        # Preserves intra-block relative curvatures (strong Fcells vs weak Fcells)
+        # but equalizes inter-block step scaling so no block dominates L-BFGS direction.
+        if self.params.refiner.curvature_normalize:
+            block_meds = {}
+            for bname, idx in blocks.items():
+                if len(idx) == 0:
+                    continue
+                bc = curv_np[idx]
+                pos_vals = bc[bc > 0]
+                if len(pos_vals):
+                    block_meds[bname] = np.median(pos_vals)
+            if block_meds:
+                target = np.median(list(block_meds.values()))
+                if COMM.rank == 0:
+                    parts = ["CURV_DIAG: normalize target=%.3e" % target]
+                for bname, idx in blocks.items():
+                    if bname not in block_meds or block_meds[bname] == 0:
+                        continue
+                    scale = target / block_meds[bname]
+                    bc = curv_np[idx]
+                    bc[bc > 0] *= scale
+                    curv_np[idx] = bc
+                    if COMM.rank == 0:
+                        parts.append("  %s: %.3e -> %.3e (x%.2e)" %
+                                     (bname, block_meds[bname], target, scale))
+                if COMM.rank == 0:
+                    print("\n".join(parts), flush=True)
+
+        return curv_np
+
+    def _verify_diag(self):
+        """Override base _verify_diag (which has stale IPython embed).
+        Sets curvatures to 1000 where gradient=0, asserts positive, inverts for preconditioning."""
+        sel = (self.g != 0)
+        self.d.set_selected(~sel, 1000)
+        assert self.d.select(sel).all_gt(0), \
+            "Negative curvatures remain after clamping (%d of %d)" % (
+                (self.d.select(sel) <= 0).count(True), sel.count(True))
+        self.d = 1. / self.d
+
     def _curvature_analysis(self):
         self.tot_neg_curv = 0
         self.neg_curv_shots = []
         if self.calc_curvatures:
-            self.is_negative_curvature = self.curv.as_numpy_array() < 0
+            curv_np = self.curv.as_numpy_array()
+            self.is_negative_curvature = curv_np < 0
             self.tot_neg_curv = sum(self.is_negative_curvature)
+
+            blocks = self._get_curvature_block_indices()
+
+            # Print diagnostics before clamping
+            self._print_curvature_diagnostics(curv_np, blocks, label="pre-clamp")
+
+            # Apply clamping if enabled
+            clamp_mode = self.params.refiner.curvature_clamp
+            if clamp_mode != "none" and self.tot_neg_curv > 0:
+                curv_np = self._clamp_curvatures(curv_np, blocks)
+                self.curv = flex.double(curv_np)
+                self.tot_neg_curv = 0
+                # Print diagnostics after clamping
+                self._print_curvature_diagnostics(curv_np, blocks, label="post-clamp")
 
         if self.calc_curvatures and not self.use_curvatures:
             if self.tot_neg_curv == 0:

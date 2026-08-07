@@ -1131,9 +1131,19 @@ refiner {
   refine_Ndef = False
     .type = bool
     .help = whether to refine the off-diagonal mosaic domain size parameters during stage2
+  refine_RotXYZ = False
+    .type = bool
+    .help = whether to refine crystal orientation (RotXYZ) during stage2
   refine_Bfactor = False
     .type = bool
     .help = whether to refine per-shot B-factor during stage2
+  refine_ucell = False
+    .type = bool
+    .help = whether to refine unit cell parameters during stage2
+  refine_panel_geom = False
+    .type = bool
+    .help = whether to refine detector panel geometry (rotations + translations) during stage2. \
+            Requires panel_group_file and reference_geom to be set.
   gain_restraint=None
     .type = floats(size=2)
     .help = "if not None, apply a gain restraint to the data"
@@ -1163,6 +1173,25 @@ refiner {
   start_with_curvatures = False
     .type = bool
     .help = whether to try using curvatures in the first iteration
+  curvature_clamp = *none abs median
+    .type = choice
+    .help = how to handle negative curvatures. 'none': wait for all positive (original). \
+            'abs': take absolute value. 'median': replace negatives with median of positives \
+            per parameter block (Scale, B, Nabc, Ndef, RotXYZ, Fcell).
+  curvature_max_ratio = 1e4
+    .type = float
+    .help = per-block intra-block dynamic range limit. Within each block, curvatures below \
+            block_median/max_ratio are floored. Set to None to disable.
+  curvature_normalize = False
+    .type = bool
+    .help = normalize curvatures so all blocks have the same median. Preserves intra-block \
+            relative curvatures but equalizes inter-block scaling. Prevents blocks with \
+            tiny curvatures (e.g. Scale) from dominating the L-BFGS step direction.
+  curvature_neutralize_scale = True
+    .type = bool
+    .help = set Scale (G) curvatures to the Fcell block median instead of the raw value. \
+            Scale has pathologically small curvatures (~0.05) that cause L-BFGS to overshoot. \
+            This neutralizes Scale preconditioning while keeping all other blocks at raw values.
   tradeps = 1e-2
     .type = float
     .help = LBFGS termination parameter  (smaller means minimize for longer)
