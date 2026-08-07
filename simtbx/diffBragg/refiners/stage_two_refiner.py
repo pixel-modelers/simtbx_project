@@ -60,8 +60,8 @@ from simtbx.diffBragg.refiners import BaseRefiner
 from cctbx import miller, sgtbx
 from simtbx.diffBragg.refiners.parameters import RangedParameter
 
-# how many parameters per shot, currently just scale, B-factor (currently ignored), and Ncells abc
-N_PARAM_PER_SHOT = 5
+# how many parameters per shot: scale, B-factor, Ncells abc (Na,Nb,Nc), Ncells def (Nd,Ne,Nf)
+N_PARAM_PER_SHOT = 8
 
 
 class StageTwoRefiner(BaseRefiner):
@@ -238,10 +238,12 @@ class StageTwoRefiner(BaseRefiner):
         self.spot_scale_xpos = {}
         self.Bfactor_xpos = {}
         self.Ncells_xstart = {}
+        self.Ndef_xstart = {}
         for shot_id in self.shot_ids:
             self.spot_scale_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT
             self.Bfactor_xpos[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 1
             self.Ncells_xstart[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 2
+            self.Ndef_xstart[shot_id] = self.shot_mapping[shot_id]*N_PARAM_PER_SHOT + 5
         LOGGER.info("--0 create an Fcell mapping")
         if self.refine_Fcell:
             #idx, data = self.S.D.Fhkl_tuple
@@ -283,6 +285,8 @@ class StageTwoRefiner(BaseRefiner):
         self.D.refine(self._fcell_id)
         if self.params.refiner.refine_Nabc:
             self.D.refine(self._ncells_id)
+        if self.params.refiner.refine_Ndef:
+            self.D.refine(self._ncells_def_id)
         if self.params.refiner.refine_Bfactor:
             self.D.refine(self._bfactor_id)
             print("STAGE2_BFACTOR: B-factor refinement ENABLED (refine_Bfactor=True)", flush=True)
@@ -331,11 +335,16 @@ class StageTwoRefiner(BaseRefiner):
 
     def _setup_ncells_refinement_parameters(self):
         names = "Na", "Nb", "Nc"
+        ndef_names = "Nd", "Ne", "Nf"
         for i_shot in self.shot_ids:
             Ncells_params = self.Modelers[i_shot].PAR.Nabc
             for i_n, p in enumerate(Ncells_params):
                 p.xpos = self.Ncells_xstart[i_shot] + i_n
                 p.name = "%s_shot%d_rank%d" % ( names[i_n], i_shot, COMM.rank)
+            Ndef_params = self.Modelers[i_shot].PAR.Ndef
+            for i_n, p in enumerate(Ndef_params):
+                p.xpos = self.Ndef_xstart[i_shot] + i_n
+                p.name = "%s_shot%d_rank%d" % ( ndef_names[i_n], i_shot, COMM.rank)
             self.Modelers[i_shot].PAR.B.xpos = self.Bfactor_xpos[i_shot]
 
     def _gain_restraints(self):
@@ -582,7 +591,15 @@ class StageTwoRefiner(BaseRefiner):
         return self.Modelers[i_shot].PAR.detz_shift.init
 
     def _get_ncells_def(self, i_shot):
-        vals = [self.Modelers[i_shot].PAR.Ndef[i_N].init for i_N in range(3)]
+        if self.params.refiner.refine_Ndef:
+            vals = []
+            Ndef_p = self.Modelers[i_shot].PAR.Ndef
+            for p in Ndef_p:
+                xval = self.x[p.xpos]
+                val = p.get_val(xval)
+                vals.append(val)
+        else:
+            vals = [self.Modelers[i_shot].PAR.Ndef[i_N].init for i_N in range(3)]
         return vals
 
     def _get_ncells_abc(self, i_shot):
@@ -815,6 +832,9 @@ class StageTwoRefiner(BaseRefiner):
             if self.calc_curvatures:
                 raise NotImplementedError("update the code")
 
+        if self.params.refiner.refine_Ndef:
+            self.dNdef = [d[:npix].as_numpy_array() for d in self.D.get_ncells_def_derivative_pixels()]
+
         if self.params.refiner.refine_Bfactor:
             self._dB = self.D.get_Bfactor_derivative_pixels()[:npix].as_numpy_array()
 
@@ -828,7 +848,9 @@ class StageTwoRefiner(BaseRefiner):
         pass
 
     def _extract_ncells_def_derivative_pixels(self):
-        pass
+        if self.params.refiner.refine_Ndef:
+            npix = len(self.Modelers[self._i_shot].all_data)
+            self.dNdef = [d[:npix].as_numpy_array() for d in self.D.get_ncells_def_derivative_pixels()]
 
     def _extract_mosaic_parameter_m_derivative_pixels(self):
         pass
@@ -855,6 +877,10 @@ class StageTwoRefiner(BaseRefiner):
         if self.params.refiner.refine_Nabc:
             self.dNabc = [self.scale_fac*d for d in self.dNabc]
 
+    def _scale_Ndef_derivative_pixels(self):
+        if self.params.refiner.refine_Ndef:
+            self.dNdef = [self.scale_fac*d for d in self.dNdef]
+
     def _get_per_spot_scale(self, i_shot, i_spot):
         pass
 
@@ -867,6 +893,7 @@ class StageTwoRefiner(BaseRefiner):
         self.model_bragg_spots = self.scale_fac*self._model_pix
         self._scale_Fcell_derivative_pixels()
         self._scale_Nabc_derivative_pixels()
+        self._scale_Ndef_derivative_pixels()
 
     def _update_ucell(self):
         self.D.Bmatrix = self.Modelers[self._i_shot].PAR.Bmatrix
@@ -1047,6 +1074,7 @@ class StageTwoRefiner(BaseRefiner):
             self._spot_scale_derivatives()
             self._Bfactor_derivatives()
             self._accumulate_Nabc_derivatives()
+            self._accumulate_Ndef_derivatives()
             self._Fcell_derivatives()
             self._gain_region_derivatives()
 
@@ -1145,16 +1173,19 @@ class StageTwoRefiner(BaseRefiner):
         scale_idx = shot_indices * N_PARAM_PER_SHOT
         bfac_idx = shot_indices * N_PARAM_PER_SHOT + 1
         nabc_idx = np.concatenate([shot_indices*N_PARAM_PER_SHOT + k for k in (2,3,4)])
+        ndef_idx = np.concatenate([shot_indices*N_PARAM_PER_SHOT + k for k in (5,6,7)])
 
         g_scale = g_np[scale_idx]
         g_bfac = g_np[bfac_idx]
         g_nabc = g_np[nabc_idx]
+        g_ndef = g_np[ndef_idx]
         g_fcell = g_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
         g_gain = g_np[self.regions_xstart : self.regions_xstart + self.num_regions]
 
         x_scale = x_np[scale_idx]
         x_bfac = x_np[bfac_idx]
         x_nabc = x_np[nabc_idx]
+        x_ndef = x_np[ndef_idx]
         x_fcell = x_np[self.fcell_xstart : self.fcell_xstart + self.n_global_fcell]
         x_gain = x_np[self.regions_xstart : self.regions_xstart + self.num_regions]
 
@@ -1167,6 +1198,7 @@ class StageTwoRefiner(BaseRefiner):
         scale_gn2, scale_ginf, scale_xn2, scale_gzero = block_norms(g_scale, x_scale)
         bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero = block_norms(g_bfac, x_bfac)
         nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero = block_norms(g_nabc, x_nabc)
+        ndef_gn2, ndef_ginf, ndef_xn2, ndef_gzero = block_norms(g_ndef, x_ndef)
         fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero = block_norms(g_fcell, x_fcell)
         gain_gn2, gain_ginf, gain_xn2, gain_gzero = block_norms(g_gain, x_gain)
 
@@ -1240,6 +1272,7 @@ class StageTwoRefiner(BaseRefiner):
                 "scale_gn2", "scale_ginf", "scale_xn2", "scale_gzero",
                 "bfac_gn2", "bfac_ginf", "bfac_xn2", "bfac_gzero",
                 "nabc_gn2", "nabc_ginf", "nabc_xn2", "nabc_gzero",
+                "ndef_gn2", "ndef_ginf", "ndef_xn2", "ndef_gzero",
                 "fcell_gn2", "fcell_ginf", "fcell_xn2", "fcell_gzero",
                 "gain_gn2", "gain_ginf", "gain_xn2", "gain_gzero",
                 "neg_v_pix", "neg_lam_pix", "neg_v_shots",
@@ -1263,6 +1296,7 @@ class StageTwoRefiner(BaseRefiner):
                 scale_gn2, scale_ginf, scale_xn2, scale_gzero,
                 bfac_gn2, bfac_ginf, bfac_xn2, bfac_gzero,
                 nabc_gn2, nabc_ginf, nabc_xn2, nabc_gzero,
+                ndef_gn2, ndef_ginf, ndef_xn2, ndef_gzero,
                 fcell_gn2, fcell_ginf, fcell_xn2, fcell_gzero,
                 gain_gn2, gain_ginf, gain_xn2, gain_gzero,
                 neg_v, neg_lam, neg_v_shots,
@@ -1370,6 +1404,15 @@ class StageTwoRefiner(BaseRefiner):
         for i_n in range(3):
             p = Mod.PAR.Nabc[i_n]
             d = p.get_deriv(self.x[p.xpos],  self.dNabc[i_n])
+            self.grad[p.xpos] += self._grad_accumulate(d)
+
+    def _accumulate_Ndef_derivatives(self):
+        if not self.params.refiner.refine_Ndef:
+            return
+        Mod = self.Modelers[self._i_shot]
+        for i_n in range(3):
+            p = Mod.PAR.Ndef[i_n]
+            d = p.get_deriv(self.x[p.xpos], self.dNdef[i_n])
             self.grad[p.xpos] += self._grad_accumulate(d)
 
     def _spot_scale_derivatives(self, return_derivatives=False):

@@ -1128,6 +1128,9 @@ refiner {
   refine_Nabc = False
     .type = bool
     .help = whether to refine the mosaic domain size tensor
+  refine_Ndef = False
+    .type = bool
+    .help = whether to refine the off-diagonal mosaic domain size parameters during stage2
   refine_Bfactor = False
     .type = bool
     .help = whether to refine per-shot B-factor during stage2
