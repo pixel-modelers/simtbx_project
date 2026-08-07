@@ -149,6 +149,7 @@ class StageTwoRefiner(BaseRefiner):
         self._diag_neg_v_shots = 0      # shots with at least one v <= 0 pixel
         self._diag_min_multi_skip = 0   # i_fcell skipped by min_multiplicity
         self._diag_min_multi_skip_pix = 0  # trusted pixel count for skipped i_fcell
+        self._eval_shot_data = []  # per-shot (shot_id, G, B, sigZ, chisq, n_regions) for current eval
 
     def _load_gain_regions(self):
         npan = len(self.S.detector)
@@ -296,6 +297,7 @@ class StageTwoRefiner(BaseRefiner):
             Modeler.i_fcell_slices = self._get_i_fcell_slices(Modeler)
             self.Modelers[sid] = Modeler  # TODO: VERIFY IF THIS IS NECESSARY ?
 
+        self._save_fcell_shot_coupling()
         self._MPI_barrier()
         LOGGER.info("Setup ends!")
 
@@ -395,9 +397,35 @@ class StageTwoRefiner(BaseRefiner):
                                    "per_shoebox_scores_eval%d.csv" % self.target_eval_count)
             with open(outpath, "w", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["shot_id", "i_fcell", "sigZ", "cc", "ntrust", "stage1_modeler"])
+                w.writerow(["shot_id", "i_fcell", "sigZ", "cc", "ntrust", "chisq", "stage1_modeler"])
                 w.writerows(rows)
             LOGGER.info("Saved per-shoebox scores to %s (%d shoeboxes)" % (outpath, len(rows)))
+
+    def _gather_and_save_shot_params(self):
+        """Gather per-shot (G, B, sigZ, chisq, n_regions) from all ranks and save npz every eval."""
+        all_shot_data = COMM.gather(self._eval_shot_data, root=0)
+        gathered = None
+        if self.I_AM_ROOT and all_shot_data is not None and self.output_dir is not None:
+            rows = [r for rank_rows in all_shot_data for r in rank_rows]
+            rows.sort(key=lambda x: x[0])  # sort by shot_id
+            gathered = rows
+            shot_ids = np.array([r[0] for r in rows], dtype=np.int32)
+            G_vals = np.array([r[1] for r in rows])
+            B_vals = np.array([r[2] for r in rows])
+            sigZ_vals = np.array([r[3] for r in rows])
+            chisq_vals = np.array([r[4] for r in rows])
+            n_regions = np.array([r[5] for r in rows], dtype=np.int32)
+            outf = os.path.join(self.output_dir,
+                                "shot_params_eval%d" % self.target_eval_count)
+            np.savez(outf, shot_ids=shot_ids, G=G_vals, B=B_vals,
+                     sigZ=sigZ_vals, chisq=chisq_vals, n_regions=n_regions)
+            LOGGER.info("Saved shot params eval %d: %d shots, "
+                        "G=[%.4f, %.4f] B=[%.4f, %.4f] chisq=[%.2f, %.2f]"
+                        % (self.target_eval_count, len(rows),
+                           G_vals.min(), G_vals.max(),
+                           B_vals.min(), B_vals.max(),
+                           chisq_vals.min(), chisq_vals.max()))
+        return gathered
 
     def _get_i_fcell_slices(self, Modeler):
         """finds the boundaries for each fcell in the 1-D array of per-shot data"""
@@ -480,6 +508,43 @@ class StageTwoRefiner(BaseRefiner):
 
             self.fcell_sigmas_from_i_fcell = self.params.sigmas.Fhkl
             LOGGER.info("DONE make fcell_init")
+
+    def _save_fcell_shot_coupling(self):
+        """Save which shots observe each Fcell (once at setup). MPI-gathered."""
+        local_coupling = {}  # i_fcell -> list of shot_ids on this rank
+        for i_shot in self.shot_ids:
+            MOD = self.Modelers[i_shot]
+            for i_fcell in MOD.unique_i_fcell:
+                local_coupling.setdefault(i_fcell, []).append(i_shot)
+
+        all_coupling = COMM.gather(local_coupling, root=0)
+        if self.I_AM_ROOT and self.output_dir is not None:
+            merged = {}
+            for rank_coupling in all_coupling:
+                for i_fcell, shot_list in rank_coupling.items():
+                    merged.setdefault(i_fcell, []).extend(shot_list)
+            # Save as arrays: i_fcell -> number of shots, and per-fcell shot lists
+            n_fcell = self.n_global_fcell
+            multiplicity = np.zeros(n_fcell, dtype=np.int32)
+            for i_fcell, shots in merged.items():
+                multiplicity[i_fcell] = len(shots)
+            # Save sparse representation: arrays of (i_fcell, shot_ids) pairs
+            fcell_ids = []
+            shot_ids_flat = []
+            for i_fcell in sorted(merged.keys()):
+                for sid in sorted(merged[i_fcell]):
+                    fcell_ids.append(i_fcell)
+                    shot_ids_flat.append(sid)
+            outf = os.path.join(self.output_dir, "fcell_shot_coupling")
+            np.savez(outf, multiplicity=multiplicity,
+                     fcell_ids=np.array(fcell_ids, dtype=np.int32),
+                     shot_ids=np.array(shot_ids_flat, dtype=np.int32))
+            LOGGER.info("Saved Fcell-shot coupling: %d Fcells, %d entries, "
+                        "multiplicity range [%d, %d], median=%.1f"
+                        % (n_fcell, len(fcell_ids),
+                           multiplicity[multiplicity > 0].min() if np.any(multiplicity > 0) else 0,
+                           multiplicity.max(),
+                           np.median(multiplicity[multiplicity > 0]) if np.any(multiplicity > 0) else 0))
 
     def _get_sausage_parameters(self, i_shot):
         pass
@@ -848,6 +913,7 @@ class StageTwoRefiner(BaseRefiner):
         self._diag_neg_v_shots = 0
         self._diag_min_multi_skip = 0
         self._diag_min_multi_skip_pix = 0
+        self._eval_shot_data = []
 
         self.grad = flex.double(self.n_total_params)
         if self.calc_curvatures:
@@ -928,6 +994,8 @@ class StageTwoRefiner(BaseRefiner):
                 modeler_path = ""
                 if hasattr(MOD, 'pandas_table_row') and 'stage1_output_img' in MOD.pandas_table_row.index:
                     modeler_path = str(MOD.pandas_table_row['stage1_output_img'])
+                # Compute per-pixel fterm for chi-sq decomposition
+                fterm_perpix = (self.log2pi + self.log_v + self.u*self.u*self.one_over_v) / MOD.all_freq
                 self._spot_Zscores = []
                 for i_fcell in MOD.unique_i_fcell:
                     for slc in MOD.i_fcell_slices[i_fcell]:
@@ -938,6 +1006,7 @@ class StageTwoRefiner(BaseRefiner):
                         dat_roi = MOD.all_data[slc][trus]
                         mod_roi = self.model_Lambda[slc][trus]
                         roi_sigZ = Z_roi.std() if len(Z_roi) > 1 else np.nan
+                        roi_chisq = float(0.5 * fterm_perpix[slc][trus].sum())
                         # Pearson CC between data and model
                         cc = np.nan
                         if len(dat_roi) > 2:
@@ -949,7 +1018,7 @@ class StageTwoRefiner(BaseRefiner):
                         self._spot_Zscores.append((i_fcell, roi_sigZ))
                         self._per_shoebox_data.append(
                             (self._i_shot, i_fcell, float(roi_sigZ), cc,
-                             int(trus.sum()), modeler_path))
+                             int(trus.sum()), roi_chisq, modeler_path))
                 self._shot_Zscores.append(self._spot_Zscores)
 
             if save_model:
@@ -973,7 +1042,8 @@ class StageTwoRefiner(BaseRefiner):
                         "i_roi": iROI}
                 self._save_model(model_info)
             self._is_trusted = self.Modelers[self._i_shot].all_trusted
-            self.target_functional += self._target_accumulate()
+            shot_chisq = self._target_accumulate()
+            self.target_functional += shot_chisq
             self._spot_scale_derivatives()
             self._Bfactor_derivatives()
             self._accumulate_Nabc_derivatives()
@@ -981,7 +1051,17 @@ class StageTwoRefiner(BaseRefiner):
             self._gain_region_derivatives()
 
             trusted = self.Modelers[self._i_shot].all_trusted
-            self.all_sigZ.append(np.std(self._Zscore[trusted]))
+            shot_sigZ = np.std(self._Zscore[trusted])
+            self.all_sigZ.append(shot_sigZ)
+            MOD = self.Modelers[self._i_shot]
+            self._eval_shot_data.append((
+                self._i_shot,
+                float(self._get_spot_scale(self._i_shot)**2),  # G
+                float(self._get_bfactor(self._i_shot)),        # B
+                float(shot_sigZ),
+                float(shot_chisq),
+                len(MOD.unique_i_fcell),  # n_regions
+            ))
         tshots = time.time()-tshots
         LOGGER.info("Time rank worked on shots=%.4f" % tshots)
         self._MPI_barrier()
@@ -993,6 +1073,9 @@ class StageTwoRefiner(BaseRefiner):
 
         self._gain_restraints()
         self._bfactor_restraints()
+
+        # --- per-shot params (every eval) ---
+        self._gathered_shot_data = self._gather_and_save_shot_params()
 
         # --- per-shot sigZ + per-shoebox scoring ---
         self._save_per_shot_sigZ()
@@ -1119,6 +1202,31 @@ class StageTwoRefiner(BaseRefiner):
         else:
             fcell_min = fcell_max = fcell_mean = np.nan
 
+        # --- Extended diagnostics from gathered shot data ---
+        median_G = std_G = median_B = std_B = np.nan
+        top10_chisq_frac = np.nan
+        n_fcells_changed_gt_10pct = 0
+        if self._gathered_shot_data is not None and len(self._gathered_shot_data) > 0:
+            G_vals = np.array([r[1] for r in self._gathered_shot_data])
+            B_vals = np.array([r[2] for r in self._gathered_shot_data])
+            chisq_vals = np.array([r[4] for r in self._gathered_shot_data])
+            median_G = float(np.median(G_vals))
+            std_G = float(np.std(G_vals))
+            median_B = float(np.median(B_vals))
+            std_B = float(np.std(B_vals))
+            # Top-10% shoebox dominance: fraction of total chi-sq from top 10% of shots
+            if len(chisq_vals) > 0:
+                sorted_chisq = np.sort(chisq_vals)[::-1]
+                n10 = max(1, len(sorted_chisq) // 10)
+                top10_chisq_frac = float(sorted_chisq[:n10].sum() / sorted_chisq.sum()) if sorted_chisq.sum() > 0 else np.nan
+
+        # Fcell change from initial values
+        if (hasattr(self, '_fcell_at_i_fcell') and self._fcell_at_i_fcell is not None
+                and hasattr(self, 'fcell_init_from_i_fcell') and self.fcell_init_from_i_fcell is not None):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rel_change = np.abs(self._fcell_at_i_fcell - self.fcell_init_from_i_fcell) / np.maximum(self.fcell_init_from_i_fcell, 1e-30)
+            n_fcells_changed_gt_10pct = int(np.sum(rel_change > 0.1))
+
         # --- write CSV ---
         if self._diag_csv_file is None and self.output_dir is not None:
             diag_path = os.path.join(self.output_dir, "stage2_diagnostics.csv")
@@ -1140,6 +1248,8 @@ class StageTwoRefiner(BaseRefiner):
                 "fcell_min", "fcell_max", "fcell_mean",
                 "step_norm2", "dd_prev", "dd_new", "armijo", "curv_ratio",
                 "step_scale_n2", "step_fcell_n2",
+                "median_G", "std_G", "median_B", "std_B",
+                "top10_chisq_frac", "n_fcells_changed_gt_10pct",
             ])
 
         if self._diag_csv_writer is not None:
@@ -1161,6 +1271,8 @@ class StageTwoRefiner(BaseRefiner):
                 fcell_min, fcell_max, fcell_mean,
                 step_norm2, dd_prev, dd_new, armijo, curv_ratio,
                 step_scale_n2, step_fcell_n2,
+                median_G, std_G, median_B, std_B,
+                top10_chisq_frac, n_fcells_changed_gt_10pct,
             ])
             self._diag_csv_file.flush()
 
