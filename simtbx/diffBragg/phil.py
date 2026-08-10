@@ -274,6 +274,9 @@ betas
   Ndef = None
     .type = floats(size=3)
     .help = restraint factor for the ncells def
+  cholesky = None
+    .type = floats(size=6)
+    .help = restraint factor for Cholesky factors
   diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint factor for diffuse sigma
@@ -363,6 +366,9 @@ centers
   Ndef = None
     .type = floats(size=3)
     .help = restraint target for Ndef
+  cholesky = None
+    .type = floats(size=6)
+    .help = restraint target for Cholesky factors
   diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint target for diffuse sigma
@@ -493,6 +499,9 @@ sigmas
   Ndef = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity for Ndef
+  cholesky = [1,1,1,1,1,1]
+    .type = floats(size=6)
+    .help = sensitivity for Cholesky factors
   diffuse_sigma = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity for diffuse sigma
@@ -549,6 +558,9 @@ init
   Ndef = [0,0,0]
     .type = floats(size=3)
     .help = init for Ndef
+  cholesky = None
+    .type = floats(size=6)
+    .help = "init for Cholesky factors (L11, L21, L22, L31, L32, L33). If None, initialized from sqrt(Nabc)."
   diffuse_sigma = [.01,.01,.01]
     .type = floats(size=3)
     .help = init diffuse sigma
@@ -585,6 +597,9 @@ mins
   Ndef = [-200,-200,-200]
     .type = floats(size=3)
     .help = min for Ndef
+  cholesky = [-300,-300,-300,-300,-300,-300]
+    .type = floats(size=6)
+    .help = min for Cholesky factors (L11, L21, L22, L31, L32, L33)
   diffuse_sigma = [0,0,0]
     .type = floats(size=3)
     .help = min diffuse sigma
@@ -635,6 +650,9 @@ maxs
   Ndef = [200,200,200]
     .type = floats(size=3)
     .help = max for Ndef
+  cholesky = [300,300,300,300,300,300]
+    .type = floats(size=6)
+    .help = max for Cholesky factors (L11, L21, L22, L31, L32, L33)
   diffuse_sigma = [20,20,20]
     .type = floats(size=3)
     .help = max diffuse sigma
@@ -789,6 +807,24 @@ remove_duplicate_hkl = False
 space_group = None
   .type = str
   .help = space group to refine structure factors in
+  .expert_level = 0
+use_cholesky_Nabc = False
+  .type = bool
+  .help = "If True, parameterize the NABC mosaic domain size matrix via a Cholesky decomposition"
+          "NABC = L^T * L where L is lower-triangular with 6 parameters (L11, L21, L22, L31, L32, L33)."
+          "This guarantees the NABC matrix is positive-definite. When True, the Ndef parameters are"
+          "replaced by the Cholesky factors."
+  .expert_level = 0
+cholesky_bounds_from_Nabc = True
+  .type = bool
+  .help = "When True and use_cholesky_Nabc=True, auto-compute mins/maxs.cholesky from mins/maxs.Nabc."
+          "Diagonal: L_ii in [sqrt(N_min), sqrt(N_max)]. Off-diagonal: [-sqrt(N_max), sqrt(N_max)]"
+          "where N_max is the max of the corresponding Nabc bounds. Set False to use explicit cholesky bounds."
+  .expert_level = 0
+cholesky_unbounded = False
+  .type = bool
+  .help = "When True, Cholesky L params refine with effectively no bounds (±1e6)."
+          "Overrides both cholesky_bounds_from_Nabc and explicit mins/maxs.cholesky."
   .expert_level = 0
 first_n = None
   .type = int
@@ -1013,10 +1049,22 @@ simulator {
       .help = diameter of the beam in mm
     divergence_mrad = 0
       .type = float
-      .help = beam divergence half-angle in milliradians. Models the cone of incident beam directions from focusing optics.
+      .help = beam divergence half-angle in milliradians (isotropic). If divergence_h_mrad or divergence_v_mrad are set, those take precedence.
+    divergence_h_mrad = None
+      .type = float
+      .help = horizontal beam divergence half-angle in milliradians. Overrides divergence_mrad for horizontal.
+    divergence_v_mrad = None
+      .type = float
+      .help = vertical beam divergence half-angle in milliradians. Overrides divergence_mrad for vertical.
     divsteps = 0
       .type = int
-      .help = number of divergence steps per direction (will be squared). Must be even. 0 means no divergence modeling.
+      .help = number of divergence steps per direction. Must be even. 0 means no divergence modeling. Used for both H and V unless divsteps_h/divsteps_v are set.
+    divsteps_h = None
+      .type = int
+      .help = number of horizontal divergence steps. Overrides divsteps for horizontal. Must be even.
+    divsteps_v = None
+      .type = int
+      .help = number of vertical divergence steps. Overrides divsteps for vertical. Must be even.
   }
   detector {
     thick = None

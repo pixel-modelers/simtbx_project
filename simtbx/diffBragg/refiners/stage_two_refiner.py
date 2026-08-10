@@ -1267,6 +1267,18 @@ class StageTwoRefiner(BaseRefiner):
         return out
 
     def _compute_functional_and_gradients(self):
+        # Synchronized termination: all ranks vote whether they're still running.
+        # If any rank has exited lbfgs (set _mpi_stop_flag=True in _drain_mpi_sync),
+        # all remaining ranks also exit. This prevents MPI deadlocks when scitbx.lbfgs
+        # makes different convergence decisions on different ranks.
+        my_running = np.array([0 if getattr(self, '_mpi_stop_flag', False) else 1], dtype='i')
+        n_running = np.zeros(1, dtype='i')
+        COMM.Allreduce(my_running, n_running, op=MPI.SUM)
+        if n_running[0] < COMM.size:
+            LOGGER.info("MPI sync termination: %d/%d ranks still running, exiting"
+                        % (n_running[0], COMM.size))
+            raise BreakBecauseSignal
+
         LOGGER.info(Bcolors.OKBLUE+"BEGIN FUNC GRAD ; Eval %d" % self.target_eval_count+Bcolors.ENDC)
         #if self.verbose:
         #    self._print_iteration_header()
@@ -2294,3 +2306,23 @@ class StageTwoRefiner(BaseRefiner):
 
     def _MPI_barrier(self):
         COMM.barrier()
+
+    def _drain_mpi_sync(self):
+        """After scitbx.lbfgs exits on this rank, participate in Allreduce rounds
+        so that any straggler ranks (still inside _compute_functional_and_gradients)
+        can detect that we've exited and also terminate.
+
+        The Allreduce at the top of _compute_functional_and_gradients votes:
+          running rank sends 1, exited rank sends 0.
+        If n_running < COMM.size, all ranks exit.
+        This drain loop keeps calling Allreduce (sending 0) until all ranks have exited.
+        """
+        self._mpi_stop_flag = True
+        while True:
+            my_running = np.array([0], dtype='i')  # this rank has exited lbfgs
+            n_running = np.zeros(1, dtype='i')
+            COMM.Allreduce(my_running, n_running, op=MPI.SUM)
+            if n_running[0] == 0:
+                break  # all ranks have exited
+            LOGGER.info("MPI drain: %d/%d ranks still running, waiting..."
+                        % (n_running[0], COMM.size))

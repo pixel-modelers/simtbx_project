@@ -672,6 +672,10 @@ class RefineLauncher:
             LOGGER.info("_launcher running optimization")
 
             self.RUC.run(setup=False)
+            # Drain MPI sync: ensure all ranks have exited lbfgs before proceeding.
+            # Prevents deadlock when scitbx.lbfgs converges on some ranks but not others.
+            if hasattr(self.RUC, '_drain_mpi_sync'):
+                self.RUC._drain_mpi_sync()
             LOGGER.info("_launcher done running optimization (exit_reason=%s)" % getattr(self.RUC, 'exit_reason', 'unknown'))
             # Close diagnostics CSV and write manifest
             if hasattr(self.RUC, '_diag_csv_file') and self.RUC._diag_csv_file is not None:
@@ -698,7 +702,10 @@ class RefineLauncher:
                 self.RUC.fix_params_with_negative_curvature = False
                 self.RUC.num_positive_curvatures = 0
                 self.RUC.use_curvatures = True
+                self.RUC._mpi_stop_flag = False  # reset for new lbfgs run
                 self.RUC.run(setup=False)
+                if hasattr(self.RUC, '_drain_mpi_sync'):
+                    self.RUC._drain_mpi_sync()
 
             if self.RUC.hit_break_signal:
                 if self.params.profile:

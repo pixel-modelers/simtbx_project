@@ -466,10 +466,15 @@ class DataModelers:
             self.SIM.D.refine(hopper_utils.ROTX_ID)
             self.SIM.D.refine(hopper_utils.ROTY_ID)
             self.SIM.D.refine(hopper_utils.ROTZ_ID)
-        if P["Nabc0"].refine:
+        use_cholesky = getattr(self.data_modelers[0], 'use_cholesky_Nabc', False)
+        if use_cholesky and "chol_L11" in P and P["chol_L11"].refine:
             self.SIM.D.refine(hopper_utils.NCELLS_ID)
-        if P["Ndef0"].refine:
             self.SIM.D.refine(hopper_utils.NCELLS_ID_OFFDIAG)
+        else:
+            if P["Nabc0"].refine:
+                self.SIM.D.refine(hopper_utils.NCELLS_ID)
+            if P["Ndef0"].refine:
+                self.SIM.D.refine(hopper_utils.NCELLS_ID_OFFDIAG)
         if P["ucell0"].refine:
             for i_ucell in range(num_ucell_p):
                 self.SIM.D.refine(hopper_utils.UCELL_ID_OFFSET + i_ucell)

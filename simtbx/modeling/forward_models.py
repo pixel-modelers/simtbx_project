@@ -298,6 +298,8 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                       show_timings=False,perpixel_wavelen=False,
                       det_thicksteps=None, eta_abc=None, Ncells_def=None,
                       num_phi_steps=1, delta_phi=None, div_mrad=0, divsteps=0,
+                      div_h_mrad=None, div_v_mrad=None,
+                      divsteps_h=None, divsteps_v=None,
                       spindle_axis=None, fudge=1, no_Nabc_scale=False,
                       return_sim=False, spread_data=None,
                       bfactor=0):
@@ -313,7 +315,11 @@ def diffBragg_forward(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
 
     nbBeam = NBbeam()
     nbBeam.divergence_mrad = div_mrad  # / 1e3 * 180 / np.pi
+    nbBeam.divergence_h_mrad = div_h_mrad
+    nbBeam.divergence_v_mrad = div_v_mrad
     nbBeam.divsteps = divsteps
+    nbBeam.divsteps_h = divsteps_h
+    nbBeam.divsteps_v = divsteps_v
     nbBeam.size_mm = beamsize_mm
     nbBeam.unit_s0 = BEAM.get_unit_s0()
     wavelengths = utils.ENERGY_CONV / np.array(energies)

@@ -25,12 +25,40 @@ class NBbeam(object):
     self.spectrum = [(1.8, 1e12)] # angstroms, photons per pulse
     self.unit_s0 = 1, 0, 0  # forward beam direction
     self.polarization_fraction = 1  # defines horizontal and vertical polarization fraction
-    self.divergence_mrad = 0  # set the divergence cone angle
-    self.divsteps = 0  # number of divergence steps, will be squared (one per horizontal, vertical directions)
+    self.divergence_mrad = 0  # isotropic divergence half-angle (used if h/v not set)
+    self.divergence_h_mrad = None  # horizontal divergence half-angle (overrides divergence_mrad)
+    self.divergence_v_mrad = None  # vertical divergence half-angle (overrides divergence_mrad)
+    self.divsteps = 0  # isotropic divergence steps (used if h/v not set)
+    self.divsteps_h = None  # horizontal divergence steps (overrides divsteps)
+    self.divsteps_v = None  # vertical divergence steps (overrides divsteps)
     self.size_mm = 0.001 # beam spot size
     self._undo_nanoBragg_norm_by_nbeams = True # we undo it by default
     self.prev_xray_beams = None  # used to cache most recent xray_beams property for efficiency
-    self.num_div_angles_within_cone = 0  # used to count how manydivergence angles we sample within the cone of divergence
+    self.num_div_angles_within_cone = 0  # used to count how many divergence angles we sample within the cone
+
+  def _effective_h_mrad(self):
+    """Effective horizontal divergence half-angle in mrad."""
+    if self.divergence_h_mrad is not None:
+      return self.divergence_h_mrad
+    return self.divergence_mrad
+
+  def _effective_v_mrad(self):
+    """Effective vertical divergence half-angle in mrad."""
+    if self.divergence_v_mrad is not None:
+      return self.divergence_v_mrad
+    return self.divergence_mrad
+
+  def _effective_divsteps_h(self):
+    """Effective number of horizontal divergence steps."""
+    if self.divsteps_h is not None:
+      return self.divsteps_h
+    return self.divsteps
+
+  def _effective_divsteps_v(self):
+    """Effective number of vertical divergence steps."""
+    if self.divsteps_v is not None:
+      return self.divsteps_v
+    return self.divsteps
 
   @property
   def divsteps(self):
@@ -43,13 +71,49 @@ class NBbeam(object):
     self._divsteps = val
 
   @property
+  def divsteps_h(self):
+    return self._divsteps_h
+
+  @divsteps_h.setter
+  def divsteps_h(self, val):
+    if val is not None and val > 0:
+      assert val % 2 == 0, "divsteps_h must be even"
+    self._divsteps_h = val
+
+  @property
+  def divsteps_v(self):
+    return self._divsteps_v
+
+  @divsteps_v.setter
+  def divsteps_v(self, val):
+    if val is not None and val > 0:
+      assert val % 2 == 0, "divsteps_v must be even"
+    self._divsteps_v = val
+
+  @property
   def divergences(self):
-    divrange = self.divergence_mrad/1000.
-    if self.divsteps==0:
-      return [(0,0)]
+    dsh = self._effective_divsteps_h()
+    dsv = self._effective_divsteps_v()
+    if dsh == 0 and dsv == 0:
+      return [(0, 0)]
+
+    h_mrad = self._effective_h_mrad()
+    v_mrad = self._effective_v_mrad()
+    h_range = h_mrad / 1000.  # convert mrad to rad
+    v_range = v_mrad / 1000.
+
+    # Build separate grids for H and V
+    if dsh > 0 and h_range > 0:
+      h_divs = np.arange(0, h_range + 1e-7, h_range / dsh) - h_range / 2
     else:
-      all_divs = np.arange(0, divrange+1e-7, divrange / self.divsteps) - divrange / 2
-      return [(hdiv, vdiv) for vdiv in all_divs for hdiv in all_divs]
+      h_divs = np.array([0.0])
+
+    if dsv > 0 and v_range > 0:
+      v_divs = np.arange(0, v_range + 1e-7, v_range / dsv) - v_range / 2
+    else:
+      v_divs = np.array([0.0])
+
+    return [(hdiv, vdiv) for vdiv in v_divs for hdiv in h_divs]
 
   @property
   def size_mm(self):
@@ -108,6 +172,10 @@ class NBbeam(object):
     polar_vector = np.cross(beam_vector, vert_vector)
     polar_vector /= np.linalg.norm(polar_vector)
 
+    # Effective half-angles in radians for elliptical cutoff
+    h_half = self._effective_h_mrad() / 1000. / 2.
+    v_half = self._effective_v_mrad() / 1000. / 2.
+
     self.num_div_angles_within_cone = 0
     beams = []
     for hdiv, vdiv in divs:
@@ -117,8 +185,19 @@ class NBbeam(object):
       if hdiv == 0 and vdiv == 0:
         assert np.allclose(div_ang, 0)
         assert np.allclose(unit_s0, nominal_beam.get_unit_s0())
-      if div_ang > 1.1*(self.divergence_mrad / 1000. / 2.):
-        continue
+
+      # Elliptical cutoff: (hdiv/h_half)^2 + (vdiv/v_half)^2 <= 1.1^2
+      if h_half > 0 and v_half > 0:
+        ellip = (hdiv / h_half)**2 + (vdiv / v_half)**2
+        if ellip > 1.1**2:
+          continue
+      elif h_half > 0:
+        if abs(hdiv) > 1.1 * h_half:
+          continue
+      elif v_half > 0:
+        if abs(vdiv) > 1.1 * v_half:
+          continue
+
       self.num_div_angles_within_cone += 1
       for wavelen, flux in self.spectrum:
         beam = deepcopy(nominal_beam)

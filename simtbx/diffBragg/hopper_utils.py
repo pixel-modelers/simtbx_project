@@ -927,6 +927,8 @@ class DataModeler:
                 self.params.init.Nabc = tuple(best.ncells.values[0])
             if "ncells_def" in best_cols:
                 self.params.init.Ndef = tuple(best.ncells_def.values[0])
+            # Clear init.cholesky so per-shot Nabc/Ndef recovery is used
+            self.params.init.cholesky = None
 
             # scale factor
             if "spot_scales" in best_cols:
@@ -1011,22 +1013,92 @@ class DataModeler:
 
         if self.params.init.random_Nabcs is not None:
             init.Nabc = np.random.choice(self.params.init.random_Nabcs, replace=True, size=3)
+
+        self.use_cholesky_Nabc = getattr(self.params, 'use_cholesky_Nabc', False)
+
+        if self.use_cholesky_Nabc:
+            # Cholesky mode: parameterize NABC = L^T * L with 6 lower-triangular elements
+            if init.cholesky is not None:
+                chol_init = list(init.cholesky)
+            elif any(v != 0 for v in init.Ndef):
+                # Warm-start: recover L from saved Nabc (diagonal) and Ndef (off-diagonal)
+                Na, Nb, Nc = init.Nabc
+                Nd, Ne, Nf = init.Ndef
+                L11 = np.sqrt(max(Na, 1e-12))
+                L21 = Nd / L11
+                L22_sq = Nb - L21**2
+                L22 = np.sqrt(max(L22_sq, 1e-12))
+                L31 = Nf / L11
+                L32 = (Ne - L21 * L31) / L22 if L22 > 1e-12 else 0
+                L33_sq = Nc - L31**2 - L32**2
+                L33 = np.sqrt(max(L33_sq, 1e-12))
+                chol_init = [L11, L21, L22, L31, L32, L33]
+            else:
+                # Fresh start: diagonal only
+                chol_init = [np.sqrt(init.Nabc[0]), 0, np.sqrt(init.Nabc[1]),
+                             0, 0, np.sqrt(init.Nabc[2])]
+
+            if getattr(self.params, 'cholesky_unbounded', False):
+                chol_mins = [-1e6]*6
+                chol_maxs = [1e6]*6
+            elif getattr(self.params, 'cholesky_bounds_from_Nabc', True):
+                Na_min, Nb_min, Nc_min = mins.Nabc
+                Na_max, Nb_max, Nc_max = maxs.Nabc
+                chol_mins = [0]*6
+                chol_maxs = [0]*6
+                chol_mins[0] = np.sqrt(max(0, Na_min))
+                chol_maxs[0] = np.sqrt(Na_max)
+                chol_mins[1] = -np.sqrt(Nb_max)
+                chol_maxs[1] = np.sqrt(Nb_max)
+                chol_mins[2] = np.sqrt(max(0, Nb_min)) * 0.1
+                chol_maxs[2] = np.sqrt(Nb_max)
+                chol_mins[3] = -np.sqrt(Nc_max)
+                chol_maxs[3] = np.sqrt(Nc_max)
+                chol_mins[4] = -np.sqrt(Nc_max)
+                chol_maxs[4] = np.sqrt(Nc_max)
+                chol_mins[5] = np.sqrt(max(0, Nc_min)) * 0.1
+                chol_maxs[5] = np.sqrt(Nc_max)
+            else:
+                chol_mins = list(mins.cholesky)
+                chol_maxs = list(maxs.cholesky)
+
+            chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+            for ii in range(6):
+                p = ParameterType(init=chol_init[ii], sigma=sigma.cholesky[ii],
+                                  minval=chol_mins[ii], maxval=chol_maxs[ii],
+                                  fix=fix.Nabc,
+                                  name=chol_names[ii],
+                                  center=centers.cholesky[ii] if centers.cholesky is not None else None,
+                                  beta=betas.cholesky[ii] if betas.cholesky is not None else None)
+                P.add(p)
+            # Fixed placeholders for Nabc/Ndef (code elsewhere reads these)
+            for ii in range(3):
+                p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
+                                  minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
+                                  fix=True, name="Nabc%d" % (ii,))
+                P.add(p)
+                p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
+                                  minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
+                                  fix=True, name="Ndef%d" % (ii,))
+                P.add(p)
+        else:
+            for ii in range(3):
+                # Mosaic domain tensor
+                p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
+                                  minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
+                                  fix=fix_Nabc[ii], name="Nabc%d" % (ii,),
+                                  center=centers.Nabc[ii] if centers.Nabc is not None else None,
+                                  beta=betas.Nabc[ii] if betas.Nabc is not None else None)
+                P.add(p)
+
+                p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
+                                  minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
+                                  fix=fix.Ndef, name="Ndef%d" % (ii,),
+                                  center=centers.Ndef[ii] if centers.Ndef is not None else None,
+                                  beta=betas.Ndef[ii] if betas.Ndef is not None else None)
+                P.add(p)
+
         for ii in range(3):
-            # Mosaic domain tensor
-            p = ParameterTypes[types.Nabc](init=init.Nabc[ii], sigma=sigma.Nabc[ii],
-                              minval=mins.Nabc[ii], maxval=maxs.Nabc[ii],
-                              fix=fix_Nabc[ii], name="Nabc%d" % (ii,),
-                              center=centers.Nabc[ii] if centers.Nabc is not None else None,
-                              beta=betas.Nabc[ii] if betas.Nabc is not None else None)
-            P.add(p)
-
-            p = ParameterType(init=init.Ndef[ii], sigma=sigma.Ndef[ii],
-                              minval=mins.Ndef[ii], maxval=maxs.Ndef[ii],
-                              fix=fix.Ndef, name="Ndef%d" % (ii,),
-                              center=centers.Ndef[ii] if centers.Ndef is not None else None,
-                              beta=betas.Ndef[ii] if betas.Ndef is not None else None)
-            P.add(p)
-
             # diffuse gamma and sigma
             p = ParameterTypes[types.diffuse_gamma](init=init.diffuse_gamma[ii], sigma=sigma.diffuse_gamma[ii],
                               minval=mins.diffuse_gamma[ii], maxval=maxs.diffuse_gamma[ii],
@@ -1405,14 +1477,18 @@ class DataModeler:
                 SIM.D.refine(ROTX_ID)
                 SIM.D.refine(ROTY_ID)
                 SIM.D.refine(ROTZ_ID)
-            if self.P["Nabc0"].refine:
+            if getattr(self, 'use_cholesky_Nabc', False) and "chol_L11" in self.P and self.P["chol_L11"].refine:
                 SIM.D.refine(NCELLS_ID)
+                SIM.D.refine(NCELLS_ID_OFFDIAG)
+            else:
+                if self.P["Nabc0"].refine:
+                    SIM.D.refine(NCELLS_ID)
+                if self.P["Ndef0"].refine:
+                    SIM.D.refine(NCELLS_ID_OFFDIAG)
             for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
                 pname = f"group0_{name}"
                 if pname in self.P and self.P[pname].refine:
                     SIM.D.refine(db_id)
-            if self.P["Ndef0"].refine:
-                SIM.D.refine(NCELLS_ID_OFFDIAG)
             if self.P["ucell0"].refine:
                 for i_ucell in range(len(self.ucell_man.variables)):
                     SIM.D.refine(UCELL_ID_OFFSET + i_ucell)
@@ -2083,18 +2159,34 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
 
     # Mosaic block
     Nabc_params = [Mod.P["Nabc%d" % (i_n,)] for i_n in range(3)]
-    Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
-    if SIM.D.isotropic_ncells:
-        Nb = Na
-        Nc = Na
-    SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
-
     Ndef_params = [Mod.P["Ndef%d" % (i_n,)] for i_n in range(3)]
-    Nd, Ne, Nf = [n_param.get_val(x[n_param.xpos]) for n_param in Ndef_params]
-    if SIM.D.isotropic_ncells:
-        Ne = Nd
-        Nf = Nd
-    SIM.D.Ncells_def = Nd, Ne, Nf
+
+    use_cholesky = getattr(Mod, 'use_cholesky_Nabc', False)
+    chol_params = None
+    if use_cholesky:
+        chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+        chol_params = [Mod.P[n] for n in chol_names]
+        L11, L21, L22, L31, L32, L33 = [p.get_val(x[p.xpos]) for p in chol_params]
+        Na = L11*L11
+        Nb = L21*L21 + L22*L22
+        Nc = L31*L31 + L32*L32 + L33*L33
+        Nd = L11*L21
+        Ne = L21*L31 + L22*L32
+        Nf = L11*L31
+        SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
+        SIM.D.Ncells_def = Nd, Ne, Nf
+    else:
+        Na, Nb, Nc = [n_param.get_val(x[n_param.xpos]) for n_param in Nabc_params]
+        if SIM.D.isotropic_ncells:
+            Nb = Na
+            Nc = Na
+        SIM.D.set_ncells_values(tuple([Na, Nb, Nc]))
+
+        Nd, Ne, Nf = [n_param.get_val(x[n_param.xpos]) for n_param in Ndef_params]
+        if SIM.D.isotropic_ncells:
+            Ne = Nd
+            Nf = Nd
+        SIM.D.Ncells_def = Nd, Ne, Nf
 
     # diffuse signals
     if SIM.D.use_diffuse:
@@ -2195,23 +2287,46 @@ def model(x, Mod, SIM,  compute_grad=True, dont_rescale_gradient=False, update_s
                     rot_grad = rot_p.get_deriv(x[rot_p.xpos], rot_grad)
                     J[rot_p.xpos] += rot_grad
 
-            if Nabc_params[0].refine:
+            if use_cholesky and chol_params is not None and chol_params[0].refine:
+                # Cholesky chain-rule: dI/dLij from kernel's dI/dNa..dI/dNf
                 Nabc_grads = SIM.D.get_ncells_derivative_pixels()
-                for i_n in range(3):
-                    N_grad = scale*(Nabc_grads[i_n][:npix].as_numpy_array())
-                    p = Nabc_params[i_n]
-                    N_grad = p.get_deriv(x[p.xpos], N_grad)
-                    J[p.xpos] += N_grad
-                    if SIM.D.isotropic_ncells:
-                        break
-
-            if Ndef_params[0].refine:
                 Ndef_grads = SIM.D.get_ncells_def_derivative_pixels()
-                for i_n in range(3):
-                    N_grad = scale * (Ndef_grads[i_n][:npix].as_numpy_array())
-                    p = Ndef_params[i_n]
-                    N_grad = p.get_deriv(x[p.xpos], N_grad)
-                    J[p.xpos] += N_grad
+                dI_dNa = scale * Nabc_grads[0][:npix].as_numpy_array()
+                dI_dNb = scale * Nabc_grads[1][:npix].as_numpy_array()
+                dI_dNc = scale * Nabc_grads[2][:npix].as_numpy_array()
+                dI_dNd = scale * Ndef_grads[0][:npix].as_numpy_array()
+                dI_dNe = scale * Ndef_grads[1][:npix].as_numpy_array()
+                dI_dNf = scale * Ndef_grads[2][:npix].as_numpy_array()
+                dI_dL = [
+                    dI_dNa * 2*L11 + dI_dNd * L21 + dI_dNf * L31,     # dI/dL11
+                    dI_dNd * L11 + dI_dNb * 2*L21 + dI_dNe * L31,     # dI/dL21
+                    dI_dNb * 2*L22 + dI_dNe * L32,                      # dI/dL22
+                    dI_dNf * L11 + dI_dNe * L21 + dI_dNc * 2*L31,     # dI/dL31
+                    dI_dNe * L22 + dI_dNc * 2*L32,                      # dI/dL32
+                    dI_dNc * 2*L33,                                      # dI/dL33
+                ]
+                for i_chol in range(6):
+                    p = chol_params[i_chol]
+                    chol_grad = p.get_deriv(x[p.xpos], dI_dL[i_chol])
+                    J[p.xpos] += chol_grad
+            else:
+                if Nabc_params[0].refine:
+                    Nabc_grads = SIM.D.get_ncells_derivative_pixels()
+                    for i_n in range(3):
+                        N_grad = scale*(Nabc_grads[i_n][:npix].as_numpy_array())
+                        p = Nabc_params[i_n]
+                        N_grad = p.get_deriv(x[p.xpos], N_grad)
+                        J[p.xpos] += N_grad
+                        if SIM.D.isotropic_ncells:
+                            break
+
+                if Ndef_params[0].refine:
+                    Ndef_grads = SIM.D.get_ncells_def_derivative_pixels()
+                    for i_n in range(3):
+                        N_grad = scale * (Ndef_grads[i_n][:npix].as_numpy_array())
+                        p = Ndef_params[i_n]
+                        N_grad = p.get_deriv(x[p.xpos], N_grad)
+                        J[p.xpos] += N_grad
 
             if SIM.D.use_diffuse:
                 for t in ['gamma','sigma']:
@@ -2322,11 +2437,23 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
     RotXYZ = [Mod.P["RotXYZ%d_xtal%d" % (i, i_xtal)] for i in range(3)]
     rotX, rotY, rotZ = [r.get_val(x[r.xpos]) for r in RotXYZ]
 
-    Nabc = [Mod.P["Nabc%d" % (i, )] for i in range(3)]
-    Na, Nb, Nc = [p.get_val(x[p.xpos]) for p in Nabc]
+    use_cholesky = getattr(Mod, 'use_cholesky_Nabc', False)
+    if use_cholesky and "chol_L11" in Mod.P:
+        chol_names = ["chol_L11", "chol_L21", "chol_L22", "chol_L31", "chol_L32", "chol_L33"]
+        chol_vals = [Mod.P[n].get_val(x[Mod.P[n].xpos]) for n in chol_names]
+        L11, L21, L22, L31, L32, L33 = chol_vals
+        Na = L11*L11
+        Nb = L21*L21 + L22*L22
+        Nc = L31*L31 + L32*L32 + L33*L33
+        Nd = L11*L21
+        Ne = L21*L31 + L22*L32
+        Nf = L11*L31
+    else:
+        Nabc = [Mod.P["Nabc%d" % (i, )] for i in range(3)]
+        Na, Nb, Nc = [p.get_val(x[p.xpos]) for p in Nabc]
 
-    Ndef = [Mod.P["Ndef%d" % (i, )] for i in range(3)]
-    Nd, Ne, Nf = [p.get_val(x[p.xpos]) for p in Ndef]
+        Ndef = [Mod.P["Ndef%d" % (i, )] for i in range(3)]
+        Nd, Ne, Nf = [p.get_val(x[p.xpos]) for p in Ndef]
 
     diff_gam_abc = [Mod.P["diffuse_gamma%d" % i] for i in range(3)]
     diff_gam_a, diff_gam_b, diff_gam_c = [p.get_val(x[p.xpos]) for p in diff_gam_abc]
@@ -2361,6 +2488,8 @@ def get_param_from_x(x, Mod, i_xtal=0, as_dict=False):
         vals = scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor, spec_sigma, beam_x, beam_y
         keys = 'scale', 'rotX', 'rotY', 'rotZ', 'Na', 'Nb', 'Nc', 'Nd', 'Ne', 'Nf', 'diff_gam_a', 'diff_gam_b', 'diff_gam_c', 'diff_sig_a', 'diff_sig_b', 'diff_sig_c', 'a','b','c','al','be','ga', 'detz', 'gonio_angle', 'Bfactor', 'spec_sigma', 'beam_x', 'beam_y'
         param_dict = dict(zip(keys, vals))
+        if use_cholesky and "chol_L11" in Mod.P:
+            param_dict['cholesky'] = chol_vals
         return param_dict
     else:
         return scale, rotX, rotY, rotZ, Na, Nb, Nc, Nd, Ne, Nf, diff_gam_a, diff_gam_b, diff_gam_c, diff_sig_a, diff_sig_b, diff_sig_c, a,b,c,al,be,ga, detz, gonio_angle, Bfactor, spec_sigma, beam_x, beam_y
@@ -2454,6 +2583,7 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
         # so we dont waste time computing them
         _compute_grad = False
         SIM.D.fix(NCELLS_ID)
+        SIM.D.fix(NCELLS_ID_OFFDIAG)
         for db_id in PAN_OFS_IDS + PAN_XYZ_IDS:
             SIM.D.fix(db_id)
         SIM.D.fix(ROTX_ID)
@@ -2471,8 +2601,15 @@ def target_func(x, udpate_terms, mod, SIM, compute_grad=True, return_all_zscores
     elif compute_grad:
         # actually compute the gradients
         _compute_grad = True
-        if mod.P["Nabc0"].refine:
+        use_cholesky = getattr(mod, 'use_cholesky_Nabc', False)
+        if use_cholesky and "chol_L11" in mod.P and mod.P["chol_L11"].refine:
             SIM.D.let_loose(NCELLS_ID)
+            SIM.D.let_loose(NCELLS_ID_OFFDIAG)
+        else:
+            if mod.P["Nabc0"].refine:
+                SIM.D.let_loose(NCELLS_ID)
+            if mod.P["Ndef0"].refine:
+                SIM.D.let_loose(NCELLS_ID_OFFDIAG)
         for db_id, name in zip(PAN_OFS_IDS + PAN_XYZ_IDS, ["RotOrth", "RotFast", "RotSlow", "ShiftX", "ShiftY", "ShiftZ"]):
             pname = f"group0_{name}"
             if pname in mod.P and mod.P[pname].refine:
