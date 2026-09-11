@@ -644,6 +644,12 @@ class DataModeler:
                 assert "rlp" in list(refls[0].keys())
             except KeyError:
                 self.no_rlp_info = True
+        # Add miller_index from rlp if missing (e.g. strong spots)
+        if "miller_index" not in list(refls.keys()) and not self.no_rlp_info and self.E.crystal is not None:
+            try:
+                utils.refls_to_hkl(refls, self.E.detector, self.E.beam, self.E.crystal, update_table=True)
+            except Exception:
+                pass
         img_data = utils.image_data_from_expt(self.E)
         img_data /= self.params.refiner.adu_per_photon
         is_trusted = np.ones(img_data.shape, bool)
@@ -1589,7 +1595,9 @@ class DataModeler:
         if save_freq is not None and target.iteration % save_freq==0 and target.iteration> 0:
             xall = target.x0.copy()
             xall[target.vary] = x
-            self.save_up(xall, SIM, rank=self.rank, i_shot=i_shot)
+            iter_offset = getattr(self, '_save_iter_offset', 0)
+            self.save_up(xall, SIM, rank=self.rank, i_shot=i_shot,
+                         iter_num=target.iteration + iter_offset)
         return
 
         rescaled_vals = np.zeros_like(xall)
@@ -1647,7 +1655,8 @@ class DataModeler:
                 save_refl=True,
                 save_sim_info=True,
                 save_traces=True,
-                save_pandas=True, save_expt=True, checker=None):
+                save_pandas=True, save_expt=True, checker=None,
+                iter_num=None):
         """
 
         :param x: l-bfgs refinement parameters (reparameterized, e.g. unbounded)
@@ -1904,9 +1913,14 @@ class DataModeler:
 
         if save_modeler_file:
             rank_imgs_outdir = hopper_io.make_rank_outdir(Modeler.params.outdir, "imgs", rank)
-            modeler_file = os.path.join(rank_imgs_outdir,
-                                        "%s_%s_%d_%d_modeler.npy"
-                                        % (Modeler.params.tag, basename, i_shot, self.exper_idx))
+            if iter_num is not None:
+                modeler_file = os.path.join(rank_imgs_outdir,
+                                            "%s_%s_%d_%d_iter%04d_modeler.npy"
+                                            % (Modeler.params.tag, basename, i_shot, self.exper_idx, iter_num))
+            else:
+                modeler_file = os.path.join(rank_imgs_outdir,
+                                            "%s_%s_%d_%d_modeler.npy"
+                                            % (Modeler.params.tag, basename, i_shot, self.exper_idx))
             np.save(modeler_file, Modeler)
         if save_sim_info:
             spectrum_file = os.path.join(rank_imgs_outdir,

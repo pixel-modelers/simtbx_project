@@ -401,8 +401,11 @@ def add_rlp_column(refls, experiment):
         s0 = np.array([list(experiment.beam.get_unit_s0())]*len(refls))
         q_vecs = 1/wavelen*(s1_norm-s0)
         refls['rlp'] = flex.vec3_double(tuple(map(tuple, q_vecs)))
+    elif "xyzobs.px.value" in keys:
+        # Strong spots: compute rlp from pixel coordinates via refls_to_q
+        refls_to_q(refls, experiment.detector, experiment.beam, update_table=True)
     else:
-        raise KeyError("Need rlp or s1 column in refl table!")
+        raise KeyError("Need rlp, s1, or xyzobs.px.value column in refl table!")
 
 
 def get_roi_deltaQ(refls, delta_Q, experiment, centroid='obs'):

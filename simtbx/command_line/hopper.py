@@ -334,6 +334,8 @@ class Script:
                         x = Modeler.Minimize(x0, SIM, i_shot=i_shot)
 
                 if self.params.perRoi_finish:
+                    # offset iter numbers for per-iteration modeler saves (for movie)
+                    Modeler._save_iter_offset = getattr(Modeler, '_save_iter_offset', 0) + Modeler.target.iteration
                     old_params = deepcopy(self.params)
                     old_P = deepcopy(Modeler.P)
                     # fix all of the refinement variables except for perRoiScale
